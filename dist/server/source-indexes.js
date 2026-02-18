@@ -5,6 +5,7 @@ const mongodb_1 = require("mongodb");
 const mongodb_2 = require("./mongodb");
 const harajScrape_1 = require("./models/harajScrape");
 const yallaMotor_1 = require("./models/yallaMotor");
+const syarah_1 = require("./models/syarah");
 const HARJ_INDEXES = [
     { name: "postDate_desc", key: { postDate: -1 } },
     { name: "item_postDate_desc", key: { "item.postDate": -1 } },
@@ -25,6 +26,17 @@ const YALLA_INDEXES = [
     { name: "adId_asc", key: { adId: 1 } },
     { name: "url_asc", key: { url: 1 } },
     { name: "detail_url_asc", key: { "detail.url": 1 } },
+];
+const SYARAH_INDEXES = [
+    { name: "fetchedAt_desc", key: { fetchedAt: -1 } },
+    { name: "post_id_asc", key: { post_id: 1 } },
+    { name: "id_asc", key: { id: 1 } },
+    { name: "city_asc", key: { city: 1 } },
+    { name: "brand_asc", key: { brand: 1 } },
+    { name: "model_asc", key: { model: 1 } },
+    { name: "year_desc", key: { year: -1 } },
+    { name: "mileage_km_asc", key: { mileage_km: 1 } },
+    { name: "price_cash_desc", key: { price_cash: -1 } },
 ];
 function shouldWarmupIndexes() {
     const value = (process.env.SOURCE_INDEX_WARMUP ?? "true").trim().toLowerCase();
@@ -47,13 +59,19 @@ async function createIndexesSafely(collection, specs) {
 }
 async function warmupSourceIndexes() {
     const db = await (0, mongodb_2.getMongoDb)();
-    const haraj = (0, harajScrape_1.getHarajScrapeCollection)(db);
+    const harajPrimary = (0, harajScrape_1.getHarajScrapeCollection)(db);
+    const harajCars = (0, harajScrape_1.getCarsHarajCollection)(db);
     const yallaLegacy = (0, yallaMotor_1.getYallaMotorCollection)(db);
     const yallaUsed = (0, yallaMotor_1.getYallaUsedCollection)(db);
+    const yallaNewCars = (0, yallaMotor_1.getYallaNewCarsCollection)(db);
+    const syarah = (0, syarah_1.getSyarahCollection)(db);
     await Promise.all([
-        createIndexesSafely(haraj, HARJ_INDEXES),
+        createIndexesSafely(harajPrimary, HARJ_INDEXES),
+        createIndexesSafely(harajCars, HARJ_INDEXES),
         createIndexesSafely(yallaLegacy, YALLA_INDEXES),
         createIndexesSafely(yallaUsed, YALLA_INDEXES),
+        createIndexesSafely(yallaNewCars, YALLA_INDEXES),
+        createIndexesSafely(syarah, SYARAH_INDEXES),
     ]);
 }
 function triggerSourceIndexWarmup() {

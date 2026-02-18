@@ -15,6 +15,11 @@ import {
   listYallaMotors,
   type YallaMotorListQuery,
 } from "@/server/controllers/yallaMotorController";
+import {
+  getSyarahById,
+  listSyarahs,
+  type SyarahListQuery,
+} from "@/server/controllers/syarahController";
 import { applyContextCookies } from "@/server/auth-tracking/context";
 import { enforceGuestAccess } from "@/server/auth-tracking/service";
 
@@ -62,6 +67,10 @@ function parseCarsSourcesQuery(req: Request): CarsSourcesListQuery {
     ...parseHarajLikeQuery(req),
     sources: parseSources(readQueryString(req, "sources")),
   };
+}
+
+function parseSyarahQuery(req: Request): SyarahListQuery {
+  return parseHarajLikeQuery(req) as SyarahListQuery;
 }
 
 @Controller()
@@ -132,6 +141,37 @@ export class SourcesController {
     applyContextCookies(res, guard.context);
 
     const doc = await getYallaMotorById(id);
+    if (!doc) {
+      res.status(404);
+      return { error: "Not found" };
+    }
+    return doc;
+  }
+
+  @Get("syarah-scrape")
+  async listSyarahsRoute(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const fields = readQueryString(req, "fields");
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: fields !== "options" && fields !== "modelYears",
+      attemptReason: "syarah_query",
+    });
+    applyContextCookies(res, guard.context);
+    return listSyarahs(parseSyarahQuery(req));
+  }
+
+  @Get("syarah-scrape/:id")
+  async getSyarahByIdRoute(
+    @Param("id") id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: false,
+      attemptReason: "syarah_detail",
+    });
+    applyContextCookies(res, guard.context);
+
+    const doc = await getSyarahById(id);
     if (!doc) {
       res.status(404);
       return { error: "Not found" };

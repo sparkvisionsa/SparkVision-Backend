@@ -1,5 +1,8 @@
 import type { Collection, Db } from "mongodb";
 
+export const HARAJ_SCRAPE_COLLECTION = "harajScrape";
+export const CARS_HARAJ_COLLECTION = "CarsHaraj";
+
 export interface HarajScrapeDoc {
   [key: string]: unknown;
   _id: string;
@@ -51,5 +54,9 @@ export interface HarajScrapeDoc {
 }
 
 export function getHarajScrapeCollection(db: Db): Collection<HarajScrapeDoc> {
-  return db.collection<HarajScrapeDoc>("harajScrape");
+  return db.collection<HarajScrapeDoc>(HARAJ_SCRAPE_COLLECTION);
+}
+
+export function getCarsHarajCollection(db: Db): Collection<HarajScrapeDoc> {
+  return db.collection<HarajScrapeDoc>(CARS_HARAJ_COLLECTION);
 }

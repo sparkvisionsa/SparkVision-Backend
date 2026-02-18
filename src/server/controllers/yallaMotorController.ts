@@ -2,9 +2,11 @@ import type { Collection, Document, Filter, Sort } from "mongodb";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "../mongodb";
 import {
+  getYallaNewCarsCollection,
   getYallaMotorCollection,
   getYallaUsedCollection,
   type YallaMotorDoc,
+  YALLA_MOTOR_NEW_CARS_COLLECTION,
   YALLA_MOTOR_USED_COLLECTION,
 } from "../models/yallaMotor";
 import type { HarajScrapeListQuery } from "./harajScrapeController";
@@ -37,15 +39,20 @@ const FAST_PATH_MAX_CANDIDATES = 2_500;
 const FAST_YALLA_PROJECTION = {
   _id: 1,
   adId: 1,
+  type: 1,
   breadcrumbs: 1,
   location: 1,
   cardTitle: 1,
   title: 1,
   cardPriceText: 1,
   price: 1,
+  priceText: 1,
+  priceNumber: 1,
   fetchedAt: 1,
   scrapedAt: 1,
   detailScrapedAt: 1,
+  updatedAt: 1,
+  createdAt: 1,
   url: 1,
   phone: 1,
   images: 1,
@@ -65,12 +72,17 @@ const FAST_YALLA_CANDIDATE_PROJECTION = {
   fetchedAt: 1,
   scrapedAt: 1,
   detailScrapedAt: 1,
+  updatedAt: 1,
+  createdAt: 1,
 } as const;
 
 const YALLA_MILEAGE_KEY_AR = "\u0639\u062f\u062f \u0627\u0644\u0643\u064a\u0644\u0648\u0645\u062a\u0631\u0627\u062a";
 const YALLA_DISTANCE_KEY_AR = "\u0627\u0644\u0645\u0633\u0627\u0641\u0629 \u0627\u0644\u0645\u0642\u0637\u0648\u0639\u0629";
 const YALLA_KILOMETER_TOKEN_AR = "\u0643\u064a\u0644\u0648\u0645\u062a\u0631";
 const YALLA_KILOMETERS_TOKEN_AR = "\u0627\u0644\u0643\u064a\u0644\u0648\u0645\u062a\u0631\u0627\u062a";
+const YALLA_NEW_LABEL_AR = String.fromCharCode(0x062c, 0x062f, 0x064a, 0x062f);
+const YALLA_NEW_FEMININE_LABEL_AR = `${YALLA_NEW_LABEL_AR}${String.fromCharCode(0x0629)}`;
+const YALLA_NEW_CAR_REGEX_PATTERN = `(new|${YALLA_NEW_LABEL_AR}|${YALLA_NEW_FEMININE_LABEL_AR})`;
 
 function toRegex(value: string, options?: { exact?: boolean }) {
   const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -182,7 +194,14 @@ function buildPriceNumericExpression(input: string): Document {
       vars: {
         match: {
           $regexFind: {
-            input: { $ifNull: [input, ""] },
+            input: {
+              $convert: {
+                input: { $ifNull: [input, ""] },
+                to: "string",
+                onError: "",
+                onNull: "",
+              },
+            },
             regex: /[0-9][0-9,.]*/,
           },
         },
@@ -282,6 +301,38 @@ function buildMileageNumericExpression(input: Document): Document {
           },
           null,
         ],
+      },
+    },
+  };
+}
+
+function buildModelYearFromTextExpression(input: Document): Document {
+  const normalized = buildNormalizedDigitExpression({
+    $convert: {
+      input: { $ifNull: [input, ""] },
+      to: "string",
+      onError: "",
+      onNull: "",
+    },
+  });
+
+  return {
+    $let: {
+      vars: {
+        match: {
+          $regexFind: {
+            input: normalized,
+            regex: /(19|20)[0-9]{2}/,
+          },
+        },
+      },
+      in: {
+        $convert: {
+          input: "$$match.match",
+          to: "int",
+          onError: null,
+          onNull: null,
+        },
       },
     },
   };
@@ -395,6 +446,34 @@ function buildNormalizedYallaStages(): Document[] {
     ],
   };
 
+  const descriptionExpression: Document = {
+    $ifNull: [
+      "$detail.description",
+      {
+        $ifNull: [
+          "$description",
+          {
+            $ifNull: ["$descriptionText", "$descriptionHtml"],
+          },
+        ],
+      },
+    ],
+  };
+
+  const priceTextExpression: Document = {
+    $ifNull: [
+      "$cardPriceText",
+      {
+        $ifNull: [
+          "$price",
+          {
+            $ifNull: ["$priceText", "$priceNumber"],
+          },
+        ],
+      },
+    ],
+  };
+
   const usedPriceCompareExpression: Document = {
     min: { $ifNull: ["$priceComparison.marketMinText", "$priceComparison.marketMin"] },
     max: { $ifNull: ["$priceComparison.marketMaxText", "$priceComparison.marketMax"] },
@@ -418,7 +497,17 @@ function buildNormalizedYallaStages(): Document[] {
         $ifNull: [
           "$fetchedAt",
           {
-            $ifNull: ["$scrapedAt", "$detailScrapedAt"],
+            $ifNull: [
+              "$scrapedAt",
+              {
+                $ifNull: [
+                  "$detailScrapedAt",
+                  {
+                    $ifNull: ["$updatedAt", "$createdAt"],
+                  },
+                ],
+              },
+            ],
           },
         ],
       },
@@ -427,6 +516,53 @@ function buildNormalizedYallaStages(): Document[] {
       onNull: null,
     },
   };
+
+  const normalizedTypeExpression: Document = {
+    $toUpper: {
+      $convert: {
+        input: { $ifNull: ["$type", ""] },
+        to: "string",
+        onError: "",
+        onNull: "",
+      },
+    },
+  };
+
+  const breadcrumbSecondSegmentExpression: Document = {
+    $toLower: {
+      $convert: {
+        input: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 1] }, ""] },
+        to: "string",
+        onError: "",
+        onNull: "",
+      },
+    },
+  };
+
+  const isNewCarExpression: Document = {
+    $or: [
+      { $eq: [normalizedTypeExpression, "NEW_CAR"] },
+      {
+        $regexMatch: {
+          input: breadcrumbSecondSegmentExpression,
+          regex: YALLA_NEW_CAR_REGEX_PATTERN,
+        },
+      },
+    ],
+  };
+
+  const legacyModelYearExpression: Document = {
+    $convert: {
+      input: { $arrayElemAt: ["$breadcrumb", 5] },
+      to: "int",
+      onError: null,
+      onNull: null,
+    },
+  };
+
+  const modelYearFromBreadcrumbTitleExpression = buildModelYearFromTextExpression({
+    $arrayElemAt: ["$breadcrumb", 4],
+  });
 
   return [
     {
@@ -440,9 +576,10 @@ function buildNormalizedYallaStages(): Document[] {
             onNull: null,
           },
         },
+        type: "$type",
         breadcrumb: breadcrumbExpression,
-        description: { $ifNull: ["$detail.description", "$description"] },
-        overviewH1: "$detail.overview.h1",
+        description: descriptionExpression,
+        overviewH1: { $ifNull: ["$detail.overview.h1", "$title"] },
         overviewH4: "$detail.overview.h4",
         specs: specsExpression,
         images: imagesExpression,
@@ -455,7 +592,14 @@ function buildNormalizedYallaStages(): Document[] {
           ],
         },
         location: "$location",
-        priceText: { $ifNull: ["$cardPriceText", "$price"] },
+        priceText: {
+          $convert: {
+            input: priceTextExpression,
+            to: "string",
+            onError: null,
+            onNull: null,
+          },
+        },
         fetchedDate: fetchedDateExpression,
         url: { $ifNull: ["$url", "$detail.url"] },
         phone: { $ifNull: ["$phone", ""] },
@@ -473,18 +617,53 @@ function buildNormalizedYallaStages(): Document[] {
       $addFields: {
         id: { $ifNull: ["$adId", { $toString: "$_id" }] },
         tag0: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 0] }, "yallamotor"] },
-        tag1: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 3] }, ""] },
-        tag2: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 4] }, ""] },
+        tag1: {
+          $ifNull: [
+            {
+              $cond: [
+                isNewCarExpression,
+                { $arrayElemAt: ["$breadcrumb", 2] },
+                { $arrayElemAt: ["$breadcrumb", 3] },
+              ],
+            },
+            "",
+          ],
+        },
+        tag2: {
+          $ifNull: [
+            {
+              $cond: [
+                isNewCarExpression,
+                { $arrayElemAt: ["$breadcrumb", 3] },
+                { $arrayElemAt: ["$breadcrumb", 4] },
+              ],
+            },
+            "",
+          ],
+        },
         city: {
-          $ifNull: [{ $arrayElemAt: ["$breadcrumb", 2] }, { $ifNull: ["$location", ""] }],
+          $ifNull: [
+            {
+              $cond: [
+                isNewCarExpression,
+                "$location",
+                { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 2] }, "$location"] },
+              ],
+            },
+            "",
+          ],
         },
         carModelYear: {
-          $convert: {
-            input: { $arrayElemAt: ["$breadcrumb", 5] },
-            to: "int",
-            onError: null,
-            onNull: null,
-          },
+          $ifNull: [
+            {
+              $cond: [
+                isNewCarExpression,
+                modelYearFromBreadcrumbTitleExpression,
+                legacyModelYearExpression,
+              ],
+            },
+            modelYearFromBreadcrumbTitleExpression,
+          ],
         },
         mileage: buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
         priceNumeric: buildPriceNumericExpression("$priceText"),
@@ -501,6 +680,12 @@ function buildCombinedYallaPipeline(): Document[] {
     {
       $unionWith: {
         coll: YALLA_MOTOR_USED_COLLECTION,
+        pipeline: buildNormalizedYallaStages(),
+      },
+    },
+    {
+      $unionWith: {
+        coll: YALLA_MOTOR_NEW_CARS_COLLECTION,
         pipeline: buildNormalizedYallaStages(),
       },
     },
@@ -642,20 +827,42 @@ function getYallaPostDateMs(doc: Record<string, any>) {
   return (
     toEpochMillis(doc.fetchedAt) ??
     toEpochMillis(doc.scrapedAt) ??
-    toEpochMillis(doc.detailScrapedAt)
+    toEpochMillis(doc.detailScrapedAt) ??
+    toEpochMillis(doc.updatedAt) ??
+    toEpochMillis(doc.createdAt)
   );
+}
+
+function parseYallaModelYearFromText(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const normalized = normalizeArabicDigits(String(value));
+  const match = normalized.match(/(19|20)\d{2}/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function isYallaNewCarDoc(doc: Record<string, any>, breadcrumbs: unknown[]) {
+  const type = typeof doc.type === "string" ? doc.type.trim().toUpperCase() : "";
+  if (type === "NEW_CAR") return true;
+
+  const breadcrumbType = typeof breadcrumbs[1] === "string" ? breadcrumbs[1].toLowerCase() : "";
+  return new RegExp(YALLA_NEW_CAR_REGEX_PATTERN).test(breadcrumbType);
 }
 
 function normalizeFastYallaListItem(doc: Record<string, any>, isOptionsMode: boolean) {
   const breadcrumbs = getYallaBreadcrumbs(doc);
   const images = getYallaImages(doc);
   const specs = getYallaSpecs(doc);
+  const isNewCar = isYallaNewCarDoc(doc, breadcrumbs);
   const titleFallback =
     doc.title ?? doc.detail?.overview?.h1 ?? "Untitled";
   const title = doc.cardTitle ?? titleFallback ?? "Untitled";
-  const city = breadcrumbs[2] ?? doc.location ?? "";
-  const priceText = doc.cardPriceText ?? doc.price ?? null;
-  const carModelYear = toNumber(breadcrumbs[5]);
+  const city = isNewCar ? (doc.location ?? "") : (breadcrumbs[2] ?? doc.location ?? "");
+  const priceText = doc.cardPriceText ?? doc.price ?? doc.priceText ?? doc.priceNumber ?? null;
+  const carModelYear =
+    (isNewCar ? parseYallaModelYearFromText(breadcrumbs[4]) : toNumber(breadcrumbs[5])) ??
+    parseYallaModelYearFromText(breadcrumbs[4]);
   const mileage = extractYallaMileage(specs);
   const priceCompareFromDetail = isRecord(doc.detail?.priceCompare)
     ? doc.detail.priceCompare
@@ -671,8 +878,8 @@ function normalizeFastYallaListItem(doc: Record<string, any>, isOptionsMode: boo
     postDate,
     tags: [
       breadcrumbs[0] ?? "yallamotor",
-      breadcrumbs[3] ?? "",
-      breadcrumbs[4] ?? "",
+      isNewCar ? (breadcrumbs[2] ?? "") : (breadcrumbs[3] ?? ""),
+      isNewCar ? (breadcrumbs[3] ?? "") : (breadcrumbs[4] ?? ""),
     ],
     carModelYear,
     mileage,
@@ -901,6 +1108,8 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
     async () => {
     const db = await getMongoDb();
     const legacyCollection = getYallaMotorCollection(db);
+    const usedCollection = getYallaUsedCollection(db);
+    const newCarsCollection = getYallaNewCarsCollection(db);
 
     if (query.fields === "modelYears") {
       const modelYearFilter = buildFilter({
@@ -943,12 +1152,12 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
             COUNT_CACHE_STALE_TTL_MS,
             async () => {
               if (isUnfilteredYallaQuery(query)) {
-                const usedCollection = getYallaUsedCollection(db);
-                const [legacyCount, usedCount] = await Promise.all([
+                const [legacyCount, usedCount, newCarsCount] = await Promise.all([
                   legacyCollection.estimatedDocumentCount(),
                   usedCollection.estimatedDocumentCount(),
+                  newCarsCollection.estimatedDocumentCount(),
                 ]);
-                return legacyCount + usedCount;
+                return legacyCount + usedCount + newCarsCount;
               }
 
               const [countRow] = await legacyCollection
@@ -962,17 +1171,21 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
       const skip = (page - 1) * limit;
       const candidateLimit = skip + limit + (countMode === "none" ? 1 : 0);
       if (candidateLimit <= FAST_PATH_MAX_CANDIDATES) {
-        const usedCollection = getYallaUsedCollection(db);
         const sortDirection: 1 | -1 = query.sort === "oldest" ? 1 : -1;
         const isOptionsMode = query.fields === "options";
 
-        const [legacyCandidates, usedCandidates] = await Promise.all([
+        const [legacyCandidates, usedCandidates, newCarsCandidates] = await Promise.all([
           legacyCollection
             .find({}, { projection: FAST_YALLA_CANDIDATE_PROJECTION })
             .sort({ fetchedAt: sortDirection })
             .limit(candidateLimit)
             .toArray(),
           usedCollection
+            .find({}, { projection: FAST_YALLA_CANDIDATE_PROJECTION })
+            .sort({ scrapedAt: sortDirection })
+            .limit(candidateLimit)
+            .toArray(),
+          newCarsCollection
             .find({}, { projection: FAST_YALLA_CANDIDATE_PROJECTION })
             .sort({ scrapedAt: sortDirection })
             .limit(candidateLimit)
@@ -988,6 +1201,11 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
           ...usedCandidates.map((doc) => ({
             id: doc._id,
             source: "used" as const,
+            postDate: getYallaPostDateMs(doc as Record<string, any>),
+          })),
+          ...newCarsCandidates.map((doc) => ({
+            id: doc._id,
+            source: "newcars" as const,
             postDate: getYallaPostDateMs(doc as Record<string, any>),
           })),
         ].sort((a, b) => {
@@ -1014,8 +1232,11 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
         const usedIds = pageCandidates
           .filter((item) => item.source === "used")
           .map((item) => item.id);
+        const newCarsIds = pageCandidates
+          .filter((item) => item.source === "newcars")
+          .map((item) => item.id);
 
-        const [legacyRows, usedRows] = await Promise.all([
+        const [legacyRows, usedRows, newCarsRows] = await Promise.all([
           legacyIds.length > 0
             ? legacyCollection
                 .find(
@@ -1032,6 +1253,14 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
                 )
                 .toArray()
             : Promise.resolve([]),
+          newCarsIds.length > 0
+            ? newCarsCollection
+                .find(
+                  { _id: { $in: newCarsIds } } as Filter<YallaMotorDoc>,
+                  { projection: FAST_YALLA_PROJECTION }
+                )
+                .toArray()
+            : Promise.resolve([]),
         ]);
         const total = totalPromise ? await totalPromise : -1;
 
@@ -1041,14 +1270,18 @@ export async function listYallaMotors(query: YallaMotorListQuery, options: ListO
         const usedMap = new Map(
           usedRows.map((doc) => [String((doc as Record<string, any>)._id), doc])
         );
+        const newCarsMap = new Map(
+          newCarsRows.map((doc) => [String((doc as Record<string, any>)._id), doc])
+        );
 
         const items = pageCandidates
           .map((candidate) => {
             const key = String(candidate.id ?? "");
-            const doc =
-              candidate.source === "legacy"
-                ? legacyMap.get(key)
-                : usedMap.get(key);
+            const doc = (() => {
+              if (candidate.source === "legacy") return legacyMap.get(key);
+              if (candidate.source === "used") return usedMap.get(key);
+              return newCarsMap.get(key);
+            })();
             if (!doc) return null;
             return normalizeFastYallaListItem(doc as Record<string, any>, isOptionsMode);
           })
@@ -1129,15 +1362,21 @@ function normalizeYallaDetailDoc(doc: YallaMotorDoc) {
   return {
     ...data,
     cardTitle: data.cardTitle ?? data.title ?? "Untitled",
-    cardPriceText: data.cardPriceText ?? data.price ?? null,
-    fetchedAt: data.fetchedAt ?? data.scrapedAt ?? data.detailScrapedAt ?? null,
+    cardPriceText: data.cardPriceText ?? data.price ?? data.priceText ?? data.priceNumber ?? null,
+    fetchedAt:
+      data.fetchedAt ??
+      data.scrapedAt ??
+      data.detailScrapedAt ??
+      data.updatedAt ??
+      data.createdAt ??
+      null,
     detail: {
       url: data.url ?? "",
       breadcrumb,
       images,
       importantSpecs: highlights ?? {},
       features,
-      description: data.description ?? "",
+      description: data.description ?? data.descriptionText ?? data.descriptionHtml ?? "",
       priceCompare: normalizedPriceCompare,
     },
     source: data.source ?? "yallamotor",
@@ -1169,15 +1408,18 @@ export async function getYallaMotorById(id: string) {
     const db = await getMongoDb();
     const legacyCollection = getYallaMotorCollection(db);
     const usedCollection = getYallaUsedCollection(db);
+    const newCarsCollection = getYallaNewCarsCollection(db);
 
-    const [legacyDoc, usedDoc] = await Promise.all([
+    const [legacyDoc, usedDoc, newCarDoc] = await Promise.all([
       findYallaDoc(legacyCollection, id),
       findYallaDoc(usedCollection, id),
+      findYallaDoc(newCarsCollection, id),
     ]);
 
     if (legacyDoc) return legacyDoc;
-    if (!usedDoc) return null;
-    return normalizeYallaDetailDoc(usedDoc);
+    if (usedDoc) return normalizeYallaDetailDoc(usedDoc);
+    if (newCarDoc) return normalizeYallaDetailDoc(newCarDoc);
+    return null;
   });
 }
 

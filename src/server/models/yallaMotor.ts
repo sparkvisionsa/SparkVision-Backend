@@ -2,6 +2,7 @@ import type { Collection, Db } from "mongodb";
 
 export const YALLA_MOTOR_LEGACY_COLLECTION = "yallamotortest";
 export const YALLA_MOTOR_USED_COLLECTION = "YallaUsed";
+export const YALLA_MOTOR_NEW_CARS_COLLECTION = "yallaMotorNewCars";
 
 export interface YallaMotorDoc {
   [key: string]: unknown;
@@ -67,4 +68,8 @@ export function getYallaMotorCollection(db: Db): Collection<YallaMotorDoc> {
 
 export function getYallaUsedCollection(db: Db): Collection<YallaMotorDoc> {
   return db.collection<YallaMotorDoc>(YALLA_MOTOR_USED_COLLECTION);
+}
+
+export function getYallaNewCarsCollection(db: Db): Collection<YallaMotorDoc> {
+  return db.collection<YallaMotorDoc>(YALLA_MOTOR_NEW_CARS_COLLECTION);
 }

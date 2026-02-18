@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.listCarsSources = listCarsSources;
 const harajScrapeController_1 = require("./harajScrapeController");
 const yallaMotorController_1 = require("./yallaMotorController");
+const syarahController_1 = require("./syarahController");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 200;
@@ -35,6 +36,14 @@ function normalizeYallaItems(items) {
         ...item,
         postDate: toEpochMillis(item.postDate ?? null),
         source: "yallamotor",
+    }));
+}
+function normalizeSyarahItems(items) {
+    return items.map((item) => ({
+        ...item,
+        postDate: toEpochMillis(item.postDate ?? null),
+        source: "syarah",
+        priceCompare: null,
     }));
 }
 function sortItems(items, sort) {
@@ -126,9 +135,10 @@ async function listCarsSources(query) {
     const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
     const page = Math.max(query.page ?? 1, 1);
     const countMode = query.countMode === "none" ? "none" : "exact";
-    const sources = (query.sources ?? ["haraj", "yallamotor"]).map(normalizeSource);
+    const sources = (query.sources ?? ["haraj", "yallamotor", "syarah"]).map(normalizeSource);
     const includeHaraj = sources.includes("haraj");
     const includeYalla = sources.includes("yallamotor");
+    const includeSyarah = sources.includes("syarah");
     const cacheTtlMs = query.fields === "modelYears"
         ? MODEL_YEARS_CACHE_TTL_MS
         : query.fields === "options"
@@ -146,7 +156,7 @@ async function listCarsSources(query) {
         sources,
     })}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
-        if (!includeHaraj && !includeYalla) {
+        if (!includeHaraj && !includeYalla && !includeSyarah) {
             return {
                 items: [],
                 total: 0,
@@ -161,7 +171,7 @@ async function listCarsSources(query) {
                 tag2: undefined,
                 carModelYear: undefined,
             };
-            const [harajData, yallaData] = await Promise.all([
+            const [harajData, yallaData, syarahData] = await Promise.all([
                 includeHaraj
                     ? (0, harajScrapeController_1.listHarajScrapes)({
                         ...modelYearsQuery,
@@ -178,8 +188,16 @@ async function listCarsSources(query) {
                         fields: "modelYears",
                     }, { maxLimit: MAX_INTERNAL_LIMIT })
                     : Promise.resolve({ items: [] }),
+                includeSyarah
+                    ? (0, syarahController_1.listSyarahs)({
+                        ...modelYearsQuery,
+                        page: 1,
+                        limit: MAX_INTERNAL_LIMIT,
+                        fields: "modelYears",
+                    }, { maxLimit: MAX_INTERNAL_LIMIT })
+                    : Promise.resolve({ items: [] }),
             ]);
-            const years = [...harajData.items, ...yallaData.items]
+            const years = [...harajData.items, ...yallaData.items, ...syarahData.items]
                 .map((item) => toNumericYear(item.carModelYear))
                 .filter((value) => value !== null);
             const items = buildYearOnlyItems(buildDescendingYearRange(years));
@@ -190,7 +208,7 @@ async function listCarsSources(query) {
                 limit: items.length || 1,
             };
         }
-        if (includeHaraj && !includeYalla) {
+        if (includeHaraj && !includeYalla && !includeSyarah) {
             const harajData = await (0, harajScrapeController_1.listHarajScrapes)({
                 ...query,
                 page,
@@ -203,7 +221,7 @@ async function listCarsSources(query) {
                 limit,
             };
         }
-        if (!includeHaraj && includeYalla) {
+        if (!includeHaraj && includeYalla && !includeSyarah) {
             const yallaData = await (0, yallaMotorController_1.listYallaMotors)({
                 ...query,
                 page,
@@ -216,60 +234,99 @@ async function listCarsSources(query) {
                 limit,
             };
         }
+        if (!includeHaraj && !includeYalla && includeSyarah) {
+            const syarahData = await (0, syarahController_1.listSyarahs)({
+                ...query,
+                page,
+                limit,
+            }, { maxLimit: MAX_LIMIT });
+            return {
+                ...syarahData,
+                items: normalizeSyarahItems(syarahData.items),
+                page,
+                limit,
+            };
+        }
         if (query.fields === "options") {
-            const [harajData, yallaData] = await Promise.all([
-                (0, harajScrapeController_1.listHarajScrapes)({
-                    ...query,
-                    page,
-                    limit,
-                    fields: "options",
-                }, { maxLimit: MAX_LIMIT }),
-                (0, yallaMotorController_1.listYallaMotors)({
-                    ...query,
-                    page,
-                    limit,
-                    fields: "options",
-                }, { maxLimit: MAX_LIMIT }),
+            const [harajData, yallaData, syarahData] = await Promise.all([
+                includeHaraj
+                    ? (0, harajScrapeController_1.listHarajScrapes)({
+                        ...query,
+                        page,
+                        limit,
+                        fields: "options",
+                    }, { maxLimit: MAX_LIMIT })
+                    : Promise.resolve({ items: [], total: 0 }),
+                includeYalla
+                    ? (0, yallaMotorController_1.listYallaMotors)({
+                        ...query,
+                        page,
+                        limit,
+                        fields: "options",
+                    }, { maxLimit: MAX_LIMIT })
+                    : Promise.resolve({ items: [], total: 0 }),
+                includeSyarah
+                    ? (0, syarahController_1.listSyarahs)({
+                        ...query,
+                        page,
+                        limit,
+                        fields: "options",
+                    }, { maxLimit: MAX_LIMIT })
+                    : Promise.resolve({ items: [], total: 0 }),
             ]);
             return {
                 items: sortItems([
                     ...normalizeHarajItems(harajData.items),
                     ...normalizeYallaItems(yallaData.items),
+                    ...normalizeSyarahItems(syarahData.items),
                 ], query.sort).slice(0, limit),
-                total: countMode === "none" ? -1 : harajData.total + yallaData.total,
+                total: countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total,
                 page,
                 limit,
                 ...(countMode === "none"
                     ? {
                         hasNext: Boolean(harajData.hasNext) ||
-                            Boolean(yallaData.hasNext),
+                            Boolean(yallaData.hasNext) ||
+                            Boolean(syarahData.hasNext),
                     }
                     : {}),
             };
         }
         const perSourceLimit = Math.min(limit * page + (countMode === "none" ? 1 : 0), MAX_INTERNAL_LIMIT);
-        const [harajData, yallaData] = await Promise.all([
-            (0, harajScrapeController_1.listHarajScrapes)({
-                ...query,
-                page: 1,
-                limit: perSourceLimit,
-            }, { maxLimit: perSourceLimit }),
-            (0, yallaMotorController_1.listYallaMotors)({
-                ...query,
-                page: 1,
-                limit: perSourceLimit,
-            }, { maxLimit: perSourceLimit }),
+        const [harajData, yallaData, syarahData] = await Promise.all([
+            includeHaraj
+                ? (0, harajScrapeController_1.listHarajScrapes)({
+                    ...query,
+                    page: 1,
+                    limit: perSourceLimit,
+                }, { maxLimit: perSourceLimit })
+                : Promise.resolve({ items: [], total: 0 }),
+            includeYalla
+                ? (0, yallaMotorController_1.listYallaMotors)({
+                    ...query,
+                    page: 1,
+                    limit: perSourceLimit,
+                }, { maxLimit: perSourceLimit })
+                : Promise.resolve({ items: [], total: 0 }),
+            includeSyarah
+                ? (0, syarahController_1.listSyarahs)({
+                    ...query,
+                    page: 1,
+                    limit: perSourceLimit,
+                }, { maxLimit: perSourceLimit })
+                : Promise.resolve({ items: [], total: 0 }),
         ]);
         const combinedItems = sortItems([
             ...normalizeHarajItems(harajData.items),
             ...normalizeYallaItems(yallaData.items),
+            ...normalizeSyarahItems(syarahData.items),
         ], query.sort);
         const start = (page - 1) * limit;
         const pageWindowSize = limit + (countMode === "none" ? 1 : 0);
         const pageWindow = combinedItems.slice(start, start + pageWindowSize);
         const hasNext = countMode === "none" ? pageWindow.length > limit : undefined;
         const pagedItems = countMode === "none" ? pageWindow.slice(0, limit) : pageWindow;
-        const total = countMode === "none" ? -1 : harajData.total + yallaData.total;
+        const total = countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total;
         return {
             items: pagedItems,
             total,

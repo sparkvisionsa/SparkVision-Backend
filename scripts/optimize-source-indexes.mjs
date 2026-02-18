@@ -32,10 +32,22 @@ async function main() {
     const db = client.db(dbName);
 
     const haraj = db.collection("harajScrape");
+    const carsHaraj = db.collection("CarsHaraj");
     const yallaLegacy = db.collection("yallamotortest");
     const yallaUsed = db.collection("YallaUsed");
+    const yallaNewCars = db.collection("yallaMotorNewCars");
+    const syarah = db.collection("syarah");
 
     await createIndexes(haraj, [
+      { "item.tags.0": 1, "item.postDate": -1 },
+      { "item.tags.1": 1, "item.postDate": -1 },
+      { "item.tags.2": 1, "item.postDate": -1 },
+      { "item.carInfo.model": 1 },
+      { "item.city": 1 },
+      { "item.geoCity": 1 },
+    ]);
+
+    await createIndexes(carsHaraj, [
       { "item.tags.0": 1, "item.postDate": -1 },
       { "item.tags.1": 1, "item.postDate": -1 },
       { "item.tags.2": 1, "item.postDate": -1 },
@@ -59,6 +71,27 @@ async function main() {
       { adId: 1 },
       { url: 1 },
       { "detail.url": 1 },
+    ]);
+
+    await createIndexes(yallaNewCars, [
+      { fetchedAt: -1 },
+      { scrapedAt: -1 },
+      { detailScrapedAt: -1 },
+      { adId: 1 },
+      { url: 1 },
+      { "detail.url": 1 },
+    ]);
+
+    await createIndexes(syarah, [
+      { fetchedAt: -1 },
+      { post_id: 1 },
+      { id: 1 },
+      { city: 1 },
+      { brand: 1 },
+      { model: 1 },
+      { year: -1 },
+      { mileage_km: 1 },
+      { price_cash: -1 },
     ]);
   } finally {
     await client.close();

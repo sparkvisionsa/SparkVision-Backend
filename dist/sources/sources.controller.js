@@ -18,6 +18,7 @@ const query_utils_1 = require("../common/query-utils");
 const carsSourceController_1 = require("../server/controllers/carsSourceController");
 const harajScrapeController_1 = require("../server/controllers/harajScrapeController");
 const yallaMotorController_1 = require("../server/controllers/yallaMotorController");
+const syarahController_1 = require("../server/controllers/syarahController");
 const context_1 = require("../server/auth-tracking/context");
 const service_1 = require("../server/auth-tracking/service");
 function parseFields(value) {
@@ -60,6 +61,9 @@ function parseCarsSourcesQuery(req) {
         ...parseHarajLikeQuery(req),
         sources: (0, query_utils_1.parseSources)((0, query_utils_1.readQueryString)(req, "sources")),
     };
+}
+function parseSyarahQuery(req) {
+    return parseHarajLikeQuery(req);
 }
 let SourcesController = class SourcesController {
     async listCarsSourcesRoute(req, res) {
@@ -115,6 +119,28 @@ let SourcesController = class SourcesController {
         }
         return doc;
     }
+    async listSyarahsRoute(req, res) {
+        const fields = (0, query_utils_1.readQueryString)(req, "fields");
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: fields !== "options" && fields !== "modelYears",
+            attemptReason: "syarah_query",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        return (0, syarahController_1.listSyarahs)(parseSyarahQuery(req));
+    }
+    async getSyarahByIdRoute(id, req, res) {
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: false,
+            attemptReason: "syarah_detail",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        const doc = await (0, syarahController_1.getSyarahById)(id);
+        if (!doc) {
+            res.status(404);
+            return { error: "Not found" };
+        }
+        return doc;
+    }
 };
 exports.SourcesController = SourcesController;
 __decorate([
@@ -159,6 +185,23 @@ __decorate([
     __metadata("design:paramtypes", [String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], SourcesController.prototype, "getYallaMotorByIdRoute", null);
+__decorate([
+    (0, common_1.Get)("syarah-scrape"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "listSyarahsRoute", null);
+__decorate([
+    (0, common_1.Get)("syarah-scrape/:id"),
+    __param(0, (0, common_1.Param)("id")),
+    __param(1, (0, common_1.Req)()),
+    __param(2, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "getSyarahByIdRoute", null);
 exports.SourcesController = SourcesController = __decorate([
     (0, common_1.Controller)()
 ], SourcesController);

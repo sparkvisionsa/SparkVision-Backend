@@ -79,6 +79,24 @@ function toMileageNumber(value) {
     const parsed = Number(match[0]);
     return Number.isNaN(parsed) ? null : parsed;
 }
+function toNumber(value) {
+    if (value === null || value === undefined)
+        return null;
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === "string") {
+        const numeric = Number(value);
+        return Number.isNaN(numeric) ? null : numeric;
+    }
+    if (typeof value === "object" &&
+        value &&
+        "toNumber" in value &&
+        typeof value.toNumber === "function") {
+        return value.toNumber();
+    }
+    return null;
+}
 function buildNormalizedDigitExpression(input) {
     const replacements = [
         ["\u0660", "0"],
@@ -373,6 +391,68 @@ function buildSort(sort) {
             return { postDate: -1 };
     }
 }
+function buildListProjection(fields) {
+    if (fields === "options") {
+        return {
+            _id: 1,
+            postId: 1,
+            postDate: 1,
+            tags: 1,
+            "item.postDate": 1,
+            "item.tags": 1,
+            "item.carInfo.model": 1,
+            "item.carInfo.mileage": 1,
+            "carInfo.model": 1,
+            "carInfo.mileage": 1,
+            "gql.posts.json.data.posts.items.carInfo.model": 1,
+            "gql.posts.json.data.posts.items.carInfo.mileage": 1,
+        };
+    }
+    return {
+        _id: 1,
+        postId: 1,
+        title: 1,
+        city: 1,
+        priceNumeric: 1,
+        postDate: 1,
+        url: 1,
+        phone: 1,
+        tags: 1,
+        commentsCount: 1,
+        hasImage: 1,
+        hasVideo: 1,
+        imagesList: 1,
+        "item.title": 1,
+        "item.postDate": 1,
+        "item.city": 1,
+        "item.geoCity": 1,
+        "item.tags": 1,
+        "item.hasImage": 1,
+        "item.hasVideo": 1,
+        "item.commentCount": 1,
+        "item.price": 1,
+        "item.URL": 1,
+        "item.imagesList": 1,
+        "item.carInfo.model": 1,
+        "item.carInfo.mileage": 1,
+        "carInfo.model": 1,
+        "carInfo.mileage": 1,
+        "gql.posts.json.data.posts.items.carInfo.model": 1,
+        "gql.posts.json.data.posts.items.carInfo.mileage": 1,
+    };
+}
+function buildCombinedHarajPipeline(filter, stagesAfterMatch) {
+    const primaryPipeline = [{ $match: filter }, ...stagesAfterMatch];
+    return [
+        ...primaryPipeline,
+        {
+            $unionWith: {
+                coll: harajScrape_1.CARS_HARAJ_COLLECTION,
+                pipeline: primaryPipeline,
+            },
+        },
+    ];
+}
 function buildCountSignature(query) {
     return {
         search: query.search ?? "",
@@ -459,7 +539,8 @@ async function listHarajScrapes(query, options = {}) {
     })}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
         const db = await (0, mongodb_1.getMongoDb)();
-        const collection = (0, harajScrape_1.getHarajScrapeCollection)(db);
+        const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
+        const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
         const filter = buildFilter(query);
         if (query.fields === "modelYears") {
             const modelYearFilter = buildFilter({
@@ -468,31 +549,32 @@ async function listHarajScrapes(query, options = {}) {
                 tag2: undefined,
                 carModelYear: undefined,
             });
-            const yearRows = await collection
+            const yearRows = await primaryCollection
                 .aggregate([
-                { $match: modelYearFilter },
-                {
-                    $project: {
-                        carModelYear: {
-                            $convert: {
-                                input: {
-                                    $ifNull: [
-                                        "$item.carInfo.model",
-                                        {
-                                            $ifNull: [
-                                                "$carInfo.model",
-                                                "$gql.posts.json.data.posts.items.0.carInfo.model",
-                                            ],
-                                        },
-                                    ],
+                ...buildCombinedHarajPipeline(modelYearFilter, [
+                    {
+                        $project: {
+                            carModelYear: {
+                                $convert: {
+                                    input: {
+                                        $ifNull: [
+                                            "$item.carInfo.model",
+                                            {
+                                                $ifNull: [
+                                                    "$carInfo.model",
+                                                    "$gql.posts.json.data.posts.items.0.carInfo.model",
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    to: "int",
+                                    onError: null,
+                                    onNull: null,
                                 },
-                                to: "int",
-                                onError: null,
-                                onNull: null,
                             },
                         },
                     },
-                },
+                ]),
                 { $match: { carModelYear: { $ne: null } } },
                 { $group: { _id: "$carModelYear" } },
                 { $sort: { _id: -1 } },
@@ -512,58 +594,20 @@ async function listHarajScrapes(query, options = {}) {
         const sort = buildSort(query.sort);
         const countMode = query.countMode === "none" ? "none" : "exact";
         const fetchLimit = countMode === "none" ? limit + 1 : limit;
-        const itemsPromise = collection
-            .find(filter)
-            .sort(sort)
-            .skip((page - 1) * limit)
-            .limit(fetchLimit)
-            .project(query.fields === "options"
-            ? {
-                _id: 1,
-                postId: 1,
-                postDate: 1,
-                tags: 1,
-                "item.postDate": 1,
-                "item.tags": 1,
-                "item.carInfo.model": 1,
-                "item.carInfo.mileage": 1,
-                "carInfo.model": 1,
-                "carInfo.mileage": 1,
-                "gql.posts.json.data.posts.items.carInfo.model": 1,
-                "gql.posts.json.data.posts.items.carInfo.mileage": 1,
-            }
-            : {
-                _id: 1,
-                postId: 1,
-                title: 1,
-                city: 1,
-                priceNumeric: 1,
-                postDate: 1,
-                url: 1,
-                phone: 1,
-                tags: 1,
-                commentsCount: 1,
-                hasImage: 1,
-                hasVideo: 1,
-                imagesList: 1,
-                "item.title": 1,
-                "item.postDate": 1,
-                "item.city": 1,
-                "item.geoCity": 1,
-                "item.tags": 1,
-                "item.hasImage": 1,
-                "item.hasVideo": 1,
-                "item.commentCount": 1,
-                "item.price": 1,
-                "item.URL": 1,
-                "item.imagesList": 1,
-                "item.carInfo.model": 1,
-                "item.carInfo.mileage": 1,
-                "carInfo.model": 1,
-                "carInfo.mileage": 1,
-                "gql.posts.json.data.posts.items.carInfo.model": 1,
-                "gql.posts.json.data.posts.items.carInfo.mileage": 1,
-            })
+        const projection = buildListProjection(query.fields);
+        const skip = (page - 1) * limit;
+        const candidateWindow = Math.max(skip + fetchLimit, fetchLimit);
+        const itemsPromise = primaryCollection
+            .aggregate([
+            ...buildCombinedHarajPipeline(filter, [
+                { $sort: sort },
+                { $limit: candidateWindow },
+            ]),
+            { $sort: sort },
+            { $skip: skip },
+            { $limit: fetchLimit },
+            { $project: projection },
+        ])
             .toArray();
         const rawItems = await itemsPromise;
         const hasNext = countMode === "none" ? rawItems.length > limit : undefined;
@@ -572,9 +616,17 @@ async function listHarajScrapes(query, options = {}) {
             ? -1
             : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`haraj:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
                 if (isFilterEmpty(filter)) {
-                    return collection.estimatedDocumentCount();
+                    const [primaryCount, carsCount] = await Promise.all([
+                        primaryCollection.estimatedDocumentCount(),
+                        carsCollection.estimatedDocumentCount(),
+                    ]);
+                    return primaryCount + carsCount;
                 }
-                return collection.countDocuments(filter);
+                const [primaryCount, carsCount] = await Promise.all([
+                    primaryCollection.countDocuments(filter),
+                    carsCollection.countDocuments(filter),
+                ]);
+                return primaryCount + carsCount;
             });
         const normalized = items.map((doc) => {
             const priceNumeric = doc.priceNumeric ?? doc.item?.price?.numeric ?? null;
@@ -645,7 +697,8 @@ async function listHarajScrapes(query, options = {}) {
 async function getHarajScrapeById(id) {
     return (0, runtime_cache_1.getOrSetRuntimeCache)(`haraj:detail:${id}`, DETAIL_CACHE_TTL_MS, async () => {
         const db = await (0, mongodb_1.getMongoDb)();
-        const collection = (0, harajScrape_1.getHarajScrapeCollection)(db);
+        const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
+        const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
         const numericId = Number(id);
         const filter = {
             $or: [
@@ -655,7 +708,10 @@ async function getHarajScrapeById(id) {
                 { "item.URL": id },
             ].filter(Boolean),
         };
-        const doc = await collection.findOne(filter);
-        return doc;
+        const [primaryDoc, carsDoc] = await Promise.all([
+            primaryCollection.findOne(filter),
+            carsCollection.findOne(filter),
+        ]);
+        return primaryDoc ?? carsDoc;
     });
 }

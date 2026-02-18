@@ -1,10 +1,12 @@
 import { MongoServerError } from "mongodb";
 import { getMongoDb } from "./mongodb";
-import { getHarajScrapeCollection } from "./models/harajScrape";
+import { getCarsHarajCollection, getHarajScrapeCollection } from "./models/harajScrape";
 import {
+  getYallaNewCarsCollection,
   getYallaMotorCollection,
   getYallaUsedCollection,
 } from "./models/yallaMotor";
+import { getSyarahCollection } from "./models/syarah";
 
 type IndexDirection = 1 | -1;
 type IndexSpec = {
@@ -46,6 +48,18 @@ const YALLA_INDEXES: IndexSpec[] = [
   { name: "detail_url_asc", key: { "detail.url": 1 } },
 ];
 
+const SYARAH_INDEXES: IndexSpec[] = [
+  { name: "fetchedAt_desc", key: { fetchedAt: -1 } },
+  { name: "post_id_asc", key: { post_id: 1 } },
+  { name: "id_asc", key: { id: 1 } },
+  { name: "city_asc", key: { city: 1 } },
+  { name: "brand_asc", key: { brand: 1 } },
+  { name: "model_asc", key: { model: 1 } },
+  { name: "year_desc", key: { year: -1 } },
+  { name: "mileage_km_asc", key: { mileage_km: 1 } },
+  { name: "price_cash_desc", key: { price_cash: -1 } },
+];
+
 function shouldWarmupIndexes() {
   const value = (process.env.SOURCE_INDEX_WARMUP ?? "true").trim().toLowerCase();
   return value !== "0" && value !== "false";
@@ -69,14 +83,20 @@ async function createIndexesSafely(collection: IndexableCollection, specs: Index
 
 async function warmupSourceIndexes() {
   const db = await getMongoDb();
-  const haraj = getHarajScrapeCollection(db);
+  const harajPrimary = getHarajScrapeCollection(db);
+  const harajCars = getCarsHarajCollection(db);
   const yallaLegacy = getYallaMotorCollection(db);
   const yallaUsed = getYallaUsedCollection(db);
+  const yallaNewCars = getYallaNewCarsCollection(db);
+  const syarah = getSyarahCollection(db);
 
   await Promise.all([
-    createIndexesSafely(haraj, HARJ_INDEXES),
+    createIndexesSafely(harajPrimary, HARJ_INDEXES),
+    createIndexesSafely(harajCars, HARJ_INDEXES),
     createIndexesSafely(yallaLegacy, YALLA_INDEXES),
     createIndexesSafely(yallaUsed, YALLA_INDEXES),
+    createIndexesSafely(yallaNewCars, YALLA_INDEXES),
+    createIndexesSafely(syarah, SYARAH_INDEXES),
   ]);
 }
 
