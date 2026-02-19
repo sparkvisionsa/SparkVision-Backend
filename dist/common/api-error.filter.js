@@ -9,6 +9,7 @@ var ApiErrorFilter_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ApiErrorFilter = void 0;
 const common_1 = require("@nestjs/common");
+const zod_1 = require("zod");
 const service_1 = require("../server/auth-tracking/service");
 let ApiErrorFilter = ApiErrorFilter_1 = class ApiErrorFilter {
     constructor() {
@@ -28,6 +29,16 @@ let ApiErrorFilter = ApiErrorFilter_1 = class ApiErrorFilter {
             const status = exception.getStatus();
             const payload = exception.getResponse();
             response.status(status).json(payload);
+            return;
+        }
+        if (exception instanceof zod_1.ZodError) {
+            response.status(common_1.HttpStatus.BAD_REQUEST).json({
+                error: "invalid_payload",
+                message: "Invalid request payload.",
+                details: {
+                    issues: exception.issues,
+                },
+            });
             return;
         }
         this.logger.error("Unhandled API error", exception);

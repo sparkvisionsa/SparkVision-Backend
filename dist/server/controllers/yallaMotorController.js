@@ -6,6 +6,7 @@ const mongodb_1 = require("mongodb");
 const mongodb_2 = require("../mongodb");
 const yallaMotor_1 = require("../models/yallaMotor");
 const vehicle_name_match_1 = require("../../lib/vehicle-name-match");
+const smart_search_1 = require("../../lib/smart-search");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -20,6 +21,12 @@ const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
 const COUNT_CACHE_STALE_TTL_MS = 300_000;
 const FAST_PATH_MAX_CANDIDATES = 2_500;
+const SEARCH_CANDIDATE_CACHE_TTL_MS = 45_000;
+const SEARCH_CANDIDATE_CACHE_STALE_TTL_MS = 180_000;
+const SEARCH_TEXT_CANDIDATE_LIMIT = 4_000;
+const SEARCH_TEXT_CANDIDATE_MIN_LIMIT = 300;
+const SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER = 14;
+const SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER = 20;
 const FAST_YALLA_PROJECTION = {
     _id: 1,
     adId: 1,
@@ -66,14 +73,82 @@ const YALLA_NEW_LABEL_AR = String.fromCharCode(0x062c, 0x062f, 0x064a, 0x062f);
 const YALLA_NEW_FEMININE_LABEL_AR = `${YALLA_NEW_LABEL_AR}${String.fromCharCode(0x0629)}`;
 const YALLA_NEW_CAR_REGEX_PATTERN = `(new|${YALLA_NEW_LABEL_AR}|${YALLA_NEW_FEMININE_LABEL_AR})`;
 function toRegex(value, options) {
-    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = options?.exact ? `^${escaped}$` : escaped;
-    return new RegExp(pattern, "i");
+    return (0, smart_search_1.buildSearchRegex)(value, {
+        exact: options?.exact,
+        fuzzyArabic: options?.fuzzyArabic === true,
+    });
 }
 function buildAliasRegexes(value) {
     const aliases = [value, ...(0, vehicle_name_match_1.buildVehicleAliases)(value)];
     const uniqueAliases = Array.from(new Set(aliases.map((item) => item.trim()).filter(Boolean)));
     return uniqueAliases.map((item) => toRegex(item));
+}
+function canUseSearchCandidates(query) {
+    return query.exactSearch !== true && Boolean(query.search?.trim());
+}
+function resolveSearchCandidateLimit(query) {
+    const page = Math.max(query.page ?? 1, 1);
+    const limit = Math.max(query.limit ?? DEFAULT_LIMIT, 1);
+    const pageWindow = page * limit;
+    const usesDeepSort = query.sort === "price-high" || query.sort === "price-low" || query.sort === "comments";
+    const multiplier = usesDeepSort
+        ? SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER
+        : SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER;
+    const computedLimit = pageWindow * multiplier;
+    return Math.max(SEARCH_TEXT_CANDIDATE_MIN_LIMIT, Math.min(computedLimit, SEARCH_TEXT_CANDIDATE_LIMIT));
+}
+async function resolveYallaCollectionSearchCandidateIds(collection, sourceKey, textSearchQuery, candidateLimit) {
+    const cacheKey = `yalla:${sourceKey}:search-candidates:${textSearchQuery}:${candidateLimit}`;
+    return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, SEARCH_CANDIDATE_CACHE_TTL_MS, SEARCH_CANDIDATE_CACHE_STALE_TTL_MS, async () => {
+        try {
+            const rows = await collection
+                .find({
+                $text: {
+                    $search: textSearchQuery,
+                    $caseSensitive: false,
+                    $diacriticSensitive: false,
+                },
+            }, {
+                projection: { _id: 1 },
+                limit: candidateLimit,
+            })
+                .toArray();
+            if (candidateLimit >= SEARCH_TEXT_CANDIDATE_LIMIT && rows.length >= candidateLimit) {
+                return null;
+            }
+            return {
+                supported: true,
+                ids: rows.map((doc) => doc._id),
+            };
+        }
+        catch {
+            return null;
+        }
+    });
+}
+async function resolveYallaSearchCandidateIds(query, legacyCollection, usedCollection, newCarsCollection) {
+    if (!canUseSearchCandidates(query)) {
+        return null;
+    }
+    const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
+        exact: false,
+        maxTerms: 8,
+        maxAliasesPerTerm: 8,
+        maxOutputTerms: 20,
+    });
+    if (!textSearchQuery) {
+        return null;
+    }
+    const candidateLimit = resolveSearchCandidateLimit(query);
+    const [legacy, used, newCars] = await Promise.all([
+        resolveYallaCollectionSearchCandidateIds(legacyCollection, "legacy", textSearchQuery, candidateLimit),
+        resolveYallaCollectionSearchCandidateIds(usedCollection, "used", textSearchQuery, candidateLimit),
+        resolveYallaCollectionSearchCandidateIds(newCarsCollection, "newcars", textSearchQuery, candidateLimit),
+    ]);
+    if (!legacy && !used && !newCars) {
+        return null;
+    }
+    return { legacy, used, newCars };
 }
 function toEpochMillis(value) {
     if (value === null || value === undefined)
@@ -370,7 +445,7 @@ function buildPostDateExpression() {
         ],
     };
 }
-function buildNormalizedYallaStages() {
+function buildNormalizedYallaStages(searchCandidateIds) {
     const breadcrumbExpression = {
         $cond: [
             { $isArray: "$detail.breadcrumb" },
@@ -520,151 +595,159 @@ function buildNormalizedYallaStages() {
     const modelYearFromBreadcrumbTitleExpression = buildModelYearFromTextExpression({
         $arrayElemAt: ["$breadcrumb", 4],
     });
-    return [
-        {
-            $project: {
-                _id: 1,
-                adId: {
-                    $convert: {
-                        input: "$adId",
-                        to: "string",
-                        onError: null,
-                        onNull: null,
-                    },
-                },
-                type: "$type",
-                breadcrumb: breadcrumbExpression,
-                description: descriptionExpression,
-                overviewH1: { $ifNull: ["$detail.overview.h1", "$title"] },
-                overviewH4: "$detail.overview.h4",
-                specs: specsExpression,
-                images: imagesExpression,
-                title: {
-                    $ifNull: [
-                        "$cardTitle",
-                        {
-                            $ifNull: ["$title", { $ifNull: ["$detail.overview.h1", "Untitled"] }],
-                        },
-                    ],
-                },
-                location: "$location",
-                priceText: {
-                    $convert: {
-                        input: priceTextExpression,
-                        to: "string",
-                        onError: null,
-                        onNull: null,
-                    },
-                },
-                fetchedDate: fetchedDateExpression,
-                url: { $ifNull: ["$url", "$detail.url"] },
-                phone: { $ifNull: ["$phone", ""] },
-                priceCompare: {
-                    $ifNull: [
-                        "$detail.priceCompare",
-                        {
-                            $cond: [hasUsedPriceCompare, usedPriceCompareExpression, null],
-                        },
-                    ],
+    const stages = [];
+    if (searchCandidateIds?.supported) {
+        stages.push({
+            $match: {
+                _id: { $in: [...searchCandidateIds.ids] },
+            },
+        });
+    }
+    stages.push({
+        $project: {
+            _id: 1,
+            adId: {
+                $convert: {
+                    input: "$adId",
+                    to: "string",
+                    onError: null,
+                    onNull: null,
                 },
             },
-        },
-        {
-            $addFields: {
-                id: { $ifNull: ["$adId", { $toString: "$_id" }] },
-                tag0: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 0] }, "yallamotor"] },
-                tag1: {
-                    $ifNull: [
-                        {
-                            $cond: [
-                                isNewCarExpression,
-                                { $arrayElemAt: ["$breadcrumb", 2] },
-                                { $arrayElemAt: ["$breadcrumb", 3] },
-                            ],
-                        },
-                        "",
-                    ],
+            type: "$type",
+            breadcrumb: breadcrumbExpression,
+            description: descriptionExpression,
+            overviewH1: { $ifNull: ["$detail.overview.h1", "$title"] },
+            overviewH4: "$detail.overview.h4",
+            specs: specsExpression,
+            images: imagesExpression,
+            title: {
+                $ifNull: [
+                    "$cardTitle",
+                    {
+                        $ifNull: ["$title", { $ifNull: ["$detail.overview.h1", "Untitled"] }],
+                    },
+                ],
+            },
+            location: "$location",
+            priceText: {
+                $convert: {
+                    input: priceTextExpression,
+                    to: "string",
+                    onError: null,
+                    onNull: null,
                 },
-                tag2: {
-                    $ifNull: [
-                        {
-                            $cond: [
-                                isNewCarExpression,
-                                { $arrayElemAt: ["$breadcrumb", 3] },
-                                { $arrayElemAt: ["$breadcrumb", 4] },
-                            ],
-                        },
-                        "",
-                    ],
-                },
-                city: {
-                    $ifNull: [
-                        {
-                            $cond: [
-                                isNewCarExpression,
-                                "$location",
-                                { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 2] }, "$location"] },
-                            ],
-                        },
-                        "",
-                    ],
-                },
-                carModelYear: {
-                    $ifNull: [
-                        {
-                            $cond: [
-                                isNewCarExpression,
-                                modelYearFromBreadcrumbTitleExpression,
-                                legacyModelYearExpression,
-                            ],
-                        },
-                        modelYearFromBreadcrumbTitleExpression,
-                    ],
-                },
-                mileage: buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
-                priceNumeric: buildPriceNumericExpression("$priceText"),
-                postDate: buildPostDateExpression(),
+            },
+            fetchedDate: fetchedDateExpression,
+            url: { $ifNull: ["$url", "$detail.url"] },
+            phone: { $ifNull: ["$phone", ""] },
+            priceCompare: {
+                $ifNull: [
+                    "$detail.priceCompare",
+                    {
+                        $cond: [hasUsedPriceCompare, usedPriceCompareExpression, null],
+                    },
+                ],
             },
         },
-    ];
+    }, {
+        $addFields: {
+            id: { $ifNull: ["$adId", { $toString: "$_id" }] },
+            tag0: { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 0] }, "yallamotor"] },
+            tag1: {
+                $ifNull: [
+                    {
+                        $cond: [
+                            isNewCarExpression,
+                            { $arrayElemAt: ["$breadcrumb", 2] },
+                            { $arrayElemAt: ["$breadcrumb", 3] },
+                        ],
+                    },
+                    "",
+                ],
+            },
+            tag2: {
+                $ifNull: [
+                    {
+                        $cond: [
+                            isNewCarExpression,
+                            { $arrayElemAt: ["$breadcrumb", 3] },
+                            { $arrayElemAt: ["$breadcrumb", 4] },
+                        ],
+                    },
+                    "",
+                ],
+            },
+            city: {
+                $ifNull: [
+                    {
+                        $cond: [
+                            isNewCarExpression,
+                            "$location",
+                            { $ifNull: [{ $arrayElemAt: ["$breadcrumb", 2] }, "$location"] },
+                        ],
+                    },
+                    "",
+                ],
+            },
+            carModelYear: {
+                $ifNull: [
+                    {
+                        $cond: [
+                            isNewCarExpression,
+                            modelYearFromBreadcrumbTitleExpression,
+                            legacyModelYearExpression,
+                        ],
+                    },
+                    modelYearFromBreadcrumbTitleExpression,
+                ],
+            },
+            mileage: buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
+            priceNumeric: buildPriceNumericExpression("$priceText"),
+            postDate: buildPostDateExpression(),
+        },
+    });
+    return stages;
 }
-function buildCombinedYallaPipeline() {
-    const baseStages = buildNormalizedYallaStages();
+function buildCombinedYallaPipeline(searchCandidateIds) {
+    const baseStages = buildNormalizedYallaStages(searchCandidateIds?.legacy);
     return [
         ...baseStages,
         {
             $unionWith: {
                 coll: yallaMotor_1.YALLA_MOTOR_USED_COLLECTION,
-                pipeline: buildNormalizedYallaStages(),
+                pipeline: buildNormalizedYallaStages(searchCandidateIds?.used),
             },
         },
         {
             $unionWith: {
                 coll: yallaMotor_1.YALLA_MOTOR_NEW_CARS_COLLECTION,
-                pipeline: buildNormalizedYallaStages(),
+                pipeline: buildNormalizedYallaStages(searchCandidateIds?.newCars),
             },
         },
     ];
 }
-function buildFilter(query) {
+function buildFilter(query, options) {
     const filter = {};
     const andFilters = [];
-    if (query.search) {
-        const terms = query.exactSearch
-            ? [query.search.trim()].filter(Boolean)
-            : query.search
-                .split(/\s+/)
-                .map((term) => term.trim())
-                .filter(Boolean);
-        for (const term of terms) {
-            const searchRegex = toRegex(term, { exact: query.exactSearch === true });
+    if (query.search && options?.skipSearchRegex !== true) {
+        const termGroups = (0, smart_search_1.buildSmartSearchTermGroups)(query.search, {
+            exact: query.exactSearch === true,
+        });
+        for (const group of termGroups) {
+            const searchRegexes = group.map((term) => toRegex(term, {
+                exact: query.exactSearch === true,
+                fuzzyArabic: query.exactSearch !== true,
+            }));
             andFilters.push({
                 $or: [
-                    { title: searchRegex },
-                    { description: searchRegex },
-                    { overviewH1: searchRegex },
-                    { overviewH4: searchRegex },
-                    { breadcrumb: searchRegex },
+                    { title: { $in: searchRegexes } },
+                    { description: { $in: searchRegexes } },
+                    { overviewH1: { $in: searchRegexes } },
+                    { overviewH4: { $in: searchRegexes } },
+                    { breadcrumb: { $in: searchRegexes } },
+                    { tag1: { $in: searchRegexes } },
+                    { tag2: { $in: searchRegexes } },
                 ],
             });
         }
@@ -872,9 +955,9 @@ function buildDescendingYearRange(years) {
     }
     return fullRange;
 }
-function buildYallaListPipeline(query, page, limit, mode = "items") {
+function buildYallaListPipeline(query, page, limit, mode = "items", searchCandidateIds, skipSearchRegex = false) {
     const skip = (page - 1) * limit;
-    const filter = buildFilter(query);
+    const filter = buildFilter(query, { skipSearchRegex });
     const sort = buildSort(query.sort);
     const isOptionsMode = query.fields === "options";
     const needsNumericPrice = mode === "count" ||
@@ -900,7 +983,7 @@ function buildYallaListPipeline(query, page, limit, mode = "items") {
     const applyHasMileage = query.hasMileage === true;
     const applyMileageRange = Object.keys(mileageRange).length > 0;
     const pipeline = [
-        ...buildCombinedYallaPipeline(),
+        ...buildCombinedYallaPipeline(searchCandidateIds ?? undefined),
         { $match: filter },
         {
             $project: {
@@ -1012,16 +1095,44 @@ async function listYallaMotors(query, options = {}) {
         const legacyCollection = (0, yallaMotor_1.getYallaMotorCollection)(db);
         const usedCollection = (0, yallaMotor_1.getYallaUsedCollection)(db);
         const newCarsCollection = (0, yallaMotor_1.getYallaNewCarsCollection)(db);
+        const searchCandidateIds = await resolveYallaSearchCandidateIds(query, legacyCollection, usedCollection, newCarsCollection);
+        const hasSearchText = Boolean(query.search?.trim());
+        const allSearchCandidateSetsSupported = searchCandidateIds?.legacy?.supported === true &&
+            searchCandidateIds?.used?.supported === true &&
+            searchCandidateIds?.newCars?.supported === true;
+        const skipSearchRegex = hasSearchText && query.exactSearch !== true && allSearchCandidateSetsSupported;
+        const hasNoSearchHits = skipSearchRegex &&
+            (searchCandidateIds?.legacy?.ids.length ?? 0) === 0 &&
+            (searchCandidateIds?.used?.ids.length ?? 0) === 0 &&
+            (searchCandidateIds?.newCars?.ids.length ?? 0) === 0;
+        if (hasNoSearchHits) {
+            if (query.fields === "modelYears") {
+                return {
+                    items: [],
+                    total: 0,
+                    page: 1,
+                    limit: 1,
+                };
+            }
+            const countMode = query.countMode === "none" ? "none" : "exact";
+            return {
+                items: [],
+                total: 0,
+                page,
+                limit,
+                ...(countMode === "none" ? { hasNext: false } : {}),
+            };
+        }
         if (query.fields === "modelYears") {
             const modelYearFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            });
+            }, { skipSearchRegex });
             const yearRows = await legacyCollection
                 .aggregate([
-                ...buildCombinedYallaPipeline(),
+                ...buildCombinedYallaPipeline(searchCandidateIds ?? undefined),
                 { $match: modelYearFilter },
                 { $match: { carModelYear: { $ne: null } } },
                 { $group: { _id: "$carModelYear" } },
@@ -1052,7 +1163,7 @@ async function listYallaMotors(query, options = {}) {
                     return legacyCount + usedCount + newCarsCount;
                 }
                 const [countRow] = await legacyCollection
-                    .aggregate(buildYallaListPipeline(query, 1, 1, "count"))
+                    .aggregate(buildYallaListPipeline(query, 1, 1, "count", searchCandidateIds, skipSearchRegex))
                     .toArray();
                 return toNumber(countRow?.count) ?? 0;
             });
@@ -1162,7 +1273,7 @@ async function listYallaMotors(query, options = {}) {
         }
         const fetchLimit = countMode === "none" ? limit + 1 : limit;
         const rawItems = await legacyCollection
-            .aggregate(buildYallaListPipeline(query, page, fetchLimit, "items"))
+            .aggregate(buildYallaListPipeline(query, page, fetchLimit, "items", searchCandidateIds, skipSearchRegex))
             .toArray();
         const hasNext = countMode === "none" ? rawItems.length > limit : undefined;
         const pageItems = countMode === "none" ? rawItems.slice(0, limit) : rawItems;

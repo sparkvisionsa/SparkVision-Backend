@@ -22,6 +22,11 @@ let AdminController = class AdminController {
         (0, context_1.applyContextCookies)(res, result.context);
         return result.payload;
     }
+    async sourceRecordStats(req, res) {
+        const result = await (0, service_1.getAdminSourceRecordStats)(req);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
     async config(req, res) {
         const result = await (0, service_1.getAdminConfigPayload)(req);
         (0, context_1.applyContextCookies)(res, result.context);
@@ -71,6 +76,14 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", Promise)
 ], AdminController.prototype, "analytics", null);
+__decorate([
+    (0, common_1.Get)("admin/source-record-stats"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], AdminController.prototype, "sourceRecordStats", null);
 __decorate([
     (0, common_1.Get)("admin/config"),
     __param(0, (0, common_1.Req)()),

@@ -5,6 +5,7 @@ exports.getHarajScrapeById = getHarajScrapeById;
 const mongodb_1 = require("../mongodb");
 const harajScrape_1 = require("../models/harajScrape");
 const vehicle_name_match_1 = require("../../lib/vehicle-name-match");
+const smart_search_1 = require("../../lib/smart-search");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -18,10 +19,17 @@ const LIST_CACHE_STALE_TTL_MS = 120_000;
 const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
 const COUNT_CACHE_STALE_TTL_MS = 300_000;
+const SEARCH_CANDIDATE_CACHE_TTL_MS = 45_000;
+const SEARCH_CANDIDATE_CACHE_STALE_TTL_MS = 180_000;
+const SEARCH_TEXT_CANDIDATE_LIMIT = 4_000;
+const SEARCH_TEXT_CANDIDATE_MIN_LIMIT = 300;
+const SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER = 14;
+const SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER = 20;
 function toRegex(value, options) {
-    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = options?.exact ? `^${escaped}$` : escaped;
-    return new RegExp(pattern, "i");
+    return (0, smart_search_1.buildSearchRegex)(value, {
+        exact: options?.exact,
+        fuzzyArabic: options?.fuzzyArabic === true,
+    });
 }
 function normalizeList(value) {
     if (!value)
@@ -183,25 +191,93 @@ function buildCoalescedMileageExpression(inputs) {
         $ifNull: [acc, expression],
     }), expressions[0]);
 }
-function buildFilter(query) {
+function canUseSearchCandidates(query) {
+    return query.exactSearch !== true && Boolean(query.search?.trim());
+}
+function resolveSearchCandidateLimit(query) {
+    const page = Math.max(query.page ?? 1, 1);
+    const limit = Math.max(query.limit ?? DEFAULT_LIMIT, 1);
+    const pageWindow = page * limit;
+    const usesDeepSort = query.sort === "price-high" || query.sort === "price-low" || query.sort === "comments";
+    const multiplier = usesDeepSort
+        ? SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER
+        : SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER;
+    const computedLimit = pageWindow * multiplier;
+    return Math.max(SEARCH_TEXT_CANDIDATE_MIN_LIMIT, Math.min(computedLimit, SEARCH_TEXT_CANDIDATE_LIMIT));
+}
+async function resolveHarajSearchCandidateIds(collection, cachePrefix, query) {
+    if (!canUseSearchCandidates(query)) {
+        return null;
+    }
+    const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
+        exact: false,
+        maxTerms: 8,
+        maxAliasesPerTerm: 8,
+        maxOutputTerms: 20,
+    });
+    if (!textSearchQuery) {
+        return null;
+    }
+    const candidateLimit = resolveSearchCandidateLimit(query);
+    const cacheKey = `${cachePrefix}:search-candidates:${textSearchQuery}:${candidateLimit}`;
+    return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, SEARCH_CANDIDATE_CACHE_TTL_MS, SEARCH_CANDIDATE_CACHE_STALE_TTL_MS, async () => {
+        try {
+            const rows = await collection
+                .find({
+                $text: {
+                    $search: textSearchQuery,
+                    $caseSensitive: false,
+                    $diacriticSensitive: false,
+                },
+            }, {
+                projection: { _id: 1 },
+                limit: candidateLimit,
+            })
+                .toArray();
+            if (candidateLimit >= SEARCH_TEXT_CANDIDATE_LIMIT && rows.length >= candidateLimit) {
+                return null;
+            }
+            return {
+                supported: true,
+                ids: rows.map((doc) => doc._id),
+            };
+        }
+        catch {
+            return null;
+        }
+    });
+}
+function buildFilter(query, searchCandidateIds) {
     const filter = {};
     const andFilters = [];
-    if (query.search) {
-        const terms = query.exactSearch
-            ? [query.search.trim()].filter(Boolean)
-            : query.search
-                .split(/\s+/)
-                .map((term) => term.trim())
-                .filter(Boolean);
-        for (const term of terms) {
-            const searchRegex = toRegex(term, { exact: query.exactSearch === true });
+    const shouldApplyRegexSearch = !searchCandidateIds?.supported || query.exactSearch === true;
+    if (searchCandidateIds?.supported) {
+        andFilters.push({
+            _id: { $in: [...searchCandidateIds.ids] },
+        });
+    }
+    if (query.search && shouldApplyRegexSearch) {
+        const termGroups = (0, smart_search_1.buildSmartSearchTermGroups)(query.search, {
+            exact: query.exactSearch === true,
+        });
+        for (const group of termGroups) {
+            const searchRegexes = group.map((term) => toRegex(term, {
+                exact: query.exactSearch === true,
+                fuzzyArabic: query.exactSearch !== true,
+            }));
             andFilters.push({
                 $or: [
-                    { title: searchRegex },
-                    { "item.title": searchRegex },
-                    { "item.bodyTEXT": searchRegex },
-                    { "gql.posts.json.data.posts.items.title": searchRegex },
-                    { "gql.posts.json.data.posts.items.bodyTEXT": searchRegex },
+                    { title: { $in: searchRegexes } },
+                    { "item.title": { $in: searchRegexes } },
+                    { "item.bodyTEXT": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.title": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.bodyTEXT": { $in: searchRegexes } },
+                    { "tags.1": { $in: searchRegexes } },
+                    { "tags.2": { $in: searchRegexes } },
+                    { "item.tags.1": { $in: searchRegexes } },
+                    { "item.tags.2": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.tags.1": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.tags.2": { $in: searchRegexes } },
                 ],
             });
         }
@@ -441,14 +517,15 @@ function buildListProjection(fields) {
         "gql.posts.json.data.posts.items.carInfo.mileage": 1,
     };
 }
-function buildCombinedHarajPipeline(filter, stagesAfterMatch) {
-    const primaryPipeline = [{ $match: filter }, ...stagesAfterMatch];
+function buildCombinedHarajPipeline(primaryFilter, carsFilter, stagesAfterMatch) {
+    const primaryPipeline = [{ $match: primaryFilter }, ...stagesAfterMatch];
+    const carsPipeline = [{ $match: carsFilter }, ...stagesAfterMatch];
     return [
         ...primaryPipeline,
         {
             $unionWith: {
                 coll: harajScrape_1.CARS_HARAJ_COLLECTION,
-                pipeline: primaryPipeline,
+                pipeline: carsPipeline,
             },
         },
     ];
@@ -541,17 +618,48 @@ async function listHarajScrapes(query, options = {}) {
         const db = await (0, mongodb_1.getMongoDb)();
         const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
         const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
-        const filter = buildFilter(query);
+        const [primarySearchCandidateIds, carsSearchCandidateIds] = await Promise.all([
+            resolveHarajSearchCandidateIds(primaryCollection, "haraj", query),
+            resolveHarajSearchCandidateIds(carsCollection, "cars-haraj", query),
+        ]);
+        const hasPrimaryNoHits = primarySearchCandidateIds?.supported === true && primarySearchCandidateIds.ids.length === 0;
+        const hasCarsNoHits = carsSearchCandidateIds?.supported === true && carsSearchCandidateIds.ids.length === 0;
+        if (query.search && hasPrimaryNoHits && hasCarsNoHits) {
+            if (query.fields === "modelYears") {
+                return {
+                    items: [],
+                    total: 0,
+                    page: 1,
+                    limit: 1,
+                };
+            }
+            const countMode = query.countMode === "none" ? "none" : "exact";
+            return {
+                items: [],
+                total: 0,
+                page,
+                limit,
+                ...(countMode === "none" ? { hasNext: false } : {}),
+            };
+        }
+        const primaryFilter = buildFilter(query, primarySearchCandidateIds);
+        const carsFilter = buildFilter(query, carsSearchCandidateIds);
         if (query.fields === "modelYears") {
-            const modelYearFilter = buildFilter({
+            const modelYearPrimaryFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            });
+            }, primarySearchCandidateIds);
+            const modelYearCarsFilter = buildFilter({
+                ...query,
+                tag1: undefined,
+                tag2: undefined,
+                carModelYear: undefined,
+            }, carsSearchCandidateIds);
             const yearRows = await primaryCollection
                 .aggregate([
-                ...buildCombinedHarajPipeline(modelYearFilter, [
+                ...buildCombinedHarajPipeline(modelYearPrimaryFilter, modelYearCarsFilter, [
                     {
                         $project: {
                             carModelYear: {
@@ -599,7 +707,7 @@ async function listHarajScrapes(query, options = {}) {
         const candidateWindow = Math.max(skip + fetchLimit, fetchLimit);
         const itemsPromise = primaryCollection
             .aggregate([
-            ...buildCombinedHarajPipeline(filter, [
+            ...buildCombinedHarajPipeline(primaryFilter, carsFilter, [
                 { $sort: sort },
                 { $limit: candidateWindow },
             ]),
@@ -615,7 +723,7 @@ async function listHarajScrapes(query, options = {}) {
         const total = countMode === "none"
             ? -1
             : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`haraj:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
-                if (isFilterEmpty(filter)) {
+                if (isFilterEmpty(primaryFilter) && isFilterEmpty(carsFilter)) {
                     const [primaryCount, carsCount] = await Promise.all([
                         primaryCollection.estimatedDocumentCount(),
                         carsCollection.estimatedDocumentCount(),
@@ -623,8 +731,8 @@ async function listHarajScrapes(query, options = {}) {
                     return primaryCount + carsCount;
                 }
                 const [primaryCount, carsCount] = await Promise.all([
-                    primaryCollection.countDocuments(filter),
-                    carsCollection.countDocuments(filter),
+                    primaryCollection.countDocuments(primaryFilter),
+                    carsCollection.countDocuments(carsFilter),
                 ]);
                 return primaryCount + carsCount;
             });

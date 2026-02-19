@@ -4,6 +4,7 @@ import { applyContextCookies } from "@/server/auth-tracking/context";
 import {
   getAdminAnalytics,
   getAdminConfigPayload,
+  getAdminSourceRecordStats,
   listAdminActivities,
   listAdminUsers,
   updateAdminConfigPayload,
@@ -15,6 +16,13 @@ export class AdminController {
   @Get("admin/analytics")
   async analytics(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await getAdminAnalytics(req);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Get("admin/source-record-stats")
+  async sourceRecordStats(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const result = await getAdminSourceRecordStats(req);
     applyContextCookies(res, result.context);
     return result.payload;
   }

@@ -8,6 +8,11 @@ import {
 } from "../models/harajScrape";
 import { buildVehicleAliases } from "../../lib/vehicle-name-match";
 import {
+  buildSearchRegex,
+  buildSmartSearchTermGroups,
+  buildSmartTextSearchQuery,
+} from "../../lib/smart-search";
+import {
   getOrSetRuntimeCache,
   getOrSetRuntimeCacheStaleWhileRevalidate,
 } from "../lib/runtime-cache";
@@ -51,15 +56,26 @@ const LIST_CACHE_STALE_TTL_MS = 120_000;
 const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
 const COUNT_CACHE_STALE_TTL_MS = 300_000;
+const SEARCH_CANDIDATE_CACHE_TTL_MS = 45_000;
+const SEARCH_CANDIDATE_CACHE_STALE_TTL_MS = 180_000;
+const SEARCH_TEXT_CANDIDATE_LIMIT = 4_000;
+const SEARCH_TEXT_CANDIDATE_MIN_LIMIT = 300;
+const SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER = 14;
+const SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER = 20;
+type SearchCandidateIdsResult = {
+  supported: true;
+  ids: readonly unknown[];
+};
 
 type ListOptions = {
   maxLimit?: number;
 };
 
-function toRegex(value: string, options?: { exact?: boolean }) {
-  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = options?.exact ? `^${escaped}$` : escaped;
-  return new RegExp(pattern, "i");
+function toRegex(value: string, options?: { exact?: boolean; fuzzyArabic?: boolean }) {
+  return buildSearchRegex(value, {
+    exact: options?.exact,
+    fuzzyArabic: options?.fuzzyArabic === true,
+  });
 }
 
 function normalizeList(value?: string | string[]) {
@@ -228,28 +244,127 @@ function buildCoalescedMileageExpression(inputs: Array<Document | string>): Docu
   );
 }
 
-function buildFilter(query: HarajScrapeListQuery): Filter<HarajScrapeDoc> {
+function canUseSearchCandidates(query: HarajScrapeListQuery) {
+  return query.exactSearch !== true && Boolean(query.search?.trim());
+}
+
+function resolveSearchCandidateLimit(query: HarajScrapeListQuery) {
+  const page = Math.max(query.page ?? 1, 1);
+  const limit = Math.max(query.limit ?? DEFAULT_LIMIT, 1);
+  const pageWindow = page * limit;
+  const usesDeepSort =
+    query.sort === "price-high" || query.sort === "price-low" || query.sort === "comments";
+  const multiplier = usesDeepSort
+    ? SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER
+    : SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER;
+  const computedLimit = pageWindow * multiplier;
+
+  return Math.max(
+    SEARCH_TEXT_CANDIDATE_MIN_LIMIT,
+    Math.min(computedLimit, SEARCH_TEXT_CANDIDATE_LIMIT)
+  );
+}
+
+async function resolveHarajSearchCandidateIds(
+  collection: ReturnType<typeof getHarajScrapeCollection>,
+  cachePrefix: string,
+  query: HarajScrapeListQuery
+) {
+  if (!canUseSearchCandidates(query)) {
+    return null;
+  }
+
+  const textSearchQuery = buildSmartTextSearchQuery(query.search, {
+    exact: false,
+    maxTerms: 8,
+    maxAliasesPerTerm: 8,
+    maxOutputTerms: 20,
+  });
+  if (!textSearchQuery) {
+    return null;
+  }
+
+  const candidateLimit = resolveSearchCandidateLimit(query);
+  const cacheKey = `${cachePrefix}:search-candidates:${textSearchQuery}:${candidateLimit}`;
+  return getOrSetRuntimeCacheStaleWhileRevalidate(
+    cacheKey,
+    SEARCH_CANDIDATE_CACHE_TTL_MS,
+    SEARCH_CANDIDATE_CACHE_STALE_TTL_MS,
+    async () => {
+      try {
+        const rows = await collection
+          .find(
+            {
+              $text: {
+                $search: textSearchQuery,
+                $caseSensitive: false,
+                $diacriticSensitive: false,
+              },
+            } as Filter<HarajScrapeDoc>,
+            {
+              projection: { _id: 1 },
+              limit: candidateLimit,
+            }
+          )
+          .toArray();
+
+        // If we hit the hard cap, avoid clipping and fallback to regex-only flow.
+        if (candidateLimit >= SEARCH_TEXT_CANDIDATE_LIMIT && rows.length >= candidateLimit) {
+          return null;
+        }
+
+        return {
+          supported: true,
+          ids: rows.map((doc) => doc._id),
+        } as SearchCandidateIdsResult;
+      } catch {
+        // Text index might not exist yet on all environments.
+        return null;
+      }
+    }
+  );
+}
+
+function buildFilter(
+  query: HarajScrapeListQuery,
+  searchCandidateIds?: SearchCandidateIdsResult | null
+): Filter<HarajScrapeDoc> {
   const filter: Filter<HarajScrapeDoc> = {};
   const andFilters: Filter<HarajScrapeDoc>[] = [];
+  const shouldApplyRegexSearch = !searchCandidateIds?.supported || query.exactSearch === true;
 
-  if (query.search) {
-    const terms = query.exactSearch
-      ? [query.search.trim()].filter(Boolean)
-      : query.search
-          .split(/\s+/)
-          .map((term) => term.trim())
-          .filter(Boolean);
-    for (const term of terms) {
-      const searchRegex = toRegex(term, { exact: query.exactSearch === true });
+  if (searchCandidateIds?.supported) {
+    andFilters.push({
+      _id: { $in: [...searchCandidateIds.ids] },
+    } as Filter<HarajScrapeDoc>);
+  }
+
+  if (query.search && shouldApplyRegexSearch) {
+    const termGroups = buildSmartSearchTermGroups(query.search, {
+      exact: query.exactSearch === true,
+    });
+    for (const group of termGroups) {
+      const searchRegexes = group.map((term) =>
+        toRegex(term, {
+          exact: query.exactSearch === true,
+          fuzzyArabic: query.exactSearch !== true,
+        })
+      );
       andFilters.push({
         $or: [
-          { title: searchRegex },
-          { "item.title": searchRegex },
-          { "item.bodyTEXT": searchRegex },
-          { "gql.posts.json.data.posts.items.title": searchRegex },
-          { "gql.posts.json.data.posts.items.bodyTEXT": searchRegex },
+          { title: { $in: searchRegexes } },
+          { "item.title": { $in: searchRegexes } },
+          { "item.bodyTEXT": { $in: searchRegexes } },
+          { "gql.posts.json.data.posts.items.title": { $in: searchRegexes } },
+          { "gql.posts.json.data.posts.items.bodyTEXT": { $in: searchRegexes } },
+          { "tags.1": { $in: searchRegexes } },
+          { "tags.2": { $in: searchRegexes } },
+          { "item.tags.1": { $in: searchRegexes } },
+          { "item.tags.2": { $in: searchRegexes } },
+          { "gql.posts.json.data.posts.items.tags.1": { $in: searchRegexes } },
+          { "gql.posts.json.data.posts.items.tags.2": { $in: searchRegexes } },
         ],
-      });
+      } as Filter<HarajScrapeDoc>);
     }
   }
 
@@ -509,16 +624,18 @@ function buildListProjection(fields?: HarajScrapeListQuery["fields"]): Document 
 }
 
 function buildCombinedHarajPipeline(
-  filter: Filter<HarajScrapeDoc>,
+  primaryFilter: Filter<HarajScrapeDoc>,
+  carsFilter: Filter<HarajScrapeDoc>,
   stagesAfterMatch: Document[]
 ): Document[] {
-  const primaryPipeline: Document[] = [{ $match: filter }, ...stagesAfterMatch];
+  const primaryPipeline: Document[] = [{ $match: primaryFilter }, ...stagesAfterMatch];
+  const carsPipeline: Document[] = [{ $match: carsFilter }, ...stagesAfterMatch];
   return [
     ...primaryPipeline,
     {
       $unionWith: {
         coll: CARS_HARAJ_COLLECTION,
-        pipeline: primaryPipeline,
+        pipeline: carsPipeline,
       },
     },
   ];
@@ -633,17 +750,57 @@ export async function listHarajScrapes(
     const db = await getMongoDb();
     const primaryCollection = getHarajScrapeCollection(db);
     const carsCollection = getCarsHarajCollection(db);
-    const filter = buildFilter(query);
+    const [primarySearchCandidateIds, carsSearchCandidateIds] = await Promise.all([
+      resolveHarajSearchCandidateIds(primaryCollection, "haraj", query),
+      resolveHarajSearchCandidateIds(carsCollection, "cars-haraj", query),
+    ]);
+    const hasPrimaryNoHits =
+      primarySearchCandidateIds?.supported === true && primarySearchCandidateIds.ids.length === 0;
+    const hasCarsNoHits =
+      carsSearchCandidateIds?.supported === true && carsSearchCandidateIds.ids.length === 0;
+    if (query.search && hasPrimaryNoHits && hasCarsNoHits) {
+      if (query.fields === "modelYears") {
+        return {
+          items: [] as Array<Record<string, any>>,
+          total: 0,
+          page: 1,
+          limit: 1,
+        };
+      }
+
+      const countMode = query.countMode === "none" ? "none" : "exact";
+      return {
+        items: [] as Array<Record<string, any>>,
+        total: 0,
+        page,
+        limit,
+        ...(countMode === "none" ? { hasNext: false } : {}),
+      };
+    }
+    const primaryFilter = buildFilter(query, primarySearchCandidateIds);
+    const carsFilter = buildFilter(query, carsSearchCandidateIds);
     if (query.fields === "modelYears") {
-      const modelYearFilter = buildFilter({
-        ...query,
-        tag1: undefined,
-        tag2: undefined,
-        carModelYear: undefined,
-      });
+      const modelYearPrimaryFilter = buildFilter(
+        {
+          ...query,
+          tag1: undefined,
+          tag2: undefined,
+          carModelYear: undefined,
+        },
+        primarySearchCandidateIds
+      );
+      const modelYearCarsFilter = buildFilter(
+        {
+          ...query,
+          tag1: undefined,
+          tag2: undefined,
+          carModelYear: undefined,
+        },
+        carsSearchCandidateIds
+      );
       const yearRows = await primaryCollection
         .aggregate([
-          ...buildCombinedHarajPipeline(modelYearFilter, [
+          ...buildCombinedHarajPipeline(modelYearPrimaryFilter, modelYearCarsFilter, [
             {
               $project: {
                 carModelYear: {
@@ -695,7 +852,7 @@ export async function listHarajScrapes(
 
     const itemsPromise = primaryCollection
       .aggregate([
-        ...buildCombinedHarajPipeline(filter, [
+        ...buildCombinedHarajPipeline(primaryFilter, carsFilter, [
           { $sort: sort as Document },
           { $limit: candidateWindow },
         ]),
@@ -718,7 +875,7 @@ export async function listHarajScrapes(
             COUNT_CACHE_TTL_MS,
             COUNT_CACHE_STALE_TTL_MS,
             async () => {
-              if (isFilterEmpty(filter)) {
+              if (isFilterEmpty(primaryFilter) && isFilterEmpty(carsFilter)) {
                 const [primaryCount, carsCount] = await Promise.all([
                   primaryCollection.estimatedDocumentCount(),
                   carsCollection.estimatedDocumentCount(),
@@ -726,8 +883,8 @@ export async function listHarajScrapes(
                 return primaryCount + carsCount;
               }
               const [primaryCount, carsCount] = await Promise.all([
-                primaryCollection.countDocuments(filter),
-                carsCollection.countDocuments(filter),
+                primaryCollection.countDocuments(primaryFilter),
+                carsCollection.countDocuments(carsFilter),
               ]);
               return primaryCount + carsCount;
             }

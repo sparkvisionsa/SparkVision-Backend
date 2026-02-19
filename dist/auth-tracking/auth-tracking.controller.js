@@ -75,8 +75,13 @@ let AuthTrackingController = class AuthTrackingController {
         return result.payload;
     }
     async updateTrackingSession(req, res, body) {
-        const parsed = sessionSchema.parse(body);
-        const result = await (0, service_1.handleSessionPayload)(req, parsed);
+        const parsed = sessionSchema.safeParse(body);
+        if (!parsed.success) {
+            throw new service_1.HttpError(400, "invalid_payload", "Invalid session payload.", {
+                issues: parsed.error.issues,
+            });
+        }
+        const result = await (0, service_1.handleSessionPayload)(req, parsed.data);
         (0, context_1.applyContextCookies)(res, result.context);
         return result.payload;
     }

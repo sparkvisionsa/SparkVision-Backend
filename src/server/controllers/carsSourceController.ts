@@ -2,9 +2,22 @@ import { listHarajScrapes, type HarajScrapeListQuery } from "./harajScrapeContro
 import { listYallaMotors } from "./yallaMotorController";
 import { listSyarahs } from "./syarahController";
 import { getOrSetRuntimeCacheStaleWhileRevalidate } from "../lib/runtime-cache";
+import { buildVehicleAliases } from "@/lib/vehicle-name-match";
 
 export type CarsSourcesListQuery = HarajScrapeListQuery & {
   sources?: string[];
+};
+
+export type CarsSearchSuggestionsQuery = CarsSourcesListQuery & {
+  q?: string;
+};
+
+type CarsSourceKey = "haraj" | "yallamotor" | "syarah";
+type SuggestionCandidate = {
+  label: string;
+  normalized: string;
+  source: CarsSourceKey;
+  weight: number;
 };
 
 const DEFAULT_LIMIT = 25;
@@ -17,9 +30,262 @@ const MODEL_YEARS_CACHE_TTL_MS = 120_000;
 const LIST_CACHE_STALE_TTL_MS = 120_000;
 const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
+const SUGGESTIONS_DEFAULT_LIMIT = 8;
+const SUGGESTIONS_MAX_LIMIT = 20;
+const SUGGESTIONS_SOURCE_FETCH_LIMIT = 80;
+const SUGGESTIONS_CACHE_TTL_MS = 30_000;
+const SUGGESTIONS_CACHE_STALE_TTL_MS = 180_000;
+const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+const SOURCE_KEYS: CarsSourceKey[] = ["haraj", "yallamotor", "syarah"];
+const SUGGESTIONS_MIN_QUERY_LENGTH = 2;
 
 function normalizeSource(value: string) {
   return value.trim().toLowerCase();
+}
+
+function normalizeSuggestionText(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(ARABIC_DIACRITICS_REGEX, "")
+    .replace(/[\u0625\u0623\u0622\u0671]/g, "\u0627")
+    .replace(/\u0649/g, "\u064a")
+    .replace(/\u0624/g, "\u0648")
+    .replace(/\u0626/g, "\u064a")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function tokenizeSuggestionText(value: string) {
+  return normalizeSuggestionText(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1);
+}
+
+function resolveSuggestionSources(sources?: string[]) {
+  const normalizedSources = (sources ?? SOURCE_KEYS).map(normalizeSource);
+  return SOURCE_KEYS.filter((source) => normalizedSources.includes(source));
+}
+
+function clampSuggestionLimit(limit?: number) {
+  if (typeof limit !== "number" || Number.isNaN(limit)) {
+    return SUGGESTIONS_DEFAULT_LIMIT;
+  }
+  return Math.max(1, Math.min(Math.trunc(limit), SUGGESTIONS_MAX_LIMIT));
+}
+
+function buildSuggestionSearchTerms(rawQuery: string) {
+  const candidates = [rawQuery, ...buildVehicleAliases(rawQuery)];
+  const unique = Array.from(
+    new Set(
+      candidates
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  );
+
+  const primary = unique[0] ?? "";
+  const alias = unique.find(
+    (value) => normalizeSuggestionText(value) !== normalizeSuggestionText(primary)
+  );
+  return alias ? [primary, alias] : [primary];
+}
+
+function buildSuggestionListQuery(
+  query: CarsSearchSuggestionsQuery,
+  search: string
+): HarajScrapeListQuery {
+  const {
+    q: _q,
+    sources: _sources,
+    page: _page,
+    limit: _limit,
+    sort: _sort,
+    fields: _fields,
+    countMode: _countMode,
+    ...rest
+  } = query;
+
+  return {
+    ...rest,
+    search,
+    exactSearch: false,
+    page: 1,
+    limit: SUGGESTIONS_SOURCE_FETCH_LIMIT,
+    sort: "newest",
+    fields: "default",
+    countMode: "none",
+  };
+}
+
+function toSuggestionString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function toSuggestionTags(item: Record<string, any>) {
+  if (!Array.isArray(item.tags)) {
+    return [];
+  }
+  return item.tags
+    .map((tag) => toSuggestionString(tag))
+    .filter(Boolean);
+}
+
+function extractSuggestionCandidates(
+  source: CarsSourceKey,
+  item: Record<string, any>
+): SuggestionCandidate[] {
+  const title = toSuggestionString(item.title);
+  const tags = toSuggestionTags(item);
+  const brand = toSuggestionString(tags[1]);
+  const model = toSuggestionString(tags[2]);
+  const suggestions: SuggestionCandidate[] = [];
+
+  if (title && title.toLowerCase() !== "untitled") {
+    suggestions.push({
+      label: title,
+      normalized: normalizeSuggestionText(title),
+      source,
+      weight: 7,
+    });
+  }
+  if (brand) {
+    suggestions.push({
+      label: brand,
+      normalized: normalizeSuggestionText(brand),
+      source,
+      weight: 8,
+    });
+  }
+  if (model) {
+    suggestions.push({
+      label: model,
+      normalized: normalizeSuggestionText(model),
+      source,
+      weight: 6,
+    });
+  }
+  if (brand && model) {
+    const combined = `${brand} ${model}`.trim();
+    suggestions.push({
+      label: combined,
+      normalized: normalizeSuggestionText(combined),
+      source,
+      weight: 10,
+    });
+  }
+
+  return suggestions.filter((suggestion) => Boolean(suggestion.normalized));
+}
+
+async function listSourceItemsForSuggestions(
+  source: CarsSourceKey,
+  query: HarajScrapeListQuery
+) {
+  if (source === "haraj") {
+    const result = await listHarajScrapes(query, { maxLimit: SUGGESTIONS_SOURCE_FETCH_LIMIT });
+    return result.items as Array<Record<string, any>>;
+  }
+  if (source === "yallamotor") {
+    const result = await listYallaMotors(query, { maxLimit: SUGGESTIONS_SOURCE_FETCH_LIMIT });
+    return result.items as Array<Record<string, any>>;
+  }
+  const result = await listSyarahs(query, { maxLimit: SUGGESTIONS_SOURCE_FETCH_LIMIT });
+  return result.items as Array<Record<string, any>>;
+}
+
+function scoreSuggestionCandidate(
+  candidate: SuggestionCandidate,
+  normalizedVariants: string[],
+  normalizedQueryTokens: string[]
+) {
+  let bestVariantScore = -1;
+  for (const variant of normalizedVariants) {
+    if (!variant) continue;
+    if (candidate.normalized === variant) {
+      bestVariantScore = Math.max(bestVariantScore, 120);
+      continue;
+    }
+    if (candidate.normalized.startsWith(variant)) {
+      bestVariantScore = Math.max(bestVariantScore, 95);
+      continue;
+    }
+    if (candidate.normalized.includes(variant)) {
+      bestVariantScore = Math.max(bestVariantScore, 72);
+    }
+  }
+
+  const matchedTokenCount = normalizedQueryTokens.filter((token) =>
+    candidate.normalized.includes(token)
+  ).length;
+  if (bestVariantScore < 0 && matchedTokenCount === 0) {
+    return -1;
+  }
+
+  const fullTokenBonus =
+    normalizedQueryTokens.length > 0 && matchedTokenCount === normalizedQueryTokens.length
+      ? 26
+      : matchedTokenCount * 6;
+  const lengthDelta = Math.abs(candidate.normalized.length - (normalizedVariants[0]?.length ?? 0));
+  const compactnessBonus = Math.max(0, 15 - Math.min(lengthDelta, 15));
+
+  return (bestVariantScore < 0 ? 35 : bestVariantScore) + fullTokenBonus + compactnessBonus + candidate.weight;
+}
+
+function rankSuggestionCandidates(
+  candidates: SuggestionCandidate[],
+  queryText: string,
+  limit: number
+) {
+  const normalizedVariants = buildSuggestionSearchTerms(queryText)
+    .map((value) => normalizeSuggestionText(value))
+    .filter(Boolean);
+  const normalizedQueryTokens = tokenizeSuggestionText(queryText);
+  const ranked = new Map<
+    string,
+    {
+      label: string;
+      score: number;
+      hits: number;
+      sources: Set<CarsSourceKey>;
+    }
+  >();
+
+  for (const candidate of candidates) {
+    const score = scoreSuggestionCandidate(candidate, normalizedVariants, normalizedQueryTokens);
+    if (score < 0) continue;
+
+    const existing = ranked.get(candidate.normalized);
+    if (!existing) {
+      ranked.set(candidate.normalized, {
+        label: candidate.label,
+        score,
+        hits: 1,
+        sources: new Set([candidate.source]),
+      });
+      continue;
+    }
+
+    existing.hits += 1;
+    existing.sources.add(candidate.source);
+    if (score > existing.score) {
+      existing.score = score;
+      existing.label = candidate.label;
+    }
+  }
+
+  return Array.from(ranked.values())
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.sources.size !== a.sources.size) return b.sources.size - a.sources.size;
+      if (b.hits !== a.hits) return b.hits - a.hits;
+      if (a.label.length !== b.label.length) return a.label.length - b.label.length;
+      return a.label.localeCompare(b.label);
+    })
+    .slice(0, limit)
+    .map((entry) => entry.label);
 }
 
 function toEpochMillis(value: number | null) {
@@ -417,6 +683,67 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
       limit,
       ...(hasNext !== undefined ? { hasNext } : {}),
     };
+    }
+  );
+}
+
+export async function listCarsSourceSearchSuggestions(query: CarsSearchSuggestionsQuery) {
+  const rawQuery = (query.q ?? query.search ?? "").trim();
+  if (rawQuery.length < SUGGESTIONS_MIN_QUERY_LENGTH) {
+    return { items: [] as string[] };
+  }
+
+  const limit = clampSuggestionLimit(query.limit);
+  const sources = resolveSuggestionSources(query.sources);
+  if (sources.length === 0) {
+    return { items: [] as string[] };
+  }
+
+  const cacheKey = `cars-sources:suggestions:${JSON.stringify({
+    q: rawQuery,
+    limit,
+    sources,
+    tag0: query.tag0 ?? "",
+    tag1: query.tag1 ?? "",
+    tag2: query.tag2 ?? "",
+    carModelYear: query.carModelYear ?? null,
+    excludeTag1: query.excludeTag1 ?? "",
+  })}`;
+
+  return getOrSetRuntimeCacheStaleWhileRevalidate(
+    cacheKey,
+    SUGGESTIONS_CACHE_TTL_MS,
+    SUGGESTIONS_CACHE_STALE_TTL_MS,
+    async () => {
+      const searchTerms = buildSuggestionSearchTerms(rawQuery);
+      const allCandidates: SuggestionCandidate[] = [];
+
+      for (const searchTerm of searchTerms) {
+        const listQuery = buildSuggestionListQuery(query, searchTerm);
+        const sourceRows = await Promise.all(
+          sources.map(async (source) => {
+            const items = await listSourceItemsForSuggestions(source, listQuery);
+            return {
+              source,
+              items,
+            };
+          })
+        );
+
+        for (const sourceRow of sourceRows) {
+          for (const item of sourceRow.items) {
+            allCandidates.push(...extractSuggestionCandidates(sourceRow.source, item));
+          }
+        }
+
+        if (allCandidates.length >= limit * 12) {
+          break;
+        }
+      }
+
+      return {
+        items: rankSuggestionCandidates(allCandidates, rawQuery, limit),
+      };
     }
   );
 }

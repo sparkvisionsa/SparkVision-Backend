@@ -12,8 +12,10 @@ if (!mongoUrl || !dbName) {
 
 async function createIndexes(collection, specs) {
   for (const spec of specs) {
+    const key = spec && typeof spec === "object" && "key" in spec ? spec.key : spec;
+    const options = spec && typeof spec === "object" && "options" in spec ? spec.options : undefined;
     try {
-      const name = await collection.createIndex(spec);
+      const name = await collection.createIndex(key, options);
       console.log(`[ok] ${collection.collectionName} -> ${name}`);
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
@@ -45,6 +47,30 @@ async function main() {
       { "item.carInfo.model": 1 },
       { "item.city": 1 },
       { "item.geoCity": 1 },
+      {
+        key: {
+          title: "text",
+          "item.title": "text",
+          "item.bodyTEXT": "text",
+          tags: "text",
+          "item.tags": "text",
+          "gql.posts.json.data.posts.items.title": "text",
+          "gql.posts.json.data.posts.items.bodyTEXT": "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            title: 12,
+            "item.title": 12,
+            tags: 10,
+            "item.tags": 10,
+            "gql.posts.json.data.posts.items.title": 8,
+            "item.bodyTEXT": 4,
+            "gql.posts.json.data.posts.items.bodyTEXT": 3,
+          },
+        },
+      },
     ]);
 
     await createIndexes(carsHaraj, [
@@ -54,6 +80,30 @@ async function main() {
       { "item.carInfo.model": 1 },
       { "item.city": 1 },
       { "item.geoCity": 1 },
+      {
+        key: {
+          title: "text",
+          "item.title": "text",
+          "item.bodyTEXT": "text",
+          tags: "text",
+          "item.tags": "text",
+          "gql.posts.json.data.posts.items.title": "text",
+          "gql.posts.json.data.posts.items.bodyTEXT": "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            title: 12,
+            "item.title": 12,
+            tags: 10,
+            "item.tags": 10,
+            "gql.posts.json.data.posts.items.title": 8,
+            "item.bodyTEXT": 4,
+            "gql.posts.json.data.posts.items.bodyTEXT": 3,
+          },
+        },
+      },
     ]);
 
     await createIndexes(yallaLegacy, [
@@ -62,6 +112,34 @@ async function main() {
       { adId: 1 },
       { url: 1 },
       { "detail.url": 1 },
+      {
+        key: {
+          cardTitle: "text",
+          title: "text",
+          description: "text",
+          location: "text",
+          breadcrumbs: "text",
+          "detail.breadcrumb": "text",
+          "detail.overview.h1": "text",
+          "detail.overview.h4": "text",
+          "detail.description": "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            cardTitle: 12,
+            title: 11,
+            "detail.overview.h1": 10,
+            breadcrumbs: 8,
+            "detail.breadcrumb": 8,
+            location: 6,
+            description: 4,
+            "detail.description": 4,
+            "detail.overview.h4": 3,
+          },
+        },
+      },
     ]);
 
     await createIndexes(yallaUsed, [
@@ -71,6 +149,34 @@ async function main() {
       { adId: 1 },
       { url: 1 },
       { "detail.url": 1 },
+      {
+        key: {
+          cardTitle: "text",
+          title: "text",
+          description: "text",
+          location: "text",
+          breadcrumbs: "text",
+          "detail.breadcrumb": "text",
+          "detail.overview.h1": "text",
+          "detail.overview.h4": "text",
+          "detail.description": "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            cardTitle: 12,
+            title: 11,
+            "detail.overview.h1": 10,
+            breadcrumbs: 8,
+            "detail.breadcrumb": 8,
+            location: 6,
+            description: 4,
+            "detail.description": 4,
+            "detail.overview.h4": 3,
+          },
+        },
+      },
     ]);
 
     await createIndexes(yallaNewCars, [
@@ -80,6 +186,34 @@ async function main() {
       { adId: 1 },
       { url: 1 },
       { "detail.url": 1 },
+      {
+        key: {
+          cardTitle: "text",
+          title: "text",
+          description: "text",
+          location: "text",
+          breadcrumbs: "text",
+          "detail.breadcrumb": "text",
+          "detail.overview.h1": "text",
+          "detail.overview.h4": "text",
+          "detail.description": "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            cardTitle: 12,
+            title: 11,
+            "detail.overview.h1": 10,
+            breadcrumbs: 8,
+            "detail.breadcrumb": 8,
+            location: 6,
+            description: 4,
+            "detail.description": 4,
+            "detail.overview.h4": 3,
+          },
+        },
+      },
     ]);
 
     await createIndexes(syarah, [
@@ -92,6 +226,34 @@ async function main() {
       { year: -1 },
       { mileage_km: 1 },
       { price_cash: -1 },
+      {
+        key: {
+          title: "text",
+          brand: "text",
+          model: "text",
+          trim: "text",
+          city: "text",
+          origin: "text",
+          fuel_type: "text",
+          transmission: "text",
+          tags: "text",
+        },
+        options: {
+          name: "smart_search_text",
+          default_language: "none",
+          weights: {
+            title: 12,
+            brand: 11,
+            model: 11,
+            trim: 8,
+            tags: 7,
+            city: 5,
+            origin: 4,
+            fuel_type: 3,
+            transmission: 3,
+          },
+        },
+      },
     ]);
   } finally {
     await client.close();

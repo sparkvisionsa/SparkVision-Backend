@@ -1,4 +1,4 @@
-﻿import {
+import {
   ArgumentsHost,
   Catch,
   ExceptionFilter,
@@ -7,6 +7,7 @@
   Logger,
 } from "@nestjs/common";
 import type { Response } from "express";
+import { ZodError } from "zod";
 import { HttpError } from "@/server/auth-tracking/service";
 
 @Catch()
@@ -29,6 +30,17 @@ export class ApiErrorFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const payload = exception.getResponse();
       response.status(status).json(payload);
+      return;
+    }
+
+    if (exception instanceof ZodError) {
+      response.status(HttpStatus.BAD_REQUEST).json({
+        error: "invalid_payload",
+        message: "Invalid request payload.",
+        details: {
+          issues: exception.issues,
+        },
+      });
       return;
     }
 

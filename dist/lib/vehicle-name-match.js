@@ -120,6 +120,49 @@ const LATIN_TO_ARABIC_SPELLED_LETTER = {
     "8": "8",
     "9": "9",
 };
+const KNOWN_VEHICLE_ALIAS_GROUPS = [
+    ["toyota", "تويوتا"],
+    ["nissan", "نيسان"],
+    ["hyundai", "هيونداي", "هونداي"],
+    ["kia", "كيا"],
+    ["ford", "فورد"],
+    ["chevrolet", "chevy", "شفروليه", "شيفروليه", "شفر"],
+    ["gmc", "جمس", "جي ام سي"],
+    ["lexus", "لكزس"],
+    ["mercedes", "mercedes benz", "benz", "مرسيدس", "مرسيدس بنز", "بنز"],
+    ["bmw", "بي ام دبليو", "بى ام دبليو"],
+    ["audi", "اودي", "أودي"],
+    ["mazda", "مازدا"],
+    ["honda", "هوندا"],
+    ["mitsubishi", "ميتسوبيشي"],
+    ["dodge", "دودج"],
+    ["jeep", "جيب"],
+    ["isuzu", "ايسوزو", "إيسوزو"],
+    ["land cruiser", "landcruiser", "لاند كروزر", "لاندكروزر", "gxr", "جي اكس ار", "vxr", "في اكس ار"],
+    ["prado", "برادو"],
+    ["camry", "كامري"],
+    ["corolla", "كورولا"],
+    ["yaris", "يارس", "ياريس"],
+    ["hilux", "هايلكس", "هايلوكس"],
+    ["rav4", "rav 4", "راف4", "راف فور"],
+    ["fortuner", "فورتشنر", "فورشنر"],
+    ["sonata", "سوناتا"],
+    ["elantra", "النترا", "إلنترا"],
+    ["accent", "اكسنت", "أكسنت"],
+    ["tucson", "توسان"],
+    ["patrol", "باترول"],
+    ["sunny", "صني", "سني"],
+    ["altima", "التيما", "ألتيما"],
+    ["maxima", "ماكسيما", "مكسيما"],
+    ["accord", "اكورد", "أكورد"],
+    ["civic", "سيفيك", "سيفك"],
+    ["crv", "cr v", "cr-v", "سي ار في", "سي آر في"],
+    ["tahoe", "تاهو"],
+    ["suburban", "سوبربان"],
+    ["yukon", "يوكن"],
+    ["silverado", "سلفرادو", "سيلفرادو"],
+    ["sierra", "سييرا"],
+];
 function replaceArabicDigits(value) {
     return value.replace(/[٠-٩]/g, (digit) => ARABIC_DIGIT_MAP[digit] ?? digit);
 }
@@ -176,6 +219,25 @@ function latinToArabicSpelledLetters(value) {
 function latinSkeleton(value) {
     return value.replace(/[aeiouyw]/g, "");
 }
+function addKnownVehicleAliases(aliasSet, addAlias) {
+    const existing = Array.from(aliasSet);
+    if (existing.length === 0)
+        return;
+    const compactExisting = new Set(existing
+        .map((item) => normalizeText(item).replace(/\s+/g, ""))
+        .filter(Boolean));
+    for (const group of KNOWN_VEHICLE_ALIAS_GROUPS) {
+        const compactGroupAliases = new Set(group
+            .map((alias) => normalizeText(alias).replace(/\s+/g, ""))
+            .filter(Boolean));
+        const hasMatch = Array.from(compactGroupAliases).some((alias) => compactExisting.has(alias));
+        if (!hasMatch)
+            continue;
+        for (const alias of group) {
+            addAlias(alias);
+        }
+    }
+}
 function buildVehicleAliases(value) {
     const input = String(value ?? "").trim();
     if (!input)
@@ -205,6 +267,7 @@ function buildVehicleAliases(value) {
         addAlias(latinToArabicSpelledLetters(latinCompact));
         addAlias(latinToArabicSpelledLetters(latinCompact).replace(/\s+/g, ""));
     }
+    addKnownVehicleAliases(aliases, addAlias);
     return Array.from(aliases).filter(Boolean);
 }
 function toVehicleCanonicalKey(value) {

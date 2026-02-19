@@ -5,6 +5,7 @@ import { applyContextCookies } from "@/server/auth-tracking/context";
 import {
   getSessionSnapshot,
   handleSessionPayload,
+  HttpError,
   loginUser,
   logoutUser,
   registerUser,
@@ -96,8 +97,13 @@ export class AuthTrackingController {
     @Res({ passthrough: true }) res: Response,
     @Body() body: unknown,
   ) {
-    const parsed = sessionSchema.parse(body);
-    const result = await handleSessionPayload(req, parsed);
+    const parsed = sessionSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new HttpError(400, "invalid_payload", "Invalid session payload.", {
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await handleSessionPayload(req, parsed.data);
     applyContextCookies(res, result.context);
     return result.payload;
   }

@@ -4,6 +4,11 @@ import { getSyarahCollection, type SyarahDoc } from "../models/syarah";
 import type { HarajScrapeListQuery } from "./harajScrapeController";
 import { buildVehicleAliases } from "../../lib/vehicle-name-match";
 import {
+  buildSearchRegex,
+  buildSmartSearchTermGroups,
+  buildSmartTextSearchQuery,
+} from "../../lib/smart-search";
+import {
   getOrSetRuntimeCache,
   getOrSetRuntimeCacheStaleWhileRevalidate,
 } from "../lib/runtime-cache";
@@ -26,11 +31,22 @@ const LIST_CACHE_STALE_TTL_MS = 120_000;
 const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
 const COUNT_CACHE_STALE_TTL_MS = 300_000;
+const SEARCH_CANDIDATE_CACHE_TTL_MS = 45_000;
+const SEARCH_CANDIDATE_CACHE_STALE_TTL_MS = 180_000;
+const SEARCH_TEXT_CANDIDATE_LIMIT = 4_000;
+const SEARCH_TEXT_CANDIDATE_MIN_LIMIT = 300;
+const SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER = 14;
+const SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER = 20;
+type SearchCandidateIdsResult = {
+  supported: true;
+  ids: readonly unknown[];
+};
 
-function toRegex(value: string, options?: { exact?: boolean }) {
-  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = options?.exact ? `^${escaped}$` : escaped;
-  return new RegExp(pattern, "i");
+function toRegex(value: string, options?: { exact?: boolean; fuzzyArabic?: boolean }) {
+  return buildSearchRegex(value, {
+    exact: options?.exact,
+    fuzzyArabic: options?.fuzzyArabic === true,
+  });
 }
 
 function normalizeList(value?: string | string[]) {
@@ -103,33 +119,125 @@ function buildNumericExpression(fieldPath: string): Document {
   };
 }
 
-function buildFilter(query: SyarahListQuery): Filter<SyarahDoc> {
+function canUseSearchCandidates(query: SyarahListQuery) {
+  return query.exactSearch !== true && Boolean(query.search?.trim());
+}
+
+function resolveSearchCandidateLimit(query: SyarahListQuery) {
+  const page = Math.max(query.page ?? 1, 1);
+  const limit = Math.max(query.limit ?? DEFAULT_LIMIT, 1);
+  const pageWindow = page * limit;
+  const usesDeepSort =
+    query.sort === "price-high" || query.sort === "price-low" || query.sort === "comments";
+  const multiplier = usesDeepSort
+    ? SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER
+    : SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER;
+  const computedLimit = pageWindow * multiplier;
+
+  return Math.max(
+    SEARCH_TEXT_CANDIDATE_MIN_LIMIT,
+    Math.min(computedLimit, SEARCH_TEXT_CANDIDATE_LIMIT)
+  );
+}
+
+async function resolveSyarahSearchCandidateIds(
+  collection: ReturnType<typeof getSyarahCollection>,
+  query: SyarahListQuery
+) {
+  if (!canUseSearchCandidates(query)) {
+    return null;
+  }
+
+  const textSearchQuery = buildSmartTextSearchQuery(query.search, {
+    exact: false,
+    maxTerms: 8,
+    maxAliasesPerTerm: 8,
+    maxOutputTerms: 20,
+  });
+  if (!textSearchQuery) {
+    return null;
+  }
+
+  const candidateLimit = resolveSearchCandidateLimit(query);
+  const cacheKey = `syarah:search-candidates:${textSearchQuery}:${candidateLimit}`;
+  return getOrSetRuntimeCacheStaleWhileRevalidate(
+    cacheKey,
+    SEARCH_CANDIDATE_CACHE_TTL_MS,
+    SEARCH_CANDIDATE_CACHE_STALE_TTL_MS,
+    async () => {
+      try {
+        const rows = await collection
+          .find(
+            {
+              $text: {
+                $search: textSearchQuery,
+                $caseSensitive: false,
+                $diacriticSensitive: false,
+              },
+            } as Filter<SyarahDoc>,
+            {
+              projection: { _id: 1 },
+              limit: candidateLimit,
+            }
+          )
+          .toArray();
+
+        // If we hit the hard cap, avoid clipping and fallback to regex-only flow.
+        if (candidateLimit >= SEARCH_TEXT_CANDIDATE_LIMIT && rows.length >= candidateLimit) {
+          return null;
+        }
+
+        return {
+          supported: true,
+          ids: rows.map((doc) => doc._id),
+        } as SearchCandidateIdsResult;
+      } catch {
+        // Text index might not exist yet on all environments.
+        return null;
+      }
+    }
+  );
+}
+
+function buildFilter(
+  query: SyarahListQuery,
+  searchCandidateIds?: SearchCandidateIdsResult | null
+): Filter<SyarahDoc> {
   const filter: Filter<SyarahDoc> = {};
   const andFilters: Filter<SyarahDoc>[] = [];
+  const shouldApplyRegexSearch = !searchCandidateIds?.supported || query.exactSearch === true;
 
-  if (query.search) {
-    const terms = query.exactSearch
-      ? [query.search.trim()].filter(Boolean)
-      : query.search
-          .split(/\s+/)
-          .map((term) => term.trim())
-          .filter(Boolean);
-    for (const term of terms) {
-      const searchRegex = toRegex(term, { exact: query.exactSearch === true });
+  if (searchCandidateIds?.supported) {
+    andFilters.push({
+      _id: { $in: [...searchCandidateIds.ids] },
+    } as unknown as Filter<SyarahDoc>);
+  }
+
+  if (query.search && shouldApplyRegexSearch) {
+    const termGroups = buildSmartSearchTermGroups(query.search, {
+      exact: query.exactSearch === true,
+    });
+    for (const group of termGroups) {
+      const searchRegexes = group.map((term) =>
+        toRegex(term, {
+          exact: query.exactSearch === true,
+          fuzzyArabic: query.exactSearch !== true,
+        })
+      );
       andFilters.push({
         $or: [
-          { title: searchRegex },
-          { brand: searchRegex },
-          { model: searchRegex },
-          { trim: searchRegex },
-          { city: searchRegex },
-          { origin: searchRegex },
-          { fuel_type: searchRegex },
-          { transmission: searchRegex },
-          { share_link: searchRegex },
-          { tags: searchRegex },
+          { title: { $in: searchRegexes } },
+          { brand: { $in: searchRegexes } },
+          { model: { $in: searchRegexes } },
+          { trim: { $in: searchRegexes } },
+          { city: { $in: searchRegexes } },
+          { origin: { $in: searchRegexes } },
+          { fuel_type: { $in: searchRegexes } },
+          { transmission: { $in: searchRegexes } },
+          { share_link: { $in: searchRegexes } },
+          { tags: { $in: searchRegexes } },
         ],
-      });
+      } as Filter<SyarahDoc>);
     }
   }
 
@@ -489,7 +597,29 @@ export async function listSyarahs(query: SyarahListQuery, options: ListOptions =
     async () => {
       const db = await getMongoDb();
       const collection = getSyarahCollection(db);
-      const filter = buildFilter(query);
+      const searchCandidateIds = await resolveSyarahSearchCandidateIds(collection, query);
+      const hasNoHits =
+        searchCandidateIds?.supported === true && searchCandidateIds.ids.length === 0;
+      if (query.search && hasNoHits) {
+        if (query.fields === "modelYears") {
+          return {
+            items: [] as Array<Record<string, any>>,
+            total: 0,
+            page: 1,
+            limit: 1,
+          };
+        }
+
+        const countMode = query.countMode === "none" ? "none" : "exact";
+        return {
+          items: [] as Array<Record<string, any>>,
+          total: 0,
+          page,
+          limit,
+          ...(countMode === "none" ? { hasNext: false } : {}),
+        };
+      }
+      const filter = buildFilter(query, searchCandidateIds);
 
       if (query.fields === "modelYears") {
         const modelYearFilter = buildFilter({
@@ -497,7 +627,7 @@ export async function listSyarahs(query: SyarahListQuery, options: ListOptions =
           tag1: undefined,
           tag2: undefined,
           carModelYear: undefined,
-        });
+        }, searchCandidateIds);
         const yearRows = await collection
           .aggregate([
             { $match: modelYearFilter },

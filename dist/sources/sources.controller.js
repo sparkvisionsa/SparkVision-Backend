@@ -62,10 +62,30 @@ function parseCarsSourcesQuery(req) {
         sources: (0, query_utils_1.parseSources)((0, query_utils_1.readQueryString)(req, "sources")),
     };
 }
+function parseCarsSourceSuggestionsQuery(req) {
+    const base = parseCarsSourcesQuery(req);
+    return {
+        ...base,
+        q: (0, query_utils_1.readQueryString)(req, "q") ?? base.search,
+        limit: (0, query_utils_1.parseNumber)((0, query_utils_1.readQueryString)(req, "limit")),
+        page: 1,
+        countMode: "none",
+        fields: "default",
+        exactSearch: false,
+    };
+}
 function parseSyarahQuery(req) {
     return parseHarajLikeQuery(req);
 }
 let SourcesController = class SourcesController {
+    async listCarsSourceSuggestionsRoute(req, res) {
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: false,
+            attemptReason: "cars_sources_suggestions",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        return (0, carsSourceController_1.listCarsSourceSearchSuggestions)(parseCarsSourceSuggestionsQuery(req));
+    }
     async listCarsSourcesRoute(req, res) {
         const fields = (0, query_utils_1.readQueryString)(req, "fields");
         const guard = await (0, service_1.enforceGuestAccess)(req, {
@@ -143,6 +163,14 @@ let SourcesController = class SourcesController {
     }
 };
 exports.SourcesController = SourcesController;
+__decorate([
+    (0, common_1.Get)("cars-sources/suggestions"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "listCarsSourceSuggestionsRoute", null);
 __decorate([
     (0, common_1.Get)("cars-sources"),
     __param(0, (0, common_1.Req)()),

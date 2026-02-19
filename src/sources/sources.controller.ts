@@ -2,7 +2,9 @@
 import type { Request, Response } from "express";
 import { parseBoolean, parseNumber, parseSources, readQueryString } from "@/common/query-utils";
 import {
+  listCarsSourceSearchSuggestions,
   listCarsSources,
+  type CarsSearchSuggestionsQuery,
   type CarsSourcesListQuery,
 } from "@/server/controllers/carsSourceController";
 import {
@@ -69,12 +71,38 @@ function parseCarsSourcesQuery(req: Request): CarsSourcesListQuery {
   };
 }
 
+function parseCarsSourceSuggestionsQuery(req: Request): CarsSearchSuggestionsQuery {
+  const base = parseCarsSourcesQuery(req);
+  return {
+    ...base,
+    q: readQueryString(req, "q") ?? base.search,
+    limit: parseNumber(readQueryString(req, "limit")),
+    page: 1,
+    countMode: "none",
+    fields: "default",
+    exactSearch: false,
+  };
+}
+
 function parseSyarahQuery(req: Request): SyarahListQuery {
   return parseHarajLikeQuery(req) as SyarahListQuery;
 }
 
 @Controller()
 export class SourcesController {
+  @Get("cars-sources/suggestions")
+  async listCarsSourceSuggestionsRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: false,
+      attemptReason: "cars_sources_suggestions",
+    });
+    applyContextCookies(res, guard.context);
+    return listCarsSourceSearchSuggestions(parseCarsSourceSuggestionsQuery(req));
+  }
+
   @Get("cars-sources")
   async listCarsSourcesRoute(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const fields = readQueryString(req, "fields");

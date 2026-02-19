@@ -18,6 +18,30 @@ const HARJ_INDEXES = [
     { name: "priceNumeric_desc", key: { priceNumeric: -1 } },
     { name: "commentsCount_desc", key: { commentsCount: -1 } },
     { name: "postId_asc", key: { postId: 1 } },
+    {
+        name: "smart_search_text",
+        key: {
+            title: "text",
+            "item.title": "text",
+            "item.bodyTEXT": "text",
+            tags: "text",
+            "item.tags": "text",
+            "gql.posts.json.data.posts.items.title": "text",
+            "gql.posts.json.data.posts.items.bodyTEXT": "text",
+        },
+        options: {
+            default_language: "none",
+            weights: {
+                title: 12,
+                "item.title": 12,
+                tags: 10,
+                "item.tags": 10,
+                "gql.posts.json.data.posts.items.title": 8,
+                "item.bodyTEXT": 4,
+                "gql.posts.json.data.posts.items.bodyTEXT": 3,
+            },
+        },
+    },
 ];
 const YALLA_INDEXES = [
     { name: "fetchedAt_desc", key: { fetchedAt: -1 } },
@@ -26,6 +50,34 @@ const YALLA_INDEXES = [
     { name: "adId_asc", key: { adId: 1 } },
     { name: "url_asc", key: { url: 1 } },
     { name: "detail_url_asc", key: { "detail.url": 1 } },
+    {
+        name: "smart_search_text",
+        key: {
+            cardTitle: "text",
+            title: "text",
+            description: "text",
+            location: "text",
+            breadcrumbs: "text",
+            "detail.breadcrumb": "text",
+            "detail.overview.h1": "text",
+            "detail.overview.h4": "text",
+            "detail.description": "text",
+        },
+        options: {
+            default_language: "none",
+            weights: {
+                cardTitle: 12,
+                title: 11,
+                "detail.overview.h1": 10,
+                breadcrumbs: 8,
+                "detail.breadcrumb": 8,
+                location: 6,
+                description: 4,
+                "detail.description": 4,
+                "detail.overview.h4": 3,
+            },
+        },
+    },
 ];
 const SYARAH_INDEXES = [
     { name: "fetchedAt_desc", key: { fetchedAt: -1 } },
@@ -37,6 +89,34 @@ const SYARAH_INDEXES = [
     { name: "year_desc", key: { year: -1 } },
     { name: "mileage_km_asc", key: { mileage_km: 1 } },
     { name: "price_cash_desc", key: { price_cash: -1 } },
+    {
+        name: "smart_search_text",
+        key: {
+            title: "text",
+            brand: "text",
+            model: "text",
+            trim: "text",
+            city: "text",
+            origin: "text",
+            fuel_type: "text",
+            transmission: "text",
+            tags: "text",
+        },
+        options: {
+            default_language: "none",
+            weights: {
+                title: 12,
+                brand: 11,
+                model: 11,
+                trim: 8,
+                tags: 7,
+                city: 5,
+                origin: 4,
+                fuel_type: 3,
+                transmission: 3,
+            },
+        },
+    },
 ];
 function shouldWarmupIndexes() {
     const value = (process.env.SOURCE_INDEX_WARMUP ?? "true").trim().toLowerCase();
@@ -45,7 +125,7 @@ function shouldWarmupIndexes() {
 async function createIndexesSafely(collection, specs) {
     for (const spec of specs) {
         try {
-            await collection.createIndex(spec.key, { name: spec.name });
+            await collection.createIndex(spec.key, { name: spec.name, ...(spec.options ?? {}) });
         }
         catch (error) {
             if (error instanceof mongodb_1.MongoServerError) {
