@@ -72,6 +72,7 @@ const YALLA_KILOMETERS_TOKEN_AR = "\u0627\u0644\u0643\u064a\u0644\u0648\u0645\u0
 const YALLA_NEW_LABEL_AR = String.fromCharCode(0x062c, 0x062f, 0x064a, 0x062f);
 const YALLA_NEW_FEMININE_LABEL_AR = `${YALLA_NEW_LABEL_AR}${String.fromCharCode(0x0629)}`;
 const YALLA_NEW_CAR_REGEX_PATTERN = `(new|${YALLA_NEW_LABEL_AR}|${YALLA_NEW_FEMININE_LABEL_AR})`;
+const YALLA_KSA_NEW_CARS_URL_REGEX = /^https:\/\/ksa\.yallamotor\.com\/new-cars(?:\/|$|\?)/i;
 function toRegex(value, options) {
     return (0, smart_search_1.buildSearchRegex)(value, {
         exact: options?.exact,
@@ -132,9 +133,9 @@ async function resolveYallaSearchCandidateIds(query, legacyCollection, usedColle
     }
     const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
         exact: false,
-        maxTerms: 8,
-        maxAliasesPerTerm: 8,
-        maxOutputTerms: 20,
+        maxTerms: 10,
+        maxAliasesPerTerm: 12,
+        maxOutputTerms: 28,
     });
     if (!textSearchQuery) {
         return null;
@@ -436,6 +437,11 @@ function buildYallaMileageRawExpression(specsInput) {
         },
     };
 }
+function isKsaNewCarsUrl(value) {
+    if (typeof value !== "string")
+        return false;
+    return YALLA_KSA_NEW_CARS_URL_REGEX.test(value.trim());
+}
 function buildPostDateExpression() {
     return {
         $cond: [
@@ -445,7 +451,7 @@ function buildPostDateExpression() {
         ],
     };
 }
-function buildNormalizedYallaStages(searchCandidateIds) {
+function buildNormalizedYallaStages(searchCandidateIds, options) {
     const breadcrumbExpression = {
         $cond: [
             { $isArray: "$detail.breadcrumb" },
@@ -702,7 +708,27 @@ function buildNormalizedYallaStages(searchCandidateIds) {
                     modelYearFromBreadcrumbTitleExpression,
                 ],
             },
-            mileage: buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
+            mileage: options?.forceNewCarsMileageZero === true
+                ? {
+                    $cond: [
+                        {
+                            $regexMatch: {
+                                input: {
+                                    $convert: {
+                                        input: { $ifNull: ["$url", ""] },
+                                        to: "string",
+                                        onError: "",
+                                        onNull: "",
+                                    },
+                                },
+                                regex: YALLA_KSA_NEW_CARS_URL_REGEX,
+                            },
+                        },
+                        0,
+                        buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
+                    ],
+                }
+                : buildMileageNumericExpression(buildYallaMileageRawExpression("$specs")),
             priceNumeric: buildPriceNumericExpression("$priceText"),
             postDate: buildPostDateExpression(),
         },
@@ -722,7 +748,9 @@ function buildCombinedYallaPipeline(searchCandidateIds) {
         {
             $unionWith: {
                 coll: yallaMotor_1.YALLA_MOTOR_NEW_CARS_COLLECTION,
-                pipeline: buildNormalizedYallaStages(searchCandidateIds?.newCars),
+                pipeline: buildNormalizedYallaStages(searchCandidateIds?.newCars, {
+                    forceNewCarsMileageZero: true,
+                }),
             },
         },
     ];
@@ -746,6 +774,12 @@ function buildFilter(query, options) {
                     { overviewH1: { $in: searchRegexes } },
                     { overviewH4: { $in: searchRegexes } },
                     { breadcrumb: { $in: searchRegexes } },
+                    { city: { $in: searchRegexes } },
+                    { location: { $in: searchRegexes } },
+                    { priceText: { $in: searchRegexes } },
+                    { url: { $in: searchRegexes } },
+                    { phone: { $in: searchRegexes } },
+                    { id: { $in: searchRegexes } },
                     { tag1: { $in: searchRegexes } },
                     { tag2: { $in: searchRegexes } },
                 ],
@@ -874,7 +908,7 @@ function isYallaNewCarDoc(doc, breadcrumbs) {
     const breadcrumbType = typeof breadcrumbs[1] === "string" ? breadcrumbs[1].toLowerCase() : "";
     return new RegExp(YALLA_NEW_CAR_REGEX_PATTERN).test(breadcrumbType);
 }
-function normalizeFastYallaListItem(doc, isOptionsMode) {
+function normalizeFastYallaListItem(doc, isOptionsMode, options) {
     const breadcrumbs = getYallaBreadcrumbs(doc);
     const images = getYallaImages(doc);
     const specs = getYallaSpecs(doc);
@@ -885,12 +919,14 @@ function normalizeFastYallaListItem(doc, isOptionsMode) {
     const priceText = doc.cardPriceText ?? doc.price ?? doc.priceText ?? doc.priceNumber ?? null;
     const carModelYear = (isNewCar ? parseYallaModelYearFromText(breadcrumbs[4]) : toNumber(breadcrumbs[5])) ??
         parseYallaModelYearFromText(breadcrumbs[4]);
-    const mileage = extractYallaMileage(specs);
+    const url = doc.url ?? doc.detail?.url ?? "";
+    const mileage = options?.forceNewCarsMileageZero === true && isKsaNewCarsUrl(url)
+        ? 0
+        : extractYallaMileage(specs);
     const priceCompareFromDetail = isRecord(doc.detail?.priceCompare)
         ? doc.detail.priceCompare
         : null;
     const priceCompare = priceCompareFromDetail ?? normalizePriceCompareFromUsedDoc(doc);
-    const url = doc.url ?? doc.detail?.url ?? "";
     const phone = doc.phone ?? "";
     const postDate = getYallaPostDateMs(doc);
     const id = String(doc.adId ?? doc._id ?? "");
@@ -1105,34 +1141,18 @@ async function listYallaMotors(query, options = {}) {
             (searchCandidateIds?.legacy?.ids.length ?? 0) === 0 &&
             (searchCandidateIds?.used?.ids.length ?? 0) === 0 &&
             (searchCandidateIds?.newCars?.ids.length ?? 0) === 0;
-        if (hasNoSearchHits) {
-            if (query.fields === "modelYears") {
-                return {
-                    items: [],
-                    total: 0,
-                    page: 1,
-                    limit: 1,
-                };
-            }
-            const countMode = query.countMode === "none" ? "none" : "exact";
-            return {
-                items: [],
-                total: 0,
-                page,
-                limit,
-                ...(countMode === "none" ? { hasNext: false } : {}),
-            };
-        }
+        const effectiveSearchCandidateIds = hasNoSearchHits ? null : searchCandidateIds;
+        const effectiveSkipSearchRegex = skipSearchRegex && !hasNoSearchHits;
         if (query.fields === "modelYears") {
             const modelYearFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            }, { skipSearchRegex });
+            }, { skipSearchRegex: effectiveSkipSearchRegex });
             const yearRows = await legacyCollection
                 .aggregate([
-                ...buildCombinedYallaPipeline(searchCandidateIds ?? undefined),
+                ...buildCombinedYallaPipeline(effectiveSearchCandidateIds ?? undefined),
                 { $match: modelYearFilter },
                 { $match: { carModelYear: { $ne: null } } },
                 { $group: { _id: "$carModelYear" } },
@@ -1163,7 +1183,7 @@ async function listYallaMotors(query, options = {}) {
                     return legacyCount + usedCount + newCarsCount;
                 }
                 const [countRow] = await legacyCollection
-                    .aggregate(buildYallaListPipeline(query, 1, 1, "count", searchCandidateIds, skipSearchRegex))
+                    .aggregate(buildYallaListPipeline(query, 1, 1, "count", effectiveSearchCandidateIds, effectiveSkipSearchRegex))
                     .toArray();
                 return toNumber(countRow?.count) ?? 0;
             });
@@ -1259,7 +1279,9 @@ async function listYallaMotors(query, options = {}) {
                     })();
                     if (!doc)
                         return null;
-                    return normalizeFastYallaListItem(doc, isOptionsMode);
+                    return normalizeFastYallaListItem(doc, isOptionsMode, {
+                        forceNewCarsMileageZero: candidate.source === "newcars",
+                    });
                 })
                     .filter(Boolean);
                 return {
@@ -1273,7 +1295,7 @@ async function listYallaMotors(query, options = {}) {
         }
         const fetchLimit = countMode === "none" ? limit + 1 : limit;
         const rawItems = await legacyCollection
-            .aggregate(buildYallaListPipeline(query, page, fetchLimit, "items", searchCandidateIds, skipSearchRegex))
+            .aggregate(buildYallaListPipeline(query, page, fetchLimit, "items", effectiveSearchCandidateIds, effectiveSkipSearchRegex))
             .toArray();
         const hasNext = countMode === "none" ? rawItems.length > limit : undefined;
         const pageItems = countMode === "none" ? rawItems.slice(0, limit) : rawItems;

@@ -178,6 +178,11 @@ function toCsv(rows) {
 }
 const EPOCH_MILLISECONDS_THRESHOLD = 1_000_000_000_000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ADMIN_ANALYTICS_CACHE_TTL_MS = 15_000;
+const ADMIN_SOURCE_RECORD_STATS_CACHE_TTL_MS = 60_000;
+const ADMIN_SOURCE_RECORD_STATS_PERSISTED_MAX_AGE_MS = 10 * 60 * 1000;
+const ADMIN_METRICS_CACHE_COLLECTION = "admin_metrics_cache";
+const ADMIN_SOURCE_RECORD_STATS_CACHE_KEY = "source_record_stats_v2";
 const CARS_PAGE_HARAJ_TAG0 = "\u062d\u0631\u0627\u062c\u0020\u0627\u0644\u0633\u064a\u0627\u0631\u0627\u062a";
 const CARS_PAGE_HARAJ_EXCLUDED_TAG1 = [
     "\u0642\u0637\u0639\u0020\u063a\u064a\u0627\u0631\u0020\u0648\u0645\u0644\u062d\u0642\u0627\u062a",
@@ -266,6 +271,16 @@ const SOURCE_COLLECTION_STATS_SPECS = [
         sourceLabel: "Syarah",
         collectionName: syarah_1.SYARAH_COLLECTION,
         collectionLabel: "Syarah",
+        dateFields: [{ path: "fetchedAt", mode: "epoch_mixed" }],
+        priceFields: ["price_cash", "price_monthly"],
+        imageFields: ["images", "featured_image"],
+        phoneFields: [],
+    },
+    {
+        sourceId: "syarah",
+        sourceLabel: "Syarah",
+        collectionName: syarah_1.SYARAH_NEW_COLLECTION,
+        collectionLabel: "Syarah New",
         dateFields: [{ path: "fetchedAt", mode: "epoch_mixed" }],
         priceFields: ["price_cash", "price_monthly"],
         imageFields: ["images", "featured_image"],
@@ -561,6 +576,49 @@ function buildCarsPageHarajFilter() {
         ],
     };
 }
+function createPayloadCache() {
+    return {
+        payload: null,
+        expiresAt: 0,
+        inFlight: null,
+    };
+}
+async function resolveCachedPayload(cache, ttlMs, loader) {
+    const now = Date.now();
+    if (cache.payload) {
+        if (cache.expiresAt > now) {
+            return cache.payload;
+        }
+        if (!cache.inFlight) {
+            cache.inFlight = loader()
+                .then((payload) => {
+                cache.payload = payload;
+                cache.expiresAt = Date.now() + ttlMs;
+                return payload;
+            })
+                .catch(() => cache.payload)
+                .finally(() => {
+                cache.inFlight = null;
+            });
+        }
+        return cache.payload;
+    }
+    if (cache.inFlight) {
+        return cache.inFlight;
+    }
+    cache.inFlight = loader()
+        .then((payload) => {
+        cache.payload = payload;
+        cache.expiresAt = Date.now() + ttlMs;
+        return payload;
+    })
+        .finally(() => {
+        cache.inFlight = null;
+    });
+    return cache.inFlight;
+}
+const adminAnalyticsPayloadCache = createPayloadCache();
+const adminSourceRecordStatsPayloadCache = createPayloadCache();
 function assertCsrf(request) {
     const csrfCookie = readCookie(request, config_1.authTrackingConfig.csrfCookieName);
     const csrfHeader = readHeader(request, "x-csrf-token");
@@ -1544,158 +1602,157 @@ async function updateAdminUserState(request, body) {
 async function getAdminAnalytics(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
-    const db = await (0, mongodb_1.getMongoDb)();
-    const { users, sessions, activities, guestAttempts } = (0, collections_1.getAuthCollections)(db);
-    const today = startOfDay();
-    const weekStart = startOfWeek();
-    const monthStart = startOfMonth();
-    const activeThreshold = new Date(Date.now() - 5 * 60 * 1000);
-    const [totalRegisteredUsers, totalGuests, activeUsers, newUsersToday, newUsersWeek, newUsersMonth, totalSessions, avgSessionDurationAgg, featureUsage, peakUsageRaw, downloadStats, searchStats, geoDistribution, deviceStats, browserStats, retentionRaw, conversionRaw,] = await Promise.all([
-        users.countDocuments({}),
-        guestAttempts.countDocuments({}),
-        sessions.distinct("identityId", {
-            isActive: true,
-            lastSeenAt: { $gte: activeThreshold },
-        }).then((items) => items.length),
-        users.countDocuments({ createdAt: { $gte: today } }),
-        users.countDocuments({ createdAt: { $gte: weekStart } }),
-        users.countDocuments({ createdAt: { $gte: monthStart } }),
-        sessions.countDocuments({}),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: null,
-                    avgDurationMs: { $avg: "$durationMs" },
-                },
-            },
-        ])
-            .toArray(),
-        activities
-            .aggregate([
-            {
-                $group: {
-                    _id: "$actionType",
-                    count: { $sum: 1 },
-                },
-            },
-            { $sort: { count: -1 } },
-            { $limit: 20 },
-        ])
-            .toArray(),
-        activities
-            .aggregate([
-            {
-                $group: {
-                    _id: { $hour: "$timestamp" },
-                    count: { $sum: 1 },
-                },
-            },
-            { $sort: { _id: 1 } },
-        ])
-            .toArray(),
-        activities.countDocuments({
-            actionType: { $in: ["download", "export", "file_download"] },
-        }),
-        activities
-            .aggregate([
-            { $match: { actionType: "search" } },
-            {
-                $group: {
-                    _id: {
-                        $ifNull: [
-                            "$actionDetails.query",
-                            "$actionDetails.search",
-                        ],
+    const payload = await resolveCachedPayload(adminAnalyticsPayloadCache, ADMIN_ANALYTICS_CACHE_TTL_MS, async () => {
+        const db = await (0, mongodb_1.getMongoDb)();
+        const { users, sessions, activities, guestAttempts } = (0, collections_1.getAuthCollections)(db);
+        const today = startOfDay();
+        const weekStart = startOfWeek();
+        const monthStart = startOfMonth();
+        const activeThreshold = new Date(Date.now() - 5 * 60 * 1000);
+        const [totalRegisteredUsers, totalGuests, activeUsers, newUsersToday, newUsersWeek, newUsersMonth, totalSessions, avgSessionDurationAgg, featureUsage, peakUsageRaw, downloadStats, searchStats, geoDistribution, deviceStats, browserStats, retentionRaw, conversionRaw,] = await Promise.all([
+            users.countDocuments({}),
+            guestAttempts.countDocuments({}),
+            sessions.distinct("identityId", {
+                isActive: true,
+                lastSeenAt: { $gte: activeThreshold },
+            }).then((items) => items.length),
+            users.countDocuments({ createdAt: { $gte: today } }),
+            users.countDocuments({ createdAt: { $gte: weekStart } }),
+            users.countDocuments({ createdAt: { $gte: monthStart } }),
+            sessions.countDocuments({}),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        avgDurationMs: { $avg: "$durationMs" },
                     },
-                    count: { $sum: 1 },
                 },
-            },
-            { $sort: { count: -1 } },
-            { $limit: 10 },
-        ])
-            .toArray(),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: { $ifNull: ["$geo.country", "Unknown"] },
-                    count: { $sum: 1 },
+            ])
+                .toArray(),
+            activities
+                .aggregate([
+                {
+                    $group: {
+                        _id: "$actionType",
+                        count: { $sum: 1 },
+                    },
                 },
-            },
-            { $sort: { count: -1 } },
-        ])
-            .toArray(),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: { $ifNull: ["$device.type", "unknown"] },
-                    count: { $sum: 1 },
+                { $sort: { count: -1 } },
+                { $limit: 20 },
+            ])
+                .toArray(),
+            activities
+                .aggregate([
+                {
+                    $group: {
+                        _id: { $hour: "$timestamp" },
+                        count: { $sum: 1 },
+                    },
                 },
-            },
-            { $sort: { count: -1 } },
-        ])
-            .toArray(),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: { $ifNull: ["$device.browser", "Unknown"] },
-                    count: { $sum: 1 },
+                { $sort: { _id: 1 } },
+            ])
+                .toArray(),
+            activities.countDocuments({
+                actionType: { $in: ["download", "export", "file_download"] },
+            }),
+            activities
+                .aggregate([
+                { $match: { actionType: "search" } },
+                {
+                    $group: {
+                        _id: {
+                            $ifNull: [
+                                "$actionDetails.query",
+                                "$actionDetails.search",
+                            ],
+                        },
+                        count: { $sum: 1 },
+                    },
                 },
-            },
-            { $sort: { count: -1 } },
-        ])
-            .toArray(),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: "$identityId",
-                    sessionCount: { $sum: 1 },
+                { $sort: { count: -1 } },
+                { $limit: 10 },
+            ])
+                .toArray(),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: { $ifNull: ["$geo.country", "Unknown"] },
+                        count: { $sum: 1 },
+                    },
                 },
-            },
-        ])
-            .toArray(),
-        sessions
-            .aggregate([
-            {
-                $group: {
-                    _id: "$identityId",
-                    hasGuest: {
-                        $max: {
-                            $cond: [{ $eq: ["$userId", null] }, 1, 0],
+                { $sort: { count: -1 } },
+            ])
+                .toArray(),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: { $ifNull: ["$device.type", "unknown"] },
+                        count: { $sum: 1 },
+                    },
+                },
+                { $sort: { count: -1 } },
+            ])
+                .toArray(),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: { $ifNull: ["$device.browser", "Unknown"] },
+                        count: { $sum: 1 },
+                    },
+                },
+                { $sort: { count: -1 } },
+            ])
+                .toArray(),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: "$identityId",
+                        sessionCount: { $sum: 1 },
+                    },
+                },
+            ])
+                .toArray(),
+            sessions
+                .aggregate([
+                {
+                    $group: {
+                        _id: "$identityId",
+                        hasGuest: {
+                            $max: {
+                                $cond: [{ $eq: ["$userId", null] }, 1, 0],
+                            },
+                        },
+                        hasRegistered: {
+                            $max: {
+                                $cond: [{ $ne: ["$userId", null] }, 1, 0],
+                            },
                         },
                     },
-                    hasRegistered: {
-                        $max: {
-                            $cond: [{ $ne: ["$userId", null] }, 1, 0],
-                        },
-                    },
                 },
-            },
-        ])
-            .toArray(),
-    ]);
-    const avgSessionDurationMs = avgSessionDurationAgg[0]?.avgDurationMs ?? 0;
-    const retentionReturning = retentionRaw.filter((row) => row.sessionCount > 1).length;
-    const retentionTotal = retentionRaw.length;
-    const retentionRate = retentionTotal
-        ? (retentionReturning / retentionTotal) * 100
-        : 0;
-    const guestTotalForConversion = conversionRaw.filter((row) => row.hasGuest === 1).length;
-    const convertedUsers = conversionRaw.filter((row) => row.hasGuest === 1 && row.hasRegistered === 1).length;
-    const conversionRate = guestTotalForConversion
-        ? (convertedUsers / guestTotalForConversion) * 100
-        : 0;
-    const peakUsageByHour = Array.from({ length: 24 }, (_, hour) => ({
-        hour,
-        count: peakUsageRaw.find((item) => item._id === hour)?.count ?? 0,
-    }));
-    return {
-        context,
-        payload: {
+            ])
+                .toArray(),
+        ]);
+        const avgSessionDurationMs = avgSessionDurationAgg[0]?.avgDurationMs ?? 0;
+        const retentionReturning = retentionRaw.filter((row) => row.sessionCount > 1).length;
+        const retentionTotal = retentionRaw.length;
+        const retentionRate = retentionTotal
+            ? (retentionReturning / retentionTotal) * 100
+            : 0;
+        const guestTotalForConversion = conversionRaw.filter((row) => row.hasGuest === 1).length;
+        const convertedUsers = conversionRaw.filter((row) => row.hasGuest === 1 && row.hasRegistered === 1).length;
+        const conversionRate = guestTotalForConversion
+            ? (convertedUsers / guestTotalForConversion) * 100
+            : 0;
+        const peakUsageByHour = Array.from({ length: 24 }, (_, hour) => ({
+            hour,
+            count: peakUsageRaw.find((item) => item._id === hour)?.count ?? 0,
+        }));
+        return {
             overview: {
                 totalUsers: totalRegisteredUsers + totalGuests,
                 registeredUsers: totalRegisteredUsers,
@@ -1748,198 +1805,233 @@ async function getAdminAnalytics(request) {
                 count: item.count,
             })),
             generatedAt: new Date().toISOString(),
-        },
+        };
+    });
+    return {
+        context,
+        payload,
     };
 }
 async function getAdminSourceRecordStats(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
-    const db = await (0, mongodb_1.getMongoDb)();
-    const generatedAt = new Date();
-    const collections = await Promise.all(SOURCE_COLLECTION_STATS_SPECS.map((spec) => collectSourceCollectionStats(db, spec, generatedAt)));
-    const sourceMap = new Map();
-    for (const collection of collections) {
-        const existing = sourceMap.get(collection.sourceId);
-        if (existing) {
-            existing.collections.push(collection);
-            continue;
-        }
-        sourceMap.set(collection.sourceId, {
-            sourceId: collection.sourceId,
-            sourceLabel: collection.sourceLabel,
-            collections: [collection],
+    const payload = await resolveCachedPayload(adminSourceRecordStatsPayloadCache, ADMIN_SOURCE_RECORD_STATS_CACHE_TTL_MS, async () => {
+        const db = await (0, mongodb_1.getMongoDb)();
+        const metricsCache = db.collection(ADMIN_METRICS_CACHE_COLLECTION);
+        const persistedSnapshot = await metricsCache.findOne({
+            _id: ADMIN_SOURCE_RECORD_STATS_CACHE_KEY,
         });
-    }
-    const sources = Array.from(sourceMap.values())
-        .map((source) => {
-        const totalRecords = source.collections.reduce((sum, collection) => sum + collection.totalRecords, 0);
-        const recordsInLast24Hours = source.collections.reduce((sum, collection) => sum + collection.recordsInLast24Hours, 0);
-        const recordsInLast7Days = source.collections.reduce((sum, collection) => sum + collection.recordsInLast7Days, 0);
-        const recordsWithPrice = source.collections.reduce((sum, collection) => sum + collection.recordsWithPrice, 0);
-        const recordsWithImages = source.collections.reduce((sum, collection) => sum + collection.recordsWithImages, 0);
-        const recordsWithPhone = source.collections.reduce((sum, collection) => sum + collection.recordsWithPhone, 0);
-        const oldestRecordAt = pickOldestDate(source.collections.map((collection) => collection.oldestRecordAt));
-        const newestRecordAt = pickNewestDate(source.collections.map((collection) => collection.newestRecordAt));
-        const largestCollection = source.collections.reduce((best, collection) => {
-            if (!best || collection.totalRecords > best.totalRecords) {
-                return collection;
+        const persistedPayload = persistedSnapshot?.payload ?? null;
+        const persistedUpdatedAt = persistedSnapshot?.updatedAt ?? null;
+        if (persistedPayload && persistedUpdatedAt instanceof Date) {
+            const ageMs = Date.now() - persistedUpdatedAt.getTime();
+            if (ageMs <= ADMIN_SOURCE_RECORD_STATS_PERSISTED_MAX_AGE_MS) {
+                return persistedPayload;
             }
-            return best;
-        }, null);
-        const freshestCollection = source.collections.reduce((best, collection) => {
-            if (!collection.newestRecordAt)
-                return best;
-            if (!best || !best.newestRecordAt)
-                return collection;
-            return collection.newestRecordAt.getTime() > best.newestRecordAt.getTime()
-                ? collection
-                : best;
-        }, null);
-        return {
-            sourceId: source.sourceId,
-            sourceLabel: source.sourceLabel,
-            collectionCount: source.collections.length,
-            totalRecords,
-            oldestRecordAt: toIso(oldestRecordAt),
-            newestRecordAt: toIso(newestRecordAt),
-            recordsInLast24Hours,
-            recordsInLast7Days,
-            recordsWithPrice,
-            recordsWithImages,
-            recordsWithPhone,
-            priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
-            imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
-            phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
-            largestCollection: largestCollection
-                ? {
-                    collectionId: largestCollection.collectionName,
-                    collectionName: largestCollection.collectionLabel,
-                    totalRecords: largestCollection.totalRecords,
+        }
+        const generatedAt = new Date();
+        try {
+            const collections = await Promise.all(SOURCE_COLLECTION_STATS_SPECS.map((spec) => collectSourceCollectionStats(db, spec, generatedAt)));
+            const sourceMap = new Map();
+            for (const collection of collections) {
+                const existing = sourceMap.get(collection.sourceId);
+                if (existing) {
+                    existing.collections.push(collection);
+                    continue;
                 }
-                : null,
-            freshestCollection: freshestCollection && freshestCollection.newestRecordAt
-                ? {
-                    collectionId: freshestCollection.collectionName,
-                    collectionName: freshestCollection.collectionLabel,
-                    newestRecordAt: freshestCollection.newestRecordAt.toISOString(),
-                }
-                : null,
-            collections: source.collections
-                .slice()
-                .sort((left, right) => right.totalRecords - left.totalRecords)
-                .map((collection) => ({
-                collectionId: collection.collectionName,
-                collectionName: collection.collectionLabel,
-                totalRecords: collection.totalRecords,
-                oldestRecordAt: toIso(collection.oldestRecordAt),
-                newestRecordAt: toIso(collection.newestRecordAt),
-                recordsInLast24Hours: collection.recordsInLast24Hours,
-                recordsInLast7Days: collection.recordsInLast7Days,
-                recordsWithPrice: collection.recordsWithPrice,
-                recordsWithImages: collection.recordsWithImages,
-                recordsWithPhone: collection.recordsWithPhone,
-                priceCoverage: toCoveragePercentage(collection.recordsWithPrice, collection.totalRecords),
-                imageCoverage: toCoveragePercentage(collection.recordsWithImages, collection.totalRecords),
-                phoneCoverage: toCoveragePercentage(collection.recordsWithPhone, collection.totalRecords),
-            })),
-        };
-    })
-        .sort((left, right) => right.totalRecords - left.totalRecords);
-    const harajCollections = collections.filter((collection) => collection.sourceId === "haraj");
-    const yallaCollections = collections.filter((collection) => collection.sourceId === "yallamotor");
-    const syarahCollections = collections.filter((collection) => collection.sourceId === "syarah");
-    const otherPageHarajSummary = summarizeRecordStats(harajCollections);
-    const carsPageYallaSummary = summarizeRecordStats(yallaCollections);
-    const carsPageSyarahSummary = summarizeRecordStats(syarahCollections);
-    const filteredCarsHarajCollections = await Promise.all(SOURCE_COLLECTION_STATS_SPECS.filter((spec) => spec.sourceId === "haraj").map((spec) => collectSourceCollectionStats(db, spec, generatedAt, buildCarsPageHarajFilter())));
-    const carsPageHarajSummary = summarizeRecordStats(filteredCarsHarajCollections);
-    const carsPageSummary = summarizeRecordStats([
-        carsPageHarajSummary,
-        carsPageYallaSummary,
-        carsPageSyarahSummary,
-    ]);
-    const pages = [
-        {
-            pageId: "cars",
-            pageLabel: "Cars",
-            totalRecords: carsPageSummary.totalRecords,
-            oldestRecordAt: toIso(carsPageSummary.oldestRecordAt),
-            newestRecordAt: toIso(carsPageSummary.newestRecordAt),
-            recordsInLast24Hours: carsPageSummary.recordsInLast24Hours,
-            recordsInLast7Days: carsPageSummary.recordsInLast7Days,
-            sources: [
+                sourceMap.set(collection.sourceId, {
+                    sourceId: collection.sourceId,
+                    sourceLabel: collection.sourceLabel,
+                    collections: [collection],
+                });
+            }
+            const sources = Array.from(sourceMap.values())
+                .map((source) => {
+                const totalRecords = source.collections.reduce((sum, collection) => sum + collection.totalRecords, 0);
+                const recordsInLast24Hours = source.collections.reduce((sum, collection) => sum + collection.recordsInLast24Hours, 0);
+                const recordsInLast7Days = source.collections.reduce((sum, collection) => sum + collection.recordsInLast7Days, 0);
+                const recordsWithPrice = source.collections.reduce((sum, collection) => sum + collection.recordsWithPrice, 0);
+                const recordsWithImages = source.collections.reduce((sum, collection) => sum + collection.recordsWithImages, 0);
+                const recordsWithPhone = source.collections.reduce((sum, collection) => sum + collection.recordsWithPhone, 0);
+                const oldestRecordAt = pickOldestDate(source.collections.map((collection) => collection.oldestRecordAt));
+                const newestRecordAt = pickNewestDate(source.collections.map((collection) => collection.newestRecordAt));
+                const largestCollection = source.collections.reduce((best, collection) => {
+                    if (!best || collection.totalRecords > best.totalRecords) {
+                        return collection;
+                    }
+                    return best;
+                }, null);
+                const freshestCollection = source.collections.reduce((best, collection) => {
+                    if (!collection.newestRecordAt)
+                        return best;
+                    if (!best || !best.newestRecordAt)
+                        return collection;
+                    return collection.newestRecordAt.getTime() > best.newestRecordAt.getTime()
+                        ? collection
+                        : best;
+                }, null);
+                return {
+                    sourceId: source.sourceId,
+                    sourceLabel: source.sourceLabel,
+                    collectionCount: source.collections.length,
+                    totalRecords,
+                    oldestRecordAt: toIso(oldestRecordAt),
+                    newestRecordAt: toIso(newestRecordAt),
+                    recordsInLast24Hours,
+                    recordsInLast7Days,
+                    recordsWithPrice,
+                    recordsWithImages,
+                    recordsWithPhone,
+                    priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
+                    imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
+                    phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
+                    largestCollection: largestCollection
+                        ? {
+                            collectionId: largestCollection.collectionName,
+                            collectionName: largestCollection.collectionLabel,
+                            totalRecords: largestCollection.totalRecords,
+                        }
+                        : null,
+                    freshestCollection: freshestCollection && freshestCollection.newestRecordAt
+                        ? {
+                            collectionId: freshestCollection.collectionName,
+                            collectionName: freshestCollection.collectionLabel,
+                            newestRecordAt: freshestCollection.newestRecordAt.toISOString(),
+                        }
+                        : null,
+                    collections: source.collections
+                        .slice()
+                        .sort((left, right) => right.totalRecords - left.totalRecords)
+                        .map((collection) => ({
+                        collectionId: collection.collectionName,
+                        collectionName: collection.collectionLabel,
+                        totalRecords: collection.totalRecords,
+                        oldestRecordAt: toIso(collection.oldestRecordAt),
+                        newestRecordAt: toIso(collection.newestRecordAt),
+                        recordsInLast24Hours: collection.recordsInLast24Hours,
+                        recordsInLast7Days: collection.recordsInLast7Days,
+                        recordsWithPrice: collection.recordsWithPrice,
+                        recordsWithImages: collection.recordsWithImages,
+                        recordsWithPhone: collection.recordsWithPhone,
+                        priceCoverage: toCoveragePercentage(collection.recordsWithPrice, collection.totalRecords),
+                        imageCoverage: toCoveragePercentage(collection.recordsWithImages, collection.totalRecords),
+                        phoneCoverage: toCoveragePercentage(collection.recordsWithPhone, collection.totalRecords),
+                    })),
+                };
+            })
+                .sort((left, right) => right.totalRecords - left.totalRecords);
+            const harajCollections = collections.filter((collection) => collection.sourceId === "haraj");
+            const yallaCollections = collections.filter((collection) => collection.sourceId === "yallamotor");
+            const syarahCollections = collections.filter((collection) => collection.sourceId === "syarah");
+            const otherPageHarajSummary = summarizeRecordStats(harajCollections);
+            const carsPageYallaSummary = summarizeRecordStats(yallaCollections);
+            const carsPageSyarahSummary = summarizeRecordStats(syarahCollections);
+            const filteredCarsHarajCollections = await Promise.all(SOURCE_COLLECTION_STATS_SPECS.filter((spec) => spec.sourceId === "haraj").map((spec) => collectSourceCollectionStats(db, spec, generatedAt, buildCarsPageHarajFilter())));
+            const carsPageHarajSummary = summarizeRecordStats(filteredCarsHarajCollections);
+            const carsPageSummary = summarizeRecordStats([
+                carsPageHarajSummary,
+                carsPageYallaSummary,
+                carsPageSyarahSummary,
+            ]);
+            const pages = [
                 {
-                    sourceId: "haraj",
-                    sourceLabel: "Haraj (Cars Filters)",
-                    totalRecords: carsPageHarajSummary.totalRecords,
-                    recordsInLast24Hours: carsPageHarajSummary.recordsInLast24Hours,
-                    recordsInLast7Days: carsPageHarajSummary.recordsInLast7Days,
+                    pageId: "cars",
+                    pageLabel: "Cars",
+                    totalRecords: carsPageSummary.totalRecords,
+                    oldestRecordAt: toIso(carsPageSummary.oldestRecordAt),
+                    newestRecordAt: toIso(carsPageSummary.newestRecordAt),
+                    recordsInLast24Hours: carsPageSummary.recordsInLast24Hours,
+                    recordsInLast7Days: carsPageSummary.recordsInLast7Days,
+                    sources: [
+                        {
+                            sourceId: "haraj",
+                            sourceLabel: "Haraj (Cars Filters)",
+                            totalRecords: carsPageHarajSummary.totalRecords,
+                            recordsInLast24Hours: carsPageHarajSummary.recordsInLast24Hours,
+                            recordsInLast7Days: carsPageHarajSummary.recordsInLast7Days,
+                        },
+                        {
+                            sourceId: "yallamotor",
+                            sourceLabel: "YallaMotor",
+                            totalRecords: carsPageYallaSummary.totalRecords,
+                            recordsInLast24Hours: carsPageYallaSummary.recordsInLast24Hours,
+                            recordsInLast7Days: carsPageYallaSummary.recordsInLast7Days,
+                        },
+                        {
+                            sourceId: "syarah",
+                            sourceLabel: "Syarah",
+                            totalRecords: carsPageSyarahSummary.totalRecords,
+                            recordsInLast24Hours: carsPageSyarahSummary.recordsInLast24Hours,
+                            recordsInLast7Days: carsPageSyarahSummary.recordsInLast7Days,
+                        },
+                    ].sort((left, right) => right.totalRecords - left.totalRecords),
                 },
                 {
-                    sourceId: "yallamotor",
-                    sourceLabel: "YallaMotor",
-                    totalRecords: carsPageYallaSummary.totalRecords,
-                    recordsInLast24Hours: carsPageYallaSummary.recordsInLast24Hours,
-                    recordsInLast7Days: carsPageYallaSummary.recordsInLast7Days,
-                },
-                {
-                    sourceId: "syarah",
-                    sourceLabel: "Syarah",
-                    totalRecords: carsPageSyarahSummary.totalRecords,
-                    recordsInLast24Hours: carsPageSyarahSummary.recordsInLast24Hours,
-                    recordsInLast7Days: carsPageSyarahSummary.recordsInLast7Days,
-                },
-            ].sort((left, right) => right.totalRecords - left.totalRecords),
-        },
-        {
-            pageId: "other",
-            pageLabel: "Other",
-            totalRecords: otherPageHarajSummary.totalRecords,
-            oldestRecordAt: toIso(otherPageHarajSummary.oldestRecordAt),
-            newestRecordAt: toIso(otherPageHarajSummary.newestRecordAt),
-            recordsInLast24Hours: otherPageHarajSummary.recordsInLast24Hours,
-            recordsInLast7Days: otherPageHarajSummary.recordsInLast7Days,
-            sources: [
-                {
-                    sourceId: "haraj",
-                    sourceLabel: "Haraj",
+                    pageId: "other",
+                    pageLabel: "Other",
                     totalRecords: otherPageHarajSummary.totalRecords,
+                    oldestRecordAt: toIso(otherPageHarajSummary.oldestRecordAt),
+                    newestRecordAt: toIso(otherPageHarajSummary.newestRecordAt),
                     recordsInLast24Hours: otherPageHarajSummary.recordsInLast24Hours,
                     recordsInLast7Days: otherPageHarajSummary.recordsInLast7Days,
+                    sources: [
+                        {
+                            sourceId: "haraj",
+                            sourceLabel: "Haraj",
+                            totalRecords: otherPageHarajSummary.totalRecords,
+                            recordsInLast24Hours: otherPageHarajSummary.recordsInLast24Hours,
+                            recordsInLast7Days: otherPageHarajSummary.recordsInLast7Days,
+                        },
+                    ],
                 },
-            ],
-        },
-    ];
-    const totalRecords = collections.reduce((sum, collection) => sum + collection.totalRecords, 0);
-    const recordsInLast24Hours = collections.reduce((sum, collection) => sum + collection.recordsInLast24Hours, 0);
-    const recordsInLast7Days = collections.reduce((sum, collection) => sum + collection.recordsInLast7Days, 0);
-    const recordsWithPrice = collections.reduce((sum, collection) => sum + collection.recordsWithPrice, 0);
-    const recordsWithImages = collections.reduce((sum, collection) => sum + collection.recordsWithImages, 0);
-    const recordsWithPhone = collections.reduce((sum, collection) => sum + collection.recordsWithPhone, 0);
-    const oldestRecordAt = pickOldestDate(collections.map((collection) => collection.oldestRecordAt));
-    const newestRecordAt = pickNewestDate(collections.map((collection) => collection.newestRecordAt));
+            ];
+            const totalRecords = collections.reduce((sum, collection) => sum + collection.totalRecords, 0);
+            const recordsInLast24Hours = collections.reduce((sum, collection) => sum + collection.recordsInLast24Hours, 0);
+            const recordsInLast7Days = collections.reduce((sum, collection) => sum + collection.recordsInLast7Days, 0);
+            const recordsWithPrice = collections.reduce((sum, collection) => sum + collection.recordsWithPrice, 0);
+            const recordsWithImages = collections.reduce((sum, collection) => sum + collection.recordsWithImages, 0);
+            const recordsWithPhone = collections.reduce((sum, collection) => sum + collection.recordsWithPhone, 0);
+            const oldestRecordAt = pickOldestDate(collections.map((collection) => collection.oldestRecordAt));
+            const newestRecordAt = pickNewestDate(collections.map((collection) => collection.newestRecordAt));
+            const computedPayload = {
+                overview: {
+                    totalSources: sources.length,
+                    totalCollections: collections.length,
+                    totalRecords,
+                    oldestRecordAt: toIso(oldestRecordAt),
+                    newestRecordAt: toIso(newestRecordAt),
+                    recordsInLast24Hours,
+                    recordsInLast7Days,
+                    recordsWithPrice,
+                    recordsWithImages,
+                    recordsWithPhone,
+                    priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
+                    imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
+                    phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
+                },
+                sources,
+                pages,
+                generatedAt: generatedAt.toISOString(),
+            };
+            await metricsCache.updateOne({ _id: ADMIN_SOURCE_RECORD_STATS_CACHE_KEY }, {
+                $set: {
+                    payload: computedPayload,
+                    generatedAt,
+                    updatedAt: new Date(),
+                },
+            }, { upsert: true });
+            return computedPayload;
+        }
+        catch (error) {
+            if (persistedPayload) {
+                return persistedPayload;
+            }
+            throw error;
+        }
+    });
     return {
         context,
-        payload: {
-            overview: {
-                totalSources: sources.length,
-                totalCollections: collections.length,
-                totalRecords,
-                oldestRecordAt: toIso(oldestRecordAt),
-                newestRecordAt: toIso(newestRecordAt),
-                recordsInLast24Hours,
-                recordsInLast7Days,
-                recordsWithPrice,
-                recordsWithImages,
-                recordsWithPhone,
-                priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
-                imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
-                phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
-            },
-            sources,
-            pages,
-            generatedAt: generatedAt.toISOString(),
-        },
+        payload,
     };
 }
 async function listAdminActivities(request) {

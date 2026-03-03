@@ -1,6 +1,7 @@
 import type { Collection, Db } from "mongodb";
 
 export const SYARAH_COLLECTION = "syarah";
+export const SYARAH_NEW_COLLECTION = "syarahnew";
 
 export interface SyarahDoc {
   [key: string]: unknown;
@@ -39,4 +40,8 @@ export interface SyarahDoc {
 
 export function getSyarahCollection(db: Db): Collection<SyarahDoc> {
   return db.collection<SyarahDoc>(SYARAH_COLLECTION);
+}
+
+export function getSyarahNewCollection(db: Db): Collection<SyarahDoc> {
+  return db.collection<SyarahDoc>(SYARAH_NEW_COLLECTION);
 }

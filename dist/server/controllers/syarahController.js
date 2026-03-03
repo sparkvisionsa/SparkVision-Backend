@@ -9,6 +9,7 @@ const smart_search_1 = require("../../lib/smart-search");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
+const MAX_INTERNAL_LIMIT = 3000;
 const MAX_MODEL_YEAR_SPAN = 300;
 const LIST_CACHE_TTL_MS = 20_000;
 const OPTIONS_CACHE_TTL_MS = 45_000;
@@ -25,6 +26,16 @@ const SEARCH_TEXT_CANDIDATE_LIMIT = 4_000;
 const SEARCH_TEXT_CANDIDATE_MIN_LIMIT = 300;
 const SEARCH_TEXT_DEFAULT_WINDOW_MULTIPLIER = 14;
 const SEARCH_TEXT_DEEP_SORT_WINDOW_MULTIPLIER = 20;
+const SYARAH_PRIMARY_COLLECTION_CONFIG = {
+    cacheKeyPrefix: "syarah-primary",
+    forceMileageZero: false,
+    getCollection: syarah_1.getSyarahCollection,
+};
+const SYARAH_NEW_COLLECTION_CONFIG = {
+    cacheKeyPrefix: "syarah-new",
+    forceMileageZero: true,
+    getCollection: syarah_1.getSyarahNewCollection,
+};
 function toRegex(value, options) {
     return (0, smart_search_1.buildSearchRegex)(value, {
         exact: options?.exact,
@@ -112,21 +123,21 @@ function resolveSearchCandidateLimit(query) {
     const computedLimit = pageWindow * multiplier;
     return Math.max(SEARCH_TEXT_CANDIDATE_MIN_LIMIT, Math.min(computedLimit, SEARCH_TEXT_CANDIDATE_LIMIT));
 }
-async function resolveSyarahSearchCandidateIds(collection, query) {
+async function resolveSyarahSearchCandidateIds(collection, query, cacheKeyPrefix) {
     if (!canUseSearchCandidates(query)) {
         return null;
     }
     const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
         exact: false,
-        maxTerms: 8,
-        maxAliasesPerTerm: 8,
-        maxOutputTerms: 20,
+        maxTerms: 10,
+        maxAliasesPerTerm: 12,
+        maxOutputTerms: 28,
     });
     if (!textSearchQuery) {
         return null;
     }
     const candidateLimit = resolveSearchCandidateLimit(query);
-    const cacheKey = `syarah:search-candidates:${textSearchQuery}:${candidateLimit}`;
+    const cacheKey = `${cacheKeyPrefix}:search-candidates:${textSearchQuery}:${candidateLimit}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, SEARCH_CANDIDATE_CACHE_TTL_MS, SEARCH_CANDIDATE_CACHE_STALE_TTL_MS, async () => {
         try {
             const rows = await collection
@@ -154,7 +165,7 @@ async function resolveSyarahSearchCandidateIds(collection, query) {
         }
     });
 }
-function buildFilter(query, searchCandidateIds) {
+function buildFilter(query, searchCandidateIds, options) {
     const filter = {};
     const andFilters = [];
     const shouldApplyRegexSearch = !searchCandidateIds?.supported || query.exactSearch === true;
@@ -183,6 +194,13 @@ function buildFilter(query, searchCandidateIds) {
                     { fuel_type: { $in: searchRegexes } },
                     { transmission: { $in: searchRegexes } },
                     { share_link: { $in: searchRegexes } },
+                    { phone: { $in: searchRegexes } },
+                    { year: { $in: searchRegexes } },
+                    { mileage_km: { $in: searchRegexes } },
+                    { price_cash: { $in: searchRegexes } },
+                    { price_monthly: { $in: searchRegexes } },
+                    { id: { $in: searchRegexes } },
+                    { post_id: { $in: searchRegexes } },
                     { tags: { $in: searchRegexes } },
                 ],
             });
@@ -281,7 +299,11 @@ function buildFilter(query, searchCandidateIds) {
         query.mileage !== undefined ||
         query.mileageMin !== undefined ||
         query.mileageMax !== undefined) {
-        const mileageExpression = buildNumericExpression("mileage_km");
+        const mileageExpression = options?.forceMileageZero
+            ? {
+                $ifNull: [buildNumericExpression("mileage_km"), 0],
+            }
+            : buildNumericExpression("mileage_km");
         const mileageConditions = [{ $ne: [mileageExpression, null] }];
         if (query.mileage !== undefined) {
             mileageConditions.push({ $eq: [mileageExpression, query.mileage] });
@@ -376,12 +398,12 @@ function buildCountSignature(query) {
 function isFilterEmpty(filter) {
     return !Array.isArray(filter.$and) || filter.$and.length === 0;
 }
-function normalizeSyarahListItem(doc, fields) {
+function normalizeSyarahListItem(doc, fields, options) {
     const brand = toCleanString(doc.brand);
     const model = toCleanString(doc.model);
     const trim = toCleanString(doc.trim);
     const year = toNumber(doc.year);
-    const mileage = toNumber(doc.mileage_km);
+    const mileage = options?.forceMileageZero ? 0 : toNumber(doc.mileage_km);
     const postDate = toEpochMillis(doc.fetchedAt);
     const priceNumeric = toNumber(doc.price_cash);
     const docImages = toStringArray(doc.images);
@@ -478,21 +500,65 @@ function buildDescendingYearRange(years) {
     }
     return fullRange;
 }
-async function listSyarahs(query, options = {}) {
+function resolveListCacheTtlMs(fields) {
+    if (fields === "modelYears")
+        return MODEL_YEARS_CACHE_TTL_MS;
+    if (fields === "options")
+        return OPTIONS_CACHE_TTL_MS;
+    return LIST_CACHE_TTL_MS;
+}
+function resolveListCacheStaleTtlMs(fields) {
+    if (fields === "modelYears")
+        return MODEL_YEARS_CACHE_STALE_TTL_MS;
+    if (fields === "options")
+        return OPTIONS_CACHE_STALE_TTL_MS;
+    return LIST_CACHE_STALE_TTL_MS;
+}
+function sortSyarahItems(items, sort) {
+    const getDate = (item) => toEpochMillis(item.postDate ?? null) ?? 0;
+    const getPrice = (item) => typeof item.priceNumeric === "number" ? item.priceNumeric : null;
+    const getComments = (item) => typeof item.commentsCount === "number" ? item.commentsCount : 0;
+    const compare = (a, b) => {
+        switch (sort) {
+            case "oldest":
+                return getDate(a) - getDate(b);
+            case "price-high": {
+                const aPrice = getPrice(a);
+                const bPrice = getPrice(b);
+                if (aPrice === null && bPrice === null)
+                    return getDate(b) - getDate(a);
+                if (aPrice === null)
+                    return 1;
+                if (bPrice === null)
+                    return -1;
+                return bPrice - aPrice || getDate(b) - getDate(a);
+            }
+            case "price-low": {
+                const aPrice = getPrice(a);
+                const bPrice = getPrice(b);
+                if (aPrice === null && bPrice === null)
+                    return getDate(b) - getDate(a);
+                if (aPrice === null)
+                    return 1;
+                if (bPrice === null)
+                    return -1;
+                return aPrice - bPrice || getDate(b) - getDate(a);
+            }
+            case "comments":
+                return getComments(b) - getComments(a) || getDate(b) - getDate(a);
+            default:
+                return getDate(b) - getDate(a);
+        }
+    };
+    return [...items].sort(compare);
+}
+async function listSyarahsFromCollection(query, options, config) {
     const maxLimit = options.maxLimit ?? MAX_LIMIT;
     const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), maxLimit);
     const page = Math.max(query.page ?? 1, 1);
-    const cacheTtlMs = query.fields === "modelYears"
-        ? MODEL_YEARS_CACHE_TTL_MS
-        : query.fields === "options"
-            ? OPTIONS_CACHE_TTL_MS
-            : LIST_CACHE_TTL_MS;
-    const cacheStaleTtlMs = query.fields === "modelYears"
-        ? MODEL_YEARS_CACHE_STALE_TTL_MS
-        : query.fields === "options"
-            ? OPTIONS_CACHE_STALE_TTL_MS
-            : LIST_CACHE_STALE_TTL_MS;
-    const cacheKey = `syarah:list:${JSON.stringify({
+    const cacheTtlMs = resolveListCacheTtlMs(query.fields);
+    const cacheStaleTtlMs = resolveListCacheStaleTtlMs(query.fields);
+    const cacheKey = `${config.cacheKeyPrefix}:list:${JSON.stringify({
         query,
         maxLimit,
         page,
@@ -500,35 +566,22 @@ async function listSyarahs(query, options = {}) {
     })}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
         const db = await (0, mongodb_1.getMongoDb)();
-        const collection = (0, syarah_1.getSyarahCollection)(db);
-        const searchCandidateIds = await resolveSyarahSearchCandidateIds(collection, query);
+        const collection = config.getCollection(db);
+        const searchCandidateIds = await resolveSyarahSearchCandidateIds(collection, query, config.cacheKeyPrefix);
         const hasNoHits = searchCandidateIds?.supported === true && searchCandidateIds.ids.length === 0;
-        if (query.search && hasNoHits) {
-            if (query.fields === "modelYears") {
-                return {
-                    items: [],
-                    total: 0,
-                    page: 1,
-                    limit: 1,
-                };
-            }
-            const countMode = query.countMode === "none" ? "none" : "exact";
-            return {
-                items: [],
-                total: 0,
-                page,
-                limit,
-                ...(countMode === "none" ? { hasNext: false } : {}),
-            };
-        }
-        const filter = buildFilter(query, searchCandidateIds);
+        const effectiveSearchCandidateIds = query.search && hasNoHits ? null : searchCandidateIds;
+        const filter = buildFilter(query, effectiveSearchCandidateIds, {
+            forceMileageZero: config.forceMileageZero,
+        });
         if (query.fields === "modelYears") {
             const modelYearFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            }, searchCandidateIds);
+            }, effectiveSearchCandidateIds, {
+                forceMileageZero: config.forceMileageZero,
+            });
             const yearRows = await collection
                 .aggregate([
                 { $match: modelYearFilter },
@@ -572,10 +625,12 @@ async function listSyarahs(query, options = {}) {
             .limit(fetchLimit)
             .toArray();
         const hasNext = countMode === "none" ? rawItems.length > limit : undefined;
-        const items = (countMode === "none" ? rawItems.slice(0, limit) : rawItems).map((doc) => normalizeSyarahListItem(doc, query.fields));
+        const items = (countMode === "none" ? rawItems.slice(0, limit) : rawItems).map((doc) => normalizeSyarahListItem(doc, query.fields, {
+            forceMileageZero: config.forceMileageZero,
+        }));
         const total = countMode === "none"
             ? -1
-            : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`syarah:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
+            : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`${config.cacheKeyPrefix}:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
                 if (isFilterEmpty(filter)) {
                     return collection.estimatedDocumentCount();
                 }
@@ -590,10 +645,77 @@ async function listSyarahs(query, options = {}) {
         };
     });
 }
+async function listSyarahs(query, options = {}) {
+    const maxLimit = options.maxLimit ?? MAX_LIMIT;
+    const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), maxLimit);
+    const page = Math.max(query.page ?? 1, 1);
+    const cacheTtlMs = resolveListCacheTtlMs(query.fields);
+    const cacheStaleTtlMs = resolveListCacheStaleTtlMs(query.fields);
+    const cacheKey = `syarah:list:${JSON.stringify({
+        query,
+        maxLimit,
+        page,
+        limit,
+    })}`;
+    return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
+        if (query.fields === "modelYears") {
+            const modelYearsQuery = {
+                ...query,
+                page: 1,
+                limit: MAX_INTERNAL_LIMIT,
+                fields: "modelYears",
+            };
+            const [primaryData, newCarsData] = await Promise.all([
+                listSyarahsFromCollection(modelYearsQuery, { maxLimit: MAX_INTERNAL_LIMIT }, SYARAH_PRIMARY_COLLECTION_CONFIG),
+                listSyarahsFromCollection(modelYearsQuery, { maxLimit: MAX_INTERNAL_LIMIT }, SYARAH_NEW_COLLECTION_CONFIG),
+            ]);
+            const years = [...primaryData.items, ...newCarsData.items]
+                .map((item) => toNumber(item.carModelYear))
+                .filter((value) => value !== null);
+            const items = buildYearOnlyItems(buildDescendingYearRange(years));
+            return {
+                items,
+                total: items.length,
+                page: 1,
+                limit: items.length || 1,
+            };
+        }
+        const countMode = query.countMode === "none" ? "none" : "exact";
+        const perCollectionLimit = Math.min(limit * page + (countMode === "none" ? 1 : 0), MAX_INTERNAL_LIMIT);
+        const baseQuery = {
+            ...query,
+            page: 1,
+            limit: perCollectionLimit,
+            countMode,
+        };
+        const [primaryData, newCarsData] = await Promise.all([
+            listSyarahsFromCollection(baseQuery, { maxLimit: perCollectionLimit }, SYARAH_PRIMARY_COLLECTION_CONFIG),
+            listSyarahsFromCollection(baseQuery, { maxLimit: perCollectionLimit }, SYARAH_NEW_COLLECTION_CONFIG),
+        ]);
+        const combinedItems = sortSyarahItems([
+            ...primaryData.items,
+            ...newCarsData.items,
+        ], query.sort);
+        const start = (page - 1) * limit;
+        const pageWindowSize = limit + (countMode === "none" ? 1 : 0);
+        const pageWindow = combinedItems.slice(start, start + pageWindowSize);
+        const hasNext = countMode === "none" ? pageWindow.length > limit : undefined;
+        const items = countMode === "none" ? pageWindow.slice(0, limit) : pageWindow;
+        const total = countMode === "none" ? -1 : primaryData.total + newCarsData.total;
+        return {
+            items,
+            total,
+            page,
+            limit,
+            ...(hasNext !== undefined ? { hasNext } : {}),
+        };
+    });
+}
 async function getSyarahById(id) {
     return (0, runtime_cache_1.getOrSetRuntimeCache)(`syarah:detail:${id}`, DETAIL_CACHE_TTL_MS, async () => {
         const db = await (0, mongodb_1.getMongoDb)();
-        const collection = (0, syarah_1.getSyarahCollection)(db);
+        const primaryCollection = (0, syarah_1.getSyarahCollection)(db);
+        const newCarsCollection = (0, syarah_1.getSyarahNewCollection)(db);
         const numericId = Number(id);
         const filters = [
             { _id: id },
@@ -604,6 +726,18 @@ async function getSyarahById(id) {
         if (!Number.isNaN(numericId)) {
             filters.push({ id: numericId }, { post_id: numericId });
         }
-        return collection.findOne({ $or: filters });
+        const [primaryDoc, newCarsDoc] = await Promise.all([
+            primaryCollection.findOne({ $or: filters }),
+            newCarsCollection.findOne({ $or: filters }),
+        ]);
+        if (primaryDoc)
+            return primaryDoc;
+        if (newCarsDoc) {
+            return {
+                ...newCarsDoc,
+                mileage_km: 0,
+            };
+        }
+        return null;
     });
 }

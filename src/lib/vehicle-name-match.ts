@@ -1,4 +1,7 @@
 const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+const ARABIC_WEAK_CHAR_REGEX = /[\u0627\u0648\u064A\u0649\u0647\u0629\u0621\u0624\u0626]/g;
+const REPEATED_CHAR_REGEX = /(.)\1{2,}/g;
+const DEFAULT_ALIAS_FUZZY_DISTANCE = 2;
 
 const ARABIC_DIGIT_MAP: Record<string, string> = {
   "٠": "0",
@@ -229,6 +232,107 @@ function latinSkeleton(value: string) {
   return value.replace(/[aeiouyw]/g, "");
 }
 
+function arabicSkeleton(value: string) {
+  return value.replace(ARABIC_WEAK_CHAR_REGEX, "");
+}
+
+function boundedLevenshteinDistance(
+  a: string,
+  b: string,
+  maxDistance = DEFAULT_ALIAS_FUZZY_DISTANCE
+) {
+  if (a === b) return 0;
+  if (!a || !b) return Math.max(a.length, b.length);
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+
+  const previous = new Array(b.length + 1);
+  const current = new Array(b.length + 1);
+
+  for (let j = 0; j <= b.length; j += 1) {
+    previous[j] = j;
+  }
+
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowMin = current[0];
+
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + cost
+      );
+      if (current[j] < rowMin) {
+        rowMin = current[j];
+      }
+    }
+
+    if (rowMin > maxDistance) {
+      return maxDistance + 1;
+    }
+
+    for (let j = 0; j <= b.length; j += 1) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[b.length];
+}
+
+function resolveAliasMaxDistance(a: string, b: string) {
+  const minLength = Math.min(a.length, b.length);
+  if (minLength >= 7) return 2;
+  return 1;
+}
+
+function hasStrongAliasMatch(a: string, b: string) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+
+  if ((a.includes(b) || b.includes(a)) && Math.min(a.length, b.length) >= 4) {
+    return true;
+  }
+
+  const aDigits = numericSignature(a);
+  const bDigits = numericSignature(b);
+  if ((aDigits || bDigits) && aDigits !== bDigits) {
+    return false;
+  }
+
+  const aLatinOnly = /^[a-z0-9]+$/i.test(a);
+  const bLatinOnly = /^[a-z0-9]+$/i.test(b);
+  if (aLatinOnly && bLatinOnly) {
+    const aLatinSkeleton = latinSkeleton(a);
+    const bLatinSkeleton = latinSkeleton(b);
+    if (
+      aLatinSkeleton.length >= 2 &&
+      bLatinSkeleton.length >= 2 &&
+      (aLatinSkeleton === bLatinSkeleton ||
+        aLatinSkeleton.includes(bLatinSkeleton) ||
+        bLatinSkeleton.includes(aLatinSkeleton))
+    ) {
+      return true;
+    }
+  }
+
+  const aArabicSkeleton = arabicSkeleton(a);
+  const bArabicSkeleton = arabicSkeleton(b);
+  if (
+    aArabicSkeleton.length >= 2 &&
+    bArabicSkeleton.length >= 2 &&
+    (aArabicSkeleton === bArabicSkeleton ||
+      aArabicSkeleton.includes(bArabicSkeleton) ||
+      bArabicSkeleton.includes(aArabicSkeleton))
+  ) {
+    return true;
+  }
+
+  const maxDistance = resolveAliasMaxDistance(a, b);
+  const distance = boundedLevenshteinDistance(a, b, maxDistance);
+  return distance <= maxDistance;
+}
+
 function addKnownVehicleAliases(aliasSet: Set<string>, addAlias: (value: string) => void) {
   const existing = Array.from(aliasSet);
   if (existing.length === 0) return;
@@ -238,16 +342,23 @@ function addKnownVehicleAliases(aliasSet: Set<string>, addAlias: (value: string)
       .map((item) => normalizeText(item).replace(/\s+/g, ""))
       .filter(Boolean)
   );
+  const compactExistingAliases = Array.from(compactExisting);
 
   for (const group of KNOWN_VEHICLE_ALIAS_GROUPS) {
-    const compactGroupAliases = new Set(
+    const compactGroupAliases = Array.from(
+      new Set(
       group
         .map((alias) => normalizeText(alias).replace(/\s+/g, ""))
         .filter(Boolean)
+      )
     );
-    const hasMatch = Array.from(compactGroupAliases).some((alias) =>
-      compactExisting.has(alias)
-    );
+    const hasExactMatch = compactGroupAliases.some((alias) => compactExisting.has(alias));
+    const hasFuzzyMatch =
+      !hasExactMatch &&
+      compactExistingAliases.some((existingAlias) =>
+        compactGroupAliases.some((alias) => hasStrongAliasMatch(existingAlias, alias))
+      );
+    const hasMatch = hasExactMatch || hasFuzzyMatch;
     if (!hasMatch) continue;
 
     for (const alias of group) {
@@ -275,6 +386,10 @@ export function buildVehicleAliases(value?: string | null) {
 
   addAlias(normalized);
   addAlias(compact);
+  const compactWithoutLongRepeats = compact.replace(REPEATED_CHAR_REGEX, "$1$1");
+  if (compactWithoutLongRepeats !== compact) {
+    addAlias(compactWithoutLongRepeats);
+  }
 
   if (hasArabic) {
     addAlias(arabicSpelledLettersToLatin(normalized));
@@ -284,6 +399,10 @@ export function buildVehicleAliases(value?: string | null) {
   if (hasLatin) {
     const latinCompact = normalized.replace(/[^a-z0-9]+/g, "");
     addAlias(latinCompact);
+    const latinSkeletonAlias = latinSkeleton(latinCompact);
+    if (latinSkeletonAlias.length >= 3) {
+      addAlias(latinSkeletonAlias);
+    }
     addAlias(latinCompact.split("").join(" "));
     addAlias(latinToArabicSpelledLetters(latinCompact));
     addAlias(latinToArabicSpelledLetters(latinCompact).replace(/\s+/g, ""));
@@ -342,6 +461,28 @@ export function isVehicleTextMatch(
         ) {
           return true;
         }
+      }
+
+      const candidateArabicSkeleton = arabicSkeleton(candidateAlias);
+      const queryArabicSkeleton = arabicSkeleton(queryAlias);
+      if (
+        candidateArabicSkeleton.length >= 2 &&
+        queryArabicSkeleton.length >= 2 &&
+        (candidateArabicSkeleton === queryArabicSkeleton ||
+          candidateArabicSkeleton.includes(queryArabicSkeleton) ||
+          queryArabicSkeleton.includes(candidateArabicSkeleton))
+      ) {
+        return true;
+      }
+
+      const maxDistance = resolveAliasMaxDistance(candidateAlias, queryAlias);
+      const distance = boundedLevenshteinDistance(
+        candidateAlias,
+        queryAlias,
+        maxDistance
+      );
+      if (distance <= maxDistance) {
+        return true;
       }
     }
   }

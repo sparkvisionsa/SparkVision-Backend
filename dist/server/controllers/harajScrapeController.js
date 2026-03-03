@@ -211,9 +211,9 @@ async function resolveHarajSearchCandidateIds(collection, cachePrefix, query) {
     }
     const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
         exact: false,
-        maxTerms: 8,
-        maxAliasesPerTerm: 8,
-        maxOutputTerms: 20,
+        maxTerms: 10,
+        maxAliasesPerTerm: 12,
+        maxOutputTerms: 28,
     });
     if (!textSearchQuery) {
         return null;
@@ -272,12 +272,25 @@ function buildFilter(query, searchCandidateIds) {
                     { "item.bodyTEXT": { $in: searchRegexes } },
                     { "gql.posts.json.data.posts.items.title": { $in: searchRegexes } },
                     { "gql.posts.json.data.posts.items.bodyTEXT": { $in: searchRegexes } },
+                    { city: { $in: searchRegexes } },
+                    { "item.city": { $in: searchRegexes } },
+                    { "item.geoCity": { $in: searchRegexes } },
                     { "tags.1": { $in: searchRegexes } },
                     { "tags.2": { $in: searchRegexes } },
                     { "item.tags.1": { $in: searchRegexes } },
                     { "item.tags.2": { $in: searchRegexes } },
                     { "gql.posts.json.data.posts.items.tags.1": { $in: searchRegexes } },
                     { "gql.posts.json.data.posts.items.tags.2": { $in: searchRegexes } },
+                    { phone: { $in: searchRegexes } },
+                    { url: { $in: searchRegexes } },
+                    { "item.URL": { $in: searchRegexes } },
+                    { "item.price.formattedPrice": { $in: searchRegexes } },
+                    { "item.carInfo.model": { $in: searchRegexes } },
+                    { "carInfo.model": { $in: searchRegexes } },
+                    { "item.carInfo.mileage": { $in: searchRegexes } },
+                    { "carInfo.mileage": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.carInfo.model": { $in: searchRegexes } },
+                    { "gql.posts.json.data.posts.items.carInfo.mileage": { $in: searchRegexes } },
                 ],
             });
         }
@@ -624,39 +637,28 @@ async function listHarajScrapes(query, options = {}) {
         ]);
         const hasPrimaryNoHits = primarySearchCandidateIds?.supported === true && primarySearchCandidateIds.ids.length === 0;
         const hasCarsNoHits = carsSearchCandidateIds?.supported === true && carsSearchCandidateIds.ids.length === 0;
-        if (query.search && hasPrimaryNoHits && hasCarsNoHits) {
-            if (query.fields === "modelYears") {
-                return {
-                    items: [],
-                    total: 0,
-                    page: 1,
-                    limit: 1,
-                };
-            }
-            const countMode = query.countMode === "none" ? "none" : "exact";
-            return {
-                items: [],
-                total: 0,
-                page,
-                limit,
-                ...(countMode === "none" ? { hasNext: false } : {}),
-            };
-        }
-        const primaryFilter = buildFilter(query, primarySearchCandidateIds);
-        const carsFilter = buildFilter(query, carsSearchCandidateIds);
+        const shouldFallbackToRegexOnly = Boolean(query.search?.trim()) && hasPrimaryNoHits && hasCarsNoHits;
+        const effectivePrimarySearchCandidateIds = shouldFallbackToRegexOnly
+            ? null
+            : primarySearchCandidateIds;
+        const effectiveCarsSearchCandidateIds = shouldFallbackToRegexOnly
+            ? null
+            : carsSearchCandidateIds;
+        const primaryFilter = buildFilter(query, effectivePrimarySearchCandidateIds);
+        const carsFilter = buildFilter(query, effectiveCarsSearchCandidateIds);
         if (query.fields === "modelYears") {
             const modelYearPrimaryFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            }, primarySearchCandidateIds);
+            }, effectivePrimarySearchCandidateIds);
             const modelYearCarsFilter = buildFilter({
                 ...query,
                 tag1: undefined,
                 tag2: undefined,
                 carModelYear: undefined,
-            }, carsSearchCandidateIds);
+            }, effectiveCarsSearchCandidateIds);
             const yearRows = await primaryCollection
                 .aggregate([
                 ...buildCombinedHarajPipeline(modelYearPrimaryFilter, modelYearCarsFilter, [

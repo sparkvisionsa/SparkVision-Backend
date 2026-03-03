@@ -6,7 +6,7 @@ import {
   getYallaMotorCollection,
   getYallaUsedCollection,
 } from "./models/yallaMotor";
-import { getSyarahCollection } from "./models/syarah";
+import { getSyarahCollection, getSyarahNewCollection } from "./models/syarah";
 
 type IndexDirection = 1 | -1 | "text";
 type IndexSpec = {
@@ -44,6 +44,9 @@ const HARJ_INDEXES: IndexSpec[] = [
       title: "text",
       "item.title": "text",
       "item.bodyTEXT": "text",
+      city: "text",
+      "item.city": "text",
+      "item.geoCity": "text",
       tags: "text",
       "item.tags": "text",
       "gql.posts.json.data.posts.items.title": "text",
@@ -56,6 +59,9 @@ const HARJ_INDEXES: IndexSpec[] = [
         "item.title": 12,
         tags: 10,
         "item.tags": 10,
+        city: 6,
+        "item.city": 6,
+        "item.geoCity": 5,
         "gql.posts.json.data.posts.items.title": 8,
         "item.bodyTEXT": 4,
         "gql.posts.json.data.posts.items.bodyTEXT": 3,
@@ -78,11 +84,16 @@ const YALLA_INDEXES: IndexSpec[] = [
       title: "text",
       description: "text",
       location: "text",
+      cardPriceText: "text",
+      price: "text",
+      phone: "text",
+      url: "text",
       breadcrumbs: "text",
       "detail.breadcrumb": "text",
       "detail.overview.h1": "text",
       "detail.overview.h4": "text",
       "detail.description": "text",
+      "detail.url": "text",
     },
     options: {
       default_language: "none",
@@ -93,8 +104,13 @@ const YALLA_INDEXES: IndexSpec[] = [
         breadcrumbs: 8,
         "detail.breadcrumb": 8,
         location: 6,
+        cardPriceText: 4,
+        price: 4,
         description: 4,
         "detail.description": 4,
+        phone: 3,
+        url: 3,
+        "detail.url": 3,
         "detail.overview.h4": 3,
       },
     },
@@ -122,6 +138,12 @@ const SYARAH_INDEXES: IndexSpec[] = [
       origin: "text",
       fuel_type: "text",
       transmission: "text",
+      year: "text",
+      mileage_km: "text",
+      price_cash: "text",
+      price_monthly: "text",
+      phone: "text",
+      share_link: "text",
       tags: "text",
     },
     options: {
@@ -134,6 +156,12 @@ const SYARAH_INDEXES: IndexSpec[] = [
         tags: 7,
         city: 5,
         origin: 4,
+        year: 4,
+        mileage_km: 3,
+        price_cash: 3,
+        price_monthly: 3,
+        phone: 3,
+        share_link: 2,
         fuel_type: 3,
         transmission: 3,
       },
@@ -170,6 +198,7 @@ async function warmupSourceIndexes() {
   const yallaUsed = getYallaUsedCollection(db);
   const yallaNewCars = getYallaNewCarsCollection(db);
   const syarah = getSyarahCollection(db);
+  const syarahNew = getSyarahNewCollection(db);
 
   await Promise.all([
     createIndexesSafely(harajPrimary, HARJ_INDEXES),
@@ -178,6 +207,7 @@ async function warmupSourceIndexes() {
     createIndexesSafely(yallaUsed, YALLA_INDEXES),
     createIndexesSafely(yallaNewCars, YALLA_INDEXES),
     createIndexesSafely(syarah, SYARAH_INDEXES),
+    createIndexesSafely(syarahNew, SYARAH_INDEXES),
   ]);
 }
 

@@ -6,7 +6,7 @@ import {
   CARS_HARAJ_COLLECTION,
   HARAJ_SCRAPE_COLLECTION,
 } from "@/server/models/harajScrape";
-import { SYARAH_COLLECTION } from "@/server/models/syarah";
+import { SYARAH_COLLECTION, SYARAH_NEW_COLLECTION } from "@/server/models/syarah";
 import {
   YALLA_MOTOR_LEGACY_COLLECTION,
   YALLA_MOTOR_NEW_CARS_COLLECTION,
@@ -255,11 +255,23 @@ type RecordStatsSummary = {
 
 const EPOCH_MILLISECONDS_THRESHOLD = 1_000_000_000_000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ADMIN_ANALYTICS_CACHE_TTL_MS = 15_000;
+const ADMIN_SOURCE_RECORD_STATS_CACHE_TTL_MS = 60_000;
+const ADMIN_SOURCE_RECORD_STATS_PERSISTED_MAX_AGE_MS = 10 * 60 * 1000;
+const ADMIN_METRICS_CACHE_COLLECTION = "admin_metrics_cache";
+const ADMIN_SOURCE_RECORD_STATS_CACHE_KEY = "source_record_stats_v2";
 const CARS_PAGE_HARAJ_TAG0 = "\u062d\u0631\u0627\u062c\u0020\u0627\u0644\u0633\u064a\u0627\u0631\u0627\u062a";
 const CARS_PAGE_HARAJ_EXCLUDED_TAG1 = [
   "\u0642\u0637\u0639\u0020\u063a\u064a\u0627\u0631\u0020\u0648\u0645\u0644\u062d\u0642\u0627\u062a",
   "\u0634\u0627\u062d\u0646\u0627\u062a\u0020\u0648\u0645\u0639\u062f\u0627\u062a\u0020\u062b\u0642\u064a\u0644\u0629",
 ];
+
+type AdminMetricsCacheDoc = {
+  _id: string;
+  payload: Record<string, unknown>;
+  generatedAt: Date;
+  updatedAt: Date;
+};
 
 const SOURCE_COLLECTION_STATS_SPECS: SourceCollectionStatsSpec[] = [
   {
@@ -344,6 +356,16 @@ const SOURCE_COLLECTION_STATS_SPECS: SourceCollectionStatsSpec[] = [
     sourceLabel: "Syarah",
     collectionName: SYARAH_COLLECTION,
     collectionLabel: "Syarah",
+    dateFields: [{ path: "fetchedAt", mode: "epoch_mixed" }],
+    priceFields: ["price_cash", "price_monthly"],
+    imageFields: ["images", "featured_image"],
+    phoneFields: [],
+  },
+  {
+    sourceId: "syarah",
+    sourceLabel: "Syarah",
+    collectionName: SYARAH_NEW_COLLECTION,
+    collectionLabel: "Syarah New",
     dateFields: [{ path: "fetchedAt", mode: "epoch_mixed" }],
     priceFields: ["price_cash", "price_monthly"],
     imageFields: ["images", "featured_image"],
@@ -670,6 +692,67 @@ function buildCarsPageHarajFilter(): Filter<Record<string, unknown>> {
     ],
   };
 }
+
+type PayloadCacheEntry<T> = {
+  payload: T | null;
+  expiresAt: number;
+  inFlight: Promise<T> | null;
+};
+
+function createPayloadCache<T>(): PayloadCacheEntry<T> {
+  return {
+    payload: null,
+    expiresAt: 0,
+    inFlight: null,
+  };
+}
+
+async function resolveCachedPayload<T>(
+  cache: PayloadCacheEntry<T>,
+  ttlMs: number,
+  loader: () => Promise<T>
+): Promise<T> {
+  const now = Date.now();
+  if (cache.payload) {
+    if (cache.expiresAt > now) {
+      return cache.payload;
+    }
+
+    if (!cache.inFlight) {
+      cache.inFlight = loader()
+        .then((payload) => {
+          cache.payload = payload;
+          cache.expiresAt = Date.now() + ttlMs;
+          return payload;
+        })
+        .catch(() => cache.payload as T)
+        .finally(() => {
+          cache.inFlight = null;
+        });
+    }
+
+    return cache.payload;
+  }
+
+  if (cache.inFlight) {
+    return cache.inFlight;
+  }
+
+  cache.inFlight = loader()
+    .then((payload) => {
+      cache.payload = payload;
+      cache.expiresAt = Date.now() + ttlMs;
+      return payload;
+    })
+    .finally(() => {
+      cache.inFlight = null;
+    });
+
+  return cache.inFlight;
+}
+
+const adminAnalyticsPayloadCache = createPayloadCache<Record<string, unknown>>();
+const adminSourceRecordStatsPayloadCache = createPayloadCache<Record<string, unknown>>();
 
 export function assertCsrf(request: Request) {
   const csrfCookie = readCookie(request, authTrackingConfig.csrfCookieName);
@@ -1950,13 +2033,18 @@ export async function getAdminAnalytics(request: Request) {
   const context = await resolveRequestContext(request);
   assertAdminUser(context.user, context.isUserBlocked);
 
-  const db = await getMongoDb();
-  const { users, sessions, activities, guestAttempts } = getAuthCollections(db);
+  const payload = await resolveCachedPayload(
+    adminAnalyticsPayloadCache,
+    ADMIN_ANALYTICS_CACHE_TTL_MS,
+    async () => {
 
-  const today = startOfDay();
-  const weekStart = startOfWeek();
-  const monthStart = startOfMonth();
-  const activeThreshold = new Date(Date.now() - 5 * 60 * 1000);
+      const db = await getMongoDb();
+      const { users, sessions, activities, guestAttempts } = getAuthCollections(db);
+
+      const today = startOfDay();
+      const weekStart = startOfWeek();
+      const monthStart = startOfMonth();
+      const activeThreshold = new Date(Date.now() - 5 * 60 * 1000);
 
   const [
     totalRegisteredUsers,
@@ -2125,62 +2213,66 @@ export async function getAdminAnalytics(request: Request) {
     count: peakUsageRaw.find((item) => item._id === hour)?.count ?? 0,
   }));
 
-  return {
-    context,
-    payload: {
-      overview: {
-        totalUsers: totalRegisteredUsers + totalGuests,
-        registeredUsers: totalRegisteredUsers,
-        guests: totalGuests,
-        activeUsers,
-        newUsers: {
-          today: newUsersToday,
-          week: newUsersWeek,
-          month: newUsersMonth,
+      return {
+        overview: {
+          totalUsers: totalRegisteredUsers + totalGuests,
+          registeredUsers: totalRegisteredUsers,
+          guests: totalGuests,
+          activeUsers,
+          newUsers: {
+            today: newUsersToday,
+            week: newUsersWeek,
+            month: newUsersMonth,
+          },
+          totalSessions,
+          averageSessionDurationMs: Math.round(avgSessionDurationMs),
+          mostUsedFeatures: featureUsage.slice(0, 8).map((item) => ({
+            actionType: item._id,
+            count: item.count,
+          })),
+          peakUsageByHour,
         },
-        totalSessions,
-        averageSessionDurationMs: Math.round(avgSessionDurationMs),
-        mostUsedFeatures: featureUsage.slice(0, 8).map((item) => ({
+        engagement: {
+          retentionRate,
+          returningUsers: retentionReturning,
+          trackedUsers: retentionTotal,
+        },
+        conversion: {
+          conversionRate,
+          convertedUsers,
+          guestPopulation: guestTotalForConversion,
+        },
+        downloads: {
+          totalDownloads: downloadStats,
+        },
+        searchAnalytics: searchStats.map((item) => ({
+          query: item._id || "(empty)",
+          count: item.count,
+        })),
+        geoDistribution: geoDistribution.map((item) => ({
+          country: item._id,
+          count: item.count,
+        })),
+        deviceStats: deviceStats.map((item) => ({
+          type: item._id,
+          count: item.count,
+        })),
+        browserStats: browserStats.map((item) => ({
+          browser: item._id,
+          count: item.count,
+        })),
+        featureUsage: featureUsage.map((item) => ({
           actionType: item._id,
           count: item.count,
         })),
-        peakUsageByHour,
-      },
-      engagement: {
-        retentionRate,
-        returningUsers: retentionReturning,
-        trackedUsers: retentionTotal,
-      },
-      conversion: {
-        conversionRate,
-        convertedUsers,
-        guestPopulation: guestTotalForConversion,
-      },
-      downloads: {
-        totalDownloads: downloadStats,
-      },
-      searchAnalytics: searchStats.map((item) => ({
-        query: item._id || "(empty)",
-        count: item.count,
-      })),
-      geoDistribution: geoDistribution.map((item) => ({
-        country: item._id,
-        count: item.count,
-      })),
-      deviceStats: deviceStats.map((item) => ({
-        type: item._id,
-        count: item.count,
-      })),
-      browserStats: browserStats.map((item) => ({
-        browser: item._id,
-        count: item.count,
-      })),
-      featureUsage: featureUsage.map((item) => ({
-        actionType: item._id,
-        count: item.count,
-      })),
-      generatedAt: new Date().toISOString(),
-    },
+        generatedAt: new Date().toISOString(),
+      };
+    }
+  );
+
+  return {
+    context,
+    payload,
   };
 }
 
@@ -2188,22 +2280,40 @@ export async function getAdminSourceRecordStats(request: Request) {
   const context = await resolveRequestContext(request);
   assertAdminUser(context.user, context.isUserBlocked);
 
-  const db = await getMongoDb();
-  const generatedAt = new Date();
-  const collections = await Promise.all(
-    SOURCE_COLLECTION_STATS_SPECS.map((spec) =>
-      collectSourceCollectionStats(db, spec, generatedAt)
-    )
-  );
+  const payload = await resolveCachedPayload(
+    adminSourceRecordStatsPayloadCache,
+    ADMIN_SOURCE_RECORD_STATS_CACHE_TTL_MS,
+    async () => {
+      const db = await getMongoDb();
+      const metricsCache = db.collection<AdminMetricsCacheDoc>(ADMIN_METRICS_CACHE_COLLECTION);
+      const persistedSnapshot = await metricsCache.findOne({
+        _id: ADMIN_SOURCE_RECORD_STATS_CACHE_KEY,
+      });
+      const persistedPayload = persistedSnapshot?.payload ?? null;
+      const persistedUpdatedAt = persistedSnapshot?.updatedAt ?? null;
+      if (persistedPayload && persistedUpdatedAt instanceof Date) {
+        const ageMs = Date.now() - persistedUpdatedAt.getTime();
+        if (ageMs <= ADMIN_SOURCE_RECORD_STATS_PERSISTED_MAX_AGE_MS) {
+          return persistedPayload;
+        }
+      }
 
-  const sourceMap = new Map<
-    string,
-    {
-      sourceId: string;
-      sourceLabel: string;
-      collections: SourceCollectionStatsRow[];
-    }
-  >();
+      const generatedAt = new Date();
+      try {
+        const collections = await Promise.all(
+          SOURCE_COLLECTION_STATS_SPECS.map((spec) =>
+            collectSourceCollectionStats(db, spec, generatedAt)
+          )
+        );
+
+      const sourceMap = new Map<
+        string,
+        {
+          sourceId: string;
+          sourceLabel: string;
+          collections: SourceCollectionStatsRow[];
+        }
+      >();
 
   for (const collection of collections) {
     const existing = sourceMap.get(collection.sourceId);
@@ -2433,28 +2543,52 @@ export async function getAdminSourceRecordStats(request: Request) {
     collections.map((collection) => collection.newestRecordAt)
   );
 
+        const computedPayload = {
+        overview: {
+          totalSources: sources.length,
+          totalCollections: collections.length,
+          totalRecords,
+          oldestRecordAt: toIso(oldestRecordAt),
+          newestRecordAt: toIso(newestRecordAt),
+          recordsInLast24Hours,
+          recordsInLast7Days,
+          recordsWithPrice,
+          recordsWithImages,
+          recordsWithPhone,
+          priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
+          imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
+          phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
+        },
+        sources,
+        pages,
+        generatedAt: generatedAt.toISOString(),
+      };
+
+        await metricsCache.updateOne(
+          { _id: ADMIN_SOURCE_RECORD_STATS_CACHE_KEY },
+          {
+            $set: {
+              payload: computedPayload,
+              generatedAt,
+              updatedAt: new Date(),
+            },
+          },
+          { upsert: true }
+        );
+
+        return computedPayload;
+      } catch (error: unknown) {
+        if (persistedPayload) {
+          return persistedPayload;
+        }
+        throw error;
+      }
+    }
+  );
+
   return {
     context,
-    payload: {
-      overview: {
-        totalSources: sources.length,
-        totalCollections: collections.length,
-        totalRecords,
-        oldestRecordAt: toIso(oldestRecordAt),
-        newestRecordAt: toIso(newestRecordAt),
-        recordsInLast24Hours,
-        recordsInLast7Days,
-        recordsWithPrice,
-        recordsWithImages,
-        recordsWithPhone,
-        priceCoverage: toCoveragePercentage(recordsWithPrice, totalRecords),
-        imageCoverage: toCoveragePercentage(recordsWithImages, totalRecords),
-        phoneCoverage: toCoveragePercentage(recordsWithPhone, totalRecords),
-      },
-      sources,
-      pages,
-      generatedAt: generatedAt.toISOString(),
-    },
+    payload,
   };
 }
 

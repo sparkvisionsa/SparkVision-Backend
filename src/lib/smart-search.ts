@@ -11,11 +11,16 @@ type BuildSmartTextSearchQueryOptions = BuildSmartSearchTermGroupsOptions & {
 };
 
 const DEFAULT_MAX_TERMS = 6;
-const DEFAULT_MAX_ALIASES_PER_TERM = 12;
+const DEFAULT_MAX_ALIASES_PER_TERM = 16;
 const DEFAULT_MAX_TEXT_OUTPUT_TERMS = 18;
 const SEARCH_TOKEN_SPLIT_REGEX = /[\s,.;:!?()[\]{}"'`/\\|@#$%^&*+=~<>\u061F\u060C]+/g;
 const ARABIC_CHAR_REGEX = /[\u0621-\u064A]/;
 const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+const ARABIC_WEAK_CHAR_REGEX = /[\u0627\u0648\u064A\u0649\u0647\u0629\u0621\u0624\u0626]/g;
+const LATIN_WEAK_CHAR_REGEX = /[aeiouy]/gi;
+const REPEATED_CHAR_REGEX = /(.)\1{2,}/g;
+const TYPO_VARIANT_MIN_LENGTH = 4;
+const TYPO_VARIANT_DELETE_LIMIT = 6;
 const ARABIC_WEAK_CHAR_SET = new Set([
   "\u0627", // alif
   "\u0648", // waw
@@ -207,10 +212,94 @@ function tokenizeSearch(value: string) {
     .filter(Boolean);
 }
 
-function expandTokenAliases(token: string, maxAliases: number) {
+function compactNormalizedToken(value: string) {
+  return normalizeTextSearchToken(value).replace(/\s+/g, "");
+}
+
+function collapseRepeatedChars(value: string) {
+  return value.replace(REPEATED_CHAR_REGEX, "$1$1");
+}
+
+function stripArabicWeakChars(value: string) {
+  return value.replace(ARABIC_WEAK_CHAR_REGEX, "");
+}
+
+function stripLatinWeakChars(value: string) {
+  return value.replace(LATIN_WEAK_CHAR_REGEX, "");
+}
+
+function buildDeletionVariants(value: string, maxOutput: number) {
+  if (value.length < TYPO_VARIANT_MIN_LENGTH + 1) return [] as string[];
+
+  const variants: string[] = [];
+  const startIndex = value.length > 7 ? 1 : 0;
+  const endIndex = value.length > 7 ? value.length - 1 : value.length;
+
+  for (let index = startIndex; index < endIndex; index += 1) {
+    const variant = `${value.slice(0, index)}${value.slice(index + 1)}`;
+    if (variant.length < TYPO_VARIANT_MIN_LENGTH) continue;
+    variants.push(variant);
+    if (variants.length >= maxOutput) break;
+  }
+
+  return variants;
+}
+
+function buildFuzzyTokenAliases(token: string, maxAliases: number) {
+  const normalizedCompact = compactNormalizedToken(token);
+  if (!normalizedCompact) return [];
+
+  const candidates = new Set<string>();
+  const pushCandidate = (value: string) => {
+    const compact = compactNormalizedToken(value);
+    if (!compact) return;
+    if (compact.length < TYPO_VARIANT_MIN_LENGTH && !isNumericToken(compact)) return;
+    candidates.add(compact);
+  };
+
+  pushCandidate(normalizedCompact);
+  pushCandidate(collapseRepeatedChars(normalizedCompact));
+
+  if (ARABIC_CHAR_REGEX.test(normalizedCompact)) {
+    pushCandidate(stripArabicWeakChars(normalizedCompact));
+  }
+
+  if (/[a-z]/i.test(normalizedCompact)) {
+    const latinSkeleton = stripLatinWeakChars(normalizedCompact);
+    if (latinSkeleton.length >= TYPO_VARIANT_MIN_LENGTH - 1) {
+      pushCandidate(latinSkeleton);
+    }
+  }
+
+  const seedValues = Array.from(candidates);
+  for (const seedValue of seedValues) {
+    const deletionVariants = buildDeletionVariants(
+      seedValue,
+      Math.max(1, Math.floor(TYPO_VARIANT_DELETE_LIMIT / 2))
+    );
+    for (const variant of deletionVariants) {
+      pushCandidate(variant);
+      if (candidates.size >= maxAliases) break;
+    }
+    if (candidates.size >= maxAliases) break;
+  }
+
+  return Array.from(candidates).slice(0, maxAliases);
+}
+
+function expandTokenAliases(
+  token: string,
+  maxAliases: number,
+  options?: { fuzzy?: boolean }
+) {
   const raw = token.trim();
   if (!raw) return [];
   const aliases = [raw, ...buildVehicleAliases(raw)];
+  if (options?.fuzzy !== false) {
+    aliases.push(
+      ...buildFuzzyTokenAliases(raw, Math.max(2, Math.floor(maxAliases / 2)))
+    );
+  }
   return dedupeNormalized(aliases, maxAliases);
 }
 
@@ -229,7 +318,9 @@ export function buildSmartSearchTermGroups(
   );
 
   if (exact) {
-    const exactAliases = expandTokenAliases(input, maxAliasesPerTerm);
+    const exactAliases = expandTokenAliases(input, maxAliasesPerTerm, {
+      fuzzy: false,
+    });
     return exactAliases.length > 0 ? [exactAliases] : [[input]];
   }
 
@@ -239,16 +330,24 @@ export function buildSmartSearchTermGroups(
   const selectedUniqueTokens = dedupeNormalized(selectedTokens, maxTerms);
 
   const groups = selectedUniqueTokens
-    .map((token) => expandTokenAliases(token, maxAliasesPerTerm))
+    .map((token) =>
+      expandTokenAliases(token, maxAliasesPerTerm, {
+        fuzzy: true,
+      })
+    )
     .filter((group) => group.length > 0);
 
   if (groups.length === 0) {
-    const fallback = expandTokenAliases(input, maxAliasesPerTerm);
+    const fallback = expandTokenAliases(input, maxAliasesPerTerm, {
+      fuzzy: true,
+    });
     return fallback.length > 0 ? [fallback] : [[input]];
   }
 
   if (selectedUniqueTokens.length <= 1 && rawTokens.length > 1) {
-    const compositeGroup = expandTokenAliases(input, maxAliasesPerTerm);
+    const compositeGroup = expandTokenAliases(input, maxAliasesPerTerm, {
+      fuzzy: true,
+    });
     if (compositeGroup.length > 0) {
       groups.unshift(compositeGroup);
     }
@@ -289,6 +388,10 @@ export function buildSmartTextSearchQuery(
       if (!normalized) continue;
       if (normalized.length <= 2) continue;
       rankedTerms.push(normalized);
+      const compact = normalized.replace(/\s+/g, "");
+      if (compact && compact !== normalized && compact.length > 2) {
+        rankedTerms.push(compact);
+      }
     }
   }
 
