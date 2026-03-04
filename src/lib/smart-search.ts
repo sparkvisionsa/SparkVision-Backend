@@ -164,7 +164,8 @@ export function buildSearchRegex(
   }
 
   if (options?.exact) {
-    return new RegExp(`^${escapeRegex(raw)}$`, "i");
+    const escaped = escapeRegex(raw);
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}($|[^\\p{L}\\p{N}])`, "iu");
   }
 
   const shouldUseArabicFuzzy = options?.fuzzyArabic === true && ARABIC_CHAR_REGEX.test(raw);
@@ -318,10 +319,26 @@ export function buildSmartSearchTermGroups(
   );
 
   if (exact) {
-    const exactAliases = expandTokenAliases(input, maxAliasesPerTerm, {
+    const exactTokens = dedupeNormalized(
+      tokenizeSearch(input),
+      maxTerms
+    );
+    const tokenGroups = exactTokens
+      .map((token) =>
+        expandTokenAliases(token, maxAliasesPerTerm, {
+          fuzzy: false,
+        })
+      )
+      .filter((group) => group.length > 0);
+
+    if (tokenGroups.length > 0) {
+      return tokenGroups;
+    }
+
+    const fallbackExactAliases = expandTokenAliases(input, maxAliasesPerTerm, {
       fuzzy: false,
     });
-    return exactAliases.length > 0 ? [exactAliases] : [[input]];
+    return fallbackExactAliases.length > 0 ? [fallbackExactAliases] : [[input]];
   }
 
   const rawTokens = tokenizeSearch(input);

@@ -140,7 +140,8 @@ function buildSearchRegex(value, options) {
         return /.^/i;
     }
     if (options?.exact) {
-        return new RegExp(`^${escapeRegex(raw)}$`, "i");
+        const escaped = escapeRegex(raw);
+        return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}($|[^\\p{L}\\p{N}])`, "iu");
     }
     const shouldUseArabicFuzzy = options?.fuzzyArabic === true && ARABIC_CHAR_REGEX.test(raw);
     if (shouldUseArabicFuzzy) {
@@ -267,10 +268,19 @@ function buildSmartSearchTermGroups(search, options = {}) {
     const maxTerms = Math.max(1, options.maxTerms ?? DEFAULT_MAX_TERMS);
     const maxAliasesPerTerm = Math.max(1, options.maxAliasesPerTerm ?? DEFAULT_MAX_ALIASES_PER_TERM);
     if (exact) {
-        const exactAliases = expandTokenAliases(input, maxAliasesPerTerm, {
+        const exactTokens = dedupeNormalized(tokenizeSearch(input), maxTerms);
+        const tokenGroups = exactTokens
+            .map((token) => expandTokenAliases(token, maxAliasesPerTerm, {
+            fuzzy: false,
+        }))
+            .filter((group) => group.length > 0);
+        if (tokenGroups.length > 0) {
+            return tokenGroups;
+        }
+        const fallbackExactAliases = expandTokenAliases(input, maxAliasesPerTerm, {
             fuzzy: false,
         });
-        return exactAliases.length > 0 ? [exactAliases] : [[input]];
+        return fallbackExactAliases.length > 0 ? [fallbackExactAliases] : [[input]];
     }
     const rawTokens = tokenizeSearch(input);
     const usefulTokens = rawTokens.filter((token) => isUsefulToken(token));

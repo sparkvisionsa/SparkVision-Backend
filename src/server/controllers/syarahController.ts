@@ -143,7 +143,7 @@ function buildNumericExpression(fieldPath: string): Document {
 }
 
 function canUseSearchCandidates(query: SyarahListQuery) {
-  return query.exactSearch !== true && Boolean(query.search?.trim());
+  return Boolean(query.search?.trim());
 }
 
 function resolveSearchCandidateLimit(query: SyarahListQuery) {
@@ -173,7 +173,7 @@ async function resolveSyarahSearchCandidateIds(
   }
 
   const textSearchQuery = buildSmartTextSearchQuery(query.search, {
-    exact: false,
+    exact: query.exactSearch === true,
     maxTerms: 10,
     maxAliasesPerTerm: 12,
     maxOutputTerms: 28,
@@ -889,26 +889,54 @@ export async function getSyarahById(id: string) {
     const db = await getMongoDb();
     const primaryCollection = getSyarahCollection(db);
     const newCarsCollection = getSyarahNewCollection(db);
-    const numericId = Number(id);
-    const filters: Filter<SyarahDoc>[] = [
-      { _id: id as any },
-      { id },
-      { post_id: id } as any,
-      { share_link: id },
-    ];
-    if (!Number.isNaN(numericId)) {
-      filters.push({ id: numericId } as any, { post_id: numericId } as any);
+
+    const [primaryById, newCarsById] = await Promise.all([
+      primaryCollection.findOne({ _id: id as any }),
+      newCarsCollection.findOne({ _id: id as any }),
+    ]);
+    if (primaryById || newCarsById) {
+      const found = primaryById ?? newCarsById;
+      if (found === newCarsById && found) {
+        return {
+          ...found,
+          mileage_km: 0,
+        };
+      }
+      return found;
     }
 
-    const [primaryDoc, newCarsDoc] = await Promise.all([
-      primaryCollection.findOne({ $or: filters }),
-      newCarsCollection.findOne({ $or: filters }),
+    const numericId = Number(id);
+    const [primaryByStringIds, newCarsByStringIds] = await Promise.all([
+      primaryCollection.findOne({
+        $or: [{ id }, { post_id: id } as any, { share_link: id }],
+      }),
+      newCarsCollection.findOne({
+        $or: [{ id }, { post_id: id } as any, { share_link: id }],
+      }),
     ]);
+    if (primaryByStringIds || newCarsByStringIds) {
+      const found = primaryByStringIds ?? newCarsByStringIds;
+      if (found === newCarsByStringIds && found) {
+        return {
+          ...found,
+          mileage_km: 0,
+        };
+      }
+      return found;
+    }
 
-    if (primaryDoc) return primaryDoc;
-    if (newCarsDoc) {
+    if (Number.isNaN(numericId)) {
+      return null;
+    }
+
+    const [primaryByNumericIds, newCarsByNumericIds] = await Promise.all([
+      primaryCollection.findOne({ $or: [{ id: numericId } as any, { post_id: numericId } as any] }),
+      newCarsCollection.findOne({ $or: [{ id: numericId } as any, { post_id: numericId } as any] }),
+    ]);
+    if (primaryByNumericIds) return primaryByNumericIds;
+    if (newCarsByNumericIds) {
       return {
-        ...newCarsDoc,
+        ...newCarsByNumericIds,
         mileage_km: 0,
       };
     }

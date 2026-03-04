@@ -245,7 +245,7 @@ function buildCoalescedMileageExpression(inputs: Array<Document | string>): Docu
 }
 
 function canUseSearchCandidates(query: HarajScrapeListQuery) {
-  return query.exactSearch !== true && Boolean(query.search?.trim());
+  return Boolean(query.search?.trim());
 }
 
 function resolveSearchCandidateLimit(query: HarajScrapeListQuery) {
@@ -275,7 +275,7 @@ async function resolveHarajSearchCandidateIds(
   }
 
   const textSearchQuery = buildSmartTextSearchQuery(query.search, {
-    exact: false,
+    exact: query.exactSearch === true,
     maxTerms: 10,
     maxAliasesPerTerm: 12,
     maxOutputTerms: 28,
@@ -971,21 +971,38 @@ export async function getHarajScrapeById(id: string) {
     const primaryCollection = getHarajScrapeCollection(db);
     const carsCollection = getCarsHarajCollection(db);
 
-    const numericId = Number(id);
-    const filter: Filter<HarajScrapeDoc> = {
-      $or: [
-        { _id: id },
-        { postId: id },
-        Number.isNaN(numericId) ? undefined : { "item.id": numericId },
-        { "item.URL": id },
-      ].filter(Boolean) as Filter<HarajScrapeDoc>[],
-    };
-
-    const [primaryDoc, carsDoc] = await Promise.all([
-      primaryCollection.findOne(filter),
-      carsCollection.findOne(filter),
+    const [primaryById, carsById] = await Promise.all([
+      primaryCollection.findOne({ _id: id } as Filter<HarajScrapeDoc>),
+      carsCollection.findOne({ _id: id } as Filter<HarajScrapeDoc>),
     ]);
-    return primaryDoc ?? carsDoc;
+    if (primaryById || carsById) {
+      return primaryById ?? carsById;
+    }
+
+    const [primaryByPostId, carsByPostId] = await Promise.all([
+      primaryCollection.findOne({ postId: id } as Filter<HarajScrapeDoc>),
+      carsCollection.findOne({ postId: id } as Filter<HarajScrapeDoc>),
+    ]);
+    if (primaryByPostId || carsByPostId) {
+      return primaryByPostId ?? carsByPostId;
+    }
+
+    const numericId = Number(id);
+    if (!Number.isNaN(numericId)) {
+      const [primaryByItemId, carsByItemId] = await Promise.all([
+        primaryCollection.findOne({ "item.id": numericId } as Filter<HarajScrapeDoc>),
+        carsCollection.findOne({ "item.id": numericId } as Filter<HarajScrapeDoc>),
+      ]);
+      if (primaryByItemId || carsByItemId) {
+        return primaryByItemId ?? carsByItemId;
+      }
+    }
+
+    const [primaryByUrl, carsByUrl] = await Promise.all([
+      primaryCollection.findOne({ "item.URL": id } as Filter<HarajScrapeDoc>),
+      carsCollection.findOne({ "item.URL": id } as Filter<HarajScrapeDoc>),
+    ]);
+    return primaryByUrl ?? carsByUrl;
   });
 }
 

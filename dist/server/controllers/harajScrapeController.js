@@ -192,7 +192,7 @@ function buildCoalescedMileageExpression(inputs) {
     }), expressions[0]);
 }
 function canUseSearchCandidates(query) {
-    return query.exactSearch !== true && Boolean(query.search?.trim());
+    return Boolean(query.search?.trim());
 }
 function resolveSearchCandidateLimit(query) {
     const page = Math.max(query.page ?? 1, 1);
@@ -210,7 +210,7 @@ async function resolveHarajSearchCandidateIds(collection, cachePrefix, query) {
         return null;
     }
     const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
-        exact: false,
+        exact: query.exactSearch === true,
         maxTerms: 10,
         maxAliasesPerTerm: 12,
         maxOutputTerms: 28,
@@ -809,19 +809,34 @@ async function getHarajScrapeById(id) {
         const db = await (0, mongodb_1.getMongoDb)();
         const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
         const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
-        const numericId = Number(id);
-        const filter = {
-            $or: [
-                { _id: id },
-                { postId: id },
-                Number.isNaN(numericId) ? undefined : { "item.id": numericId },
-                { "item.URL": id },
-            ].filter(Boolean),
-        };
-        const [primaryDoc, carsDoc] = await Promise.all([
-            primaryCollection.findOne(filter),
-            carsCollection.findOne(filter),
+        const [primaryById, carsById] = await Promise.all([
+            primaryCollection.findOne({ _id: id }),
+            carsCollection.findOne({ _id: id }),
         ]);
-        return primaryDoc ?? carsDoc;
+        if (primaryById || carsById) {
+            return primaryById ?? carsById;
+        }
+        const [primaryByPostId, carsByPostId] = await Promise.all([
+            primaryCollection.findOne({ postId: id }),
+            carsCollection.findOne({ postId: id }),
+        ]);
+        if (primaryByPostId || carsByPostId) {
+            return primaryByPostId ?? carsByPostId;
+        }
+        const numericId = Number(id);
+        if (!Number.isNaN(numericId)) {
+            const [primaryByItemId, carsByItemId] = await Promise.all([
+                primaryCollection.findOne({ "item.id": numericId }),
+                carsCollection.findOne({ "item.id": numericId }),
+            ]);
+            if (primaryByItemId || carsByItemId) {
+                return primaryByItemId ?? carsByItemId;
+            }
+        }
+        const [primaryByUrl, carsByUrl] = await Promise.all([
+            primaryCollection.findOne({ "item.URL": id }),
+            carsCollection.findOne({ "item.URL": id }),
+        ]);
+        return primaryByUrl ?? carsByUrl;
     });
 }

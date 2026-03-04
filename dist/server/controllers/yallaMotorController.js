@@ -85,7 +85,7 @@ function buildAliasRegexes(value) {
     return uniqueAliases.map((item) => toRegex(item));
 }
 function canUseSearchCandidates(query) {
-    return query.exactSearch !== true && Boolean(query.search?.trim());
+    return Boolean(query.search?.trim());
 }
 function resolveSearchCandidateLimit(query) {
     const page = Math.max(query.page ?? 1, 1);
@@ -132,7 +132,7 @@ async function resolveYallaSearchCandidateIds(query, legacyCollection, usedColle
         return null;
     }
     const textSearchQuery = (0, smart_search_1.buildSmartTextSearchQuery)(query.search, {
-        exact: false,
+        exact: query.exactSearch === true,
         maxTerms: 10,
         maxAliasesPerTerm: 12,
         maxOutputTerms: 28,
@@ -1380,6 +1380,27 @@ function buildYallaIdFilters(id) {
     return filters;
 }
 async function findYallaDoc(collection, id) {
+    const directId = await collection.findOne({ _id: id });
+    if (directId)
+        return directId;
+    if (mongodb_1.ObjectId.isValid(id)) {
+        const objectIdDoc = await collection.findOne({
+            _id: new mongodb_1.ObjectId(id),
+        });
+        if (objectIdDoc)
+            return objectIdDoc;
+    }
+    const directAd = await collection.findOne({ adId: id });
+    if (directAd)
+        return directAd;
+    const directUrl = await collection.findOne({ url: id });
+    if (directUrl)
+        return directUrl;
+    const directDetailUrl = await collection.findOne({
+        "detail.url": id,
+    });
+    if (directDetailUrl)
+        return directDetailUrl;
     const filters = buildYallaIdFilters(id);
     return collection.findOne({ $or: filters });
 }

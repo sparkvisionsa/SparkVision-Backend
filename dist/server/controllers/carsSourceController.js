@@ -11,10 +11,10 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 200;
 const MAX_INTERNAL_LIMIT = 3000;
 const MAX_MODEL_YEAR_SPAN = 300;
-const LIST_CACHE_TTL_MS = 20_000;
+const LIST_CACHE_TTL_MS = 60_000;
 const OPTIONS_CACHE_TTL_MS = 45_000;
 const MODEL_YEARS_CACHE_TTL_MS = 120_000;
-const LIST_CACHE_STALE_TTL_MS = 120_000;
+const LIST_CACHE_STALE_TTL_MS = 300_000;
 const OPTIONS_CACHE_STALE_TTL_MS = 300_000;
 const MODEL_YEARS_CACHE_STALE_TTL_MS = 900_000;
 const SUGGESTIONS_DEFAULT_LIMIT = 8;
@@ -573,43 +573,70 @@ function normalizeSyarahItems(items) {
         priceCompare: null,
     }));
 }
-function sortItems(items, sort) {
+function compareItemsBySort(a, b, sort) {
     const getDate = (item) => toEpochMillis(item.postDate ?? null) ?? 0;
     const getPrice = (item) => typeof item.priceNumeric === "number" ? item.priceNumeric : null;
     const getComments = (item) => typeof item.commentsCount === "number" ? item.commentsCount : 0;
-    const compare = (a, b) => {
-        switch (sort) {
-            case "oldest":
-                return getDate(a) - getDate(b);
-            case "price-high": {
-                const aPrice = getPrice(a);
-                const bPrice = getPrice(b);
-                if (aPrice === null && bPrice === null)
-                    return getDate(b) - getDate(a);
-                if (aPrice === null)
-                    return 1;
-                if (bPrice === null)
-                    return -1;
-                return bPrice - aPrice || getDate(b) - getDate(a);
-            }
-            case "price-low": {
-                const aPrice = getPrice(a);
-                const bPrice = getPrice(b);
-                if (aPrice === null && bPrice === null)
-                    return getDate(b) - getDate(a);
-                if (aPrice === null)
-                    return 1;
-                if (bPrice === null)
-                    return -1;
-                return aPrice - bPrice || getDate(b) - getDate(a);
-            }
-            case "comments":
-                return getComments(b) - getComments(a) || getDate(b) - getDate(a);
-            default:
+    switch (sort) {
+        case "oldest":
+            return getDate(a) - getDate(b);
+        case "price-high": {
+            const aPrice = getPrice(a);
+            const bPrice = getPrice(b);
+            if (aPrice === null && bPrice === null)
                 return getDate(b) - getDate(a);
+            if (aPrice === null)
+                return 1;
+            if (bPrice === null)
+                return -1;
+            return bPrice - aPrice || getDate(b) - getDate(a);
         }
-    };
-    return [...items].sort(compare);
+        case "price-low": {
+            const aPrice = getPrice(a);
+            const bPrice = getPrice(b);
+            if (aPrice === null && bPrice === null)
+                return getDate(b) - getDate(a);
+            if (aPrice === null)
+                return 1;
+            if (bPrice === null)
+                return -1;
+            return aPrice - bPrice || getDate(b) - getDate(a);
+        }
+        case "comments":
+            return getComments(b) - getComments(a) || getDate(b) - getDate(a);
+        default:
+            return getDate(b) - getDate(a);
+    }
+}
+function mergeSortedItems(lists, sort, takeCount) {
+    const targetCount = Math.max(0, Math.trunc(takeCount));
+    if (targetCount === 0 || lists.length === 0) {
+        return [];
+    }
+    const indices = new Array(lists.length).fill(0);
+    const merged = [];
+    while (merged.length < targetCount) {
+        let bestListIndex = -1;
+        let bestItem = null;
+        for (let listIndex = 0; listIndex < lists.length; listIndex += 1) {
+            const currentIndex = indices[listIndex];
+            const currentList = lists[listIndex];
+            if (currentIndex >= currentList.length)
+                continue;
+            const candidate = currentList[currentIndex];
+            if (bestItem === null ||
+                compareItemsBySort(candidate, bestItem, sort) < 0) {
+                bestItem = candidate;
+                bestListIndex = listIndex;
+            }
+        }
+        if (bestListIndex < 0 || bestItem === null) {
+            break;
+        }
+        merged.push(bestItem);
+        indices[bestListIndex] += 1;
+    }
+    return merged;
 }
 function toNumericYear(value) {
     if (typeof value === "number" && Number.isFinite(value))
@@ -801,12 +828,12 @@ async function listCarsSources(query) {
                     }, { maxLimit: MAX_LIMIT })
                     : Promise.resolve({ items: [], total: 0 }),
             ]);
+            const normalizedHarajItems = normalizeHarajItems(harajData.items);
+            const normalizedYallaItems = normalizeYallaItems(yallaData.items);
+            const normalizedSyarahItems = normalizeSyarahItems(syarahData.items);
+            const mergedOptionItems = mergeSortedItems([normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems], query.sort, limit);
             return {
-                items: sortItems([
-                    ...normalizeHarajItems(harajData.items),
-                    ...normalizeYallaItems(yallaData.items),
-                    ...normalizeSyarahItems(syarahData.items),
-                ], query.sort).slice(0, limit),
+                items: mergedOptionItems,
                 total: countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total,
                 page,
                 limit,
@@ -843,14 +870,14 @@ async function listCarsSources(query) {
                 }, { maxLimit: perSourceLimit })
                 : Promise.resolve({ items: [], total: 0 }),
         ]);
-        const combinedItems = sortItems([
-            ...normalizeHarajItems(harajData.items),
-            ...normalizeYallaItems(yallaData.items),
-            ...normalizeSyarahItems(syarahData.items),
-        ], query.sort);
+        const normalizedHarajItems = normalizeHarajItems(harajData.items);
+        const normalizedYallaItems = normalizeYallaItems(yallaData.items);
+        const normalizedSyarahItems = normalizeSyarahItems(syarahData.items);
         const start = (page - 1) * limit;
         const pageWindowSize = limit + (countMode === "none" ? 1 : 0);
-        const pageWindow = combinedItems.slice(start, start + pageWindowSize);
+        const takeCount = start + pageWindowSize;
+        const mergedWindow = mergeSortedItems([normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems], query.sort, takeCount);
+        const pageWindow = mergedWindow.slice(start, start + pageWindowSize);
         const hasNext = countMode === "none" ? pageWindow.length > limit : undefined;
         const pagedItems = countMode === "none" ? pageWindow.slice(0, limit) : pageWindow;
         const total = countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total;

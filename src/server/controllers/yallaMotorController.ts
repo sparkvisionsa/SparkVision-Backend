@@ -123,7 +123,7 @@ function buildAliasRegexes(value: string) {
 }
 
 function canUseSearchCandidates(query: YallaMotorListQuery) {
-  return query.exactSearch !== true && Boolean(query.search?.trim());
+  return Boolean(query.search?.trim());
 }
 
 function resolveSearchCandidateLimit(query: YallaMotorListQuery) {
@@ -200,7 +200,7 @@ async function resolveYallaSearchCandidateIds(
   }
 
   const textSearchQuery = buildSmartTextSearchQuery(query.search, {
-    exact: false,
+    exact: query.exactSearch === true,
     maxTerms: 10,
     maxAliasesPerTerm: 12,
     maxOutputTerms: 28,
@@ -1645,6 +1645,27 @@ function buildYallaIdFilters(id: string): Filter<YallaMotorDoc>[] {
 }
 
 async function findYallaDoc(collection: Collection<YallaMotorDoc>, id: string) {
+  const directId = await collection.findOne({ _id: id as any });
+  if (directId) return directId;
+
+  if (ObjectId.isValid(id)) {
+    const objectIdDoc = await collection.findOne({
+      _id: new ObjectId(id),
+    } as unknown as Filter<YallaMotorDoc>);
+    if (objectIdDoc) return objectIdDoc;
+  }
+
+  const directAd = await collection.findOne({ adId: id } as Filter<YallaMotorDoc>);
+  if (directAd) return directAd;
+
+  const directUrl = await collection.findOne({ url: id } as Filter<YallaMotorDoc>);
+  if (directUrl) return directUrl;
+
+  const directDetailUrl = await collection.findOne({
+    "detail.url": id,
+  } as Filter<YallaMotorDoc>);
+  if (directDetailUrl) return directDetailUrl;
+
   const filters = buildYallaIdFilters(id);
   return collection.findOne({ $or: filters });
 }
