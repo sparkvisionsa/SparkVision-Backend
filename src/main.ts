@@ -1,9 +1,10 @@
-﻿import compression from "compression";
+import compression from "compression";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { RequestMethod } from "@nestjs/common";
+import { NestExpressApplication } from "@nestjs/platform-express";
 import { WinstonModule } from "nest-winston";
 import { format, transports } from "winston";
 import { AppModule } from "./app.module";
@@ -24,7 +25,11 @@ async function bootstrap() {
     transports: [new transports.Console()],
   });
 
-  const app = await NestFactory.create(AppModule, { logger });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger,
+  });
+  app.useBodyParser("json", { limit: "100mb" });
+  app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
 
   app.use(helmet());
   app.use(compression());

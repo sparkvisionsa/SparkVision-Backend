@@ -1,4 +1,4 @@
-﻿import { CacheModule } from "@nestjs/cache-manager";
+import { CacheModule } from "@nestjs/cache-manager";
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
@@ -8,9 +8,13 @@ import { SourcesController } from "./sources/sources.controller";
 import { AuthTrackingController } from "./auth-tracking/auth-tracking.controller";
 import { AdminController } from "./admin/admin.controller";
 import { ApiErrorFilter } from "./common/api-error.filter";
+import { ClientsModule } from "./clients/clients.module";
+import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
 
 @Module({
   imports: [
+    ClientsModule,
+    MachineValuationModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],

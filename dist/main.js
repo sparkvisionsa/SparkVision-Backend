@@ -26,7 +26,11 @@ async function bootstrap() {
         format: winston_1.format.combine(winston_1.format.timestamp(), winston_1.format.errors({ stack: true }), winston_1.format.json()),
         transports: [new winston_1.transports.Console()],
     });
-    const app = await core_1.NestFactory.create(app_module_1.AppModule, { logger });
+    const app = await core_1.NestFactory.create(app_module_1.AppModule, {
+        logger,
+    });
+    app.useBodyParser("json", { limit: "100mb" });
+    app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
     app.use((0, helmet_1.default)());
     app.use((0, compression_1.default)());
     app.use((0, cookie_parser_1.default)());

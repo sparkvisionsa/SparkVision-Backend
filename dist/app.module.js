@@ -17,12 +17,16 @@ const sources_controller_1 = require("./sources/sources.controller");
 const auth_tracking_controller_1 = require("./auth-tracking/auth-tracking.controller");
 const admin_controller_1 = require("./admin/admin.controller");
 const api_error_filter_1 = require("./common/api-error.filter");
+const clients_module_1 = require("./clients/clients.module");
+const machine_valuation_module_1 = require("./machine-valuation/machine-valuation.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
         imports: [
+            clients_module_1.ClientsModule,
+            machine_valuation_module_1.MachineValuationModule,
             config_1.ConfigModule.forRoot({
                 isGlobal: true,
                 envFilePath: [".env.local", ".env"],
