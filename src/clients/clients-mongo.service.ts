@@ -26,6 +26,7 @@ const ALLOWED_FIELD_TYPES: TemplateFieldType[] = [
   "email",
   "tel",
   "select",
+  "file", // ← added
 ];
 
 function normalizeOptions(raw: unknown): string[] {
@@ -55,6 +56,9 @@ function normalizeFields(raw: unknown): FormFieldDoc[] {
     if (fieldType === "select") {
       const options = normalizeOptions(rec.options);
       out.push({ id, label, fieldType: "select", options });
+    } else if (fieldType === "file") {
+      const multiple = rec.multiple === true;
+      out.push({ id, label, fieldType: "file", multiple });
     } else {
       out.push({ id, label, fieldType });
     }
@@ -72,10 +76,9 @@ function assertSelectFieldsHaveOptions(fields: FormFieldDoc[]) {
   }
 }
 
-function normalizeClientBody(body: Record<string, unknown>): Omit<
-  ClientDoc,
-  "_id" | "createdAt" | "updatedAt"
-> | null {
+function normalizeClientBody(
+  body: Record<string, unknown>,
+): Omit<ClientDoc, "_id" | "createdAt" | "updatedAt"> | null {
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return null;
 
@@ -86,20 +89,30 @@ function normalizeClientBody(body: Record<string, unknown>): Omit<
   if (!typeId) return null;
 
   const address = typeof body.address === "string" ? body.address.trim() : "";
-  const clientAddress = typeof body.clientAddress === "string" ? body.clientAddress.trim() : "";
+  const clientAddress =
+    typeof body.clientAddress === "string" ? body.clientAddress.trim() : "";
   const formTemplateId =
-    typeof body.formTemplateId === "string" && body.formTemplateId ? body.formTemplateId : null;
+    typeof body.formTemplateId === "string" && body.formTemplateId
+      ? body.formTemplateId
+      : null;
 
   const templateFieldValues =
-    body.templateFieldValues && typeof body.templateFieldValues === "object" && !Array.isArray(body.templateFieldValues)
+    body.templateFieldValues &&
+    typeof body.templateFieldValues === "object" &&
+    !Array.isArray(body.templateFieldValues)
       ? (body.templateFieldValues as Record<string, string>)
       : {};
 
-  const bankName = typeof body.bankName === "string" ? body.bankName.trim() : "";
+  const bankName =
+    typeof body.bankName === "string" ? body.bankName.trim() : "";
   const bankAccountAddress =
-    typeof body.bankAccountAddress === "string" ? body.bankAccountAddress.trim() : "";
+    typeof body.bankAccountAddress === "string"
+      ? body.bankAccountAddress.trim()
+      : "";
   const bankAccountNumber =
-    typeof body.bankAccountNumber === "string" ? body.bankAccountNumber.trim() : "";
+    typeof body.bankAccountNumber === "string"
+      ? body.bankAccountNumber.trim()
+      : "";
 
   return {
     name,
@@ -173,8 +186,12 @@ export class ClientsMongoService {
     const db = await getMongoDb();
     const now = new Date();
     const doc: Omit<ClientTypeDoc, "_id"> = { name: n, createdAt: now };
-    const { insertedId } = await db.collection(CLIENT_TYPES_COLLECTION).insertOne(doc);
-    const row = await db.collection<ClientTypeDoc>(CLIENT_TYPES_COLLECTION).findOne({ _id: insertedId });
+    const { insertedId } = await db
+      .collection(CLIENT_TYPES_COLLECTION)
+      .insertOne(doc);
+    const row = await db
+      .collection<ClientTypeDoc>(CLIENT_TYPES_COLLECTION)
+      .findOne({ _id: insertedId });
     if (!row) throw new NotFoundException();
     return toTypeJson(row);
   }
@@ -182,28 +199,115 @@ export class ClientsMongoService {
   async updateClientType(id: string, name: string) {
     const n = name.trim();
     if (!n) throw new BadRequestException({ message: "اسم النوع مطلوب" });
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "النوع غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النوع غير موجود" });
     const db = await getMongoDb();
     const _id = new ObjectId(id);
-    const row = await db.collection<ClientTypeDoc>(CLIENT_TYPES_COLLECTION).findOneAndUpdate(
-      { _id },
-      { $set: { name: n } },
-      { returnDocument: "after" },
-    );
+    const row = await db
+      .collection<ClientTypeDoc>(CLIENT_TYPES_COLLECTION)
+      .findOneAndUpdate(
+        { _id },
+        { $set: { name: n } },
+        { returnDocument: "after" },
+      );
     if (!row) throw new NotFoundException({ message: "النوع غير موجود" });
     return toTypeJson(row);
   }
 
   async deleteClientType(id: string) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "النوع غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النوع غير موجود" });
     const db = await getMongoDb();
-    const count = await db.collection(CLIENTS_COLLECTION).countDocuments({ clientTypeId: id });
+    const count = await db
+      .collection(CLIENTS_COLLECTION)
+      .countDocuments({ clientTypeId: id });
     if (count > 0) {
-      throw new ConflictException({ message: "لا يمكن حذف النوع لوجود عملاء مرتبطين به" });
+      throw new ConflictException({
+        message: "لا يمكن حذف النوع لوجود عملاء مرتبطين به",
+      });
     }
-    const del = await db.collection(CLIENT_TYPES_COLLECTION).deleteOne({ _id: new ObjectId(id) });
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "النوع غير موجود" });
+    const del = await db
+      .collection(CLIENT_TYPES_COLLECTION)
+      .deleteOne({ _id: new ObjectId(id) });
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "النوع غير موجود" });
     return { ok: true };
+  }
+
+  async addClientFiles(
+    clientId: string,
+    fieldId: string,
+    filenames: string[], // already-saved filenames on disk
+  ): Promise<ReturnType<typeof toClientJson>> {
+    if (!ObjectId.isValid(clientId))
+      throw new NotFoundException({ message: "العميل غير موجود" });
+
+    const db = await getMongoDb();
+    const client = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOne({ _id: new ObjectId(clientId) });
+    if (!client) throw new NotFoundException({ message: "العميل غير موجود" });
+
+    const existing: string[] = Array.isArray(
+      client.templateFieldValues?.[fieldId],
+    )
+      ? (client.templateFieldValues[fieldId] as unknown as string[])
+      : [];
+
+    const merged = [...existing, ...filenames];
+
+    const row = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOneAndUpdate(
+        { _id: new ObjectId(clientId) },
+        {
+          $set: {
+            [`templateFieldValues.${fieldId}`]: merged,
+            updatedAt: new Date(),
+          },
+        },
+        { returnDocument: "after" },
+      );
+    if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
+    return toClientJson(row);
+  }
+
+  async removeClientFile(
+    clientId: string,
+    fieldId: string,
+    filename: string,
+  ): Promise<ReturnType<typeof toClientJson>> {
+    if (!ObjectId.isValid(clientId))
+      throw new NotFoundException({ message: "العميل غير موجود" });
+
+    const db = await getMongoDb();
+    const client = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOne({ _id: new ObjectId(clientId) });
+    if (!client) throw new NotFoundException({ message: "العميل غير موجود" });
+
+    const existing: string[] = Array.isArray(
+      client.templateFieldValues?.[fieldId],
+    )
+      ? (client.templateFieldValues[fieldId] as unknown as string[])
+      : [];
+
+    const filtered = existing.filter((f) => f !== filename);
+
+    const row = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOneAndUpdate(
+        { _id: new ObjectId(clientId) },
+        {
+          $set: {
+            [`templateFieldValues.${fieldId}`]: filtered,
+            updatedAt: new Date(),
+          },
+        },
+        { returnDocument: "after" },
+      );
+    if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
+    return toClientJson(row);
   }
 
   async listFormTemplates() {
@@ -217,11 +321,14 @@ export class ClientsMongoService {
   }
 
   async getFormTemplate(id: string) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     const db = await getMongoDb();
-    const row = await db.collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION).findOne({
-      _id: new ObjectId(id),
-    });
+    const row = await db
+      .collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION)
+      .findOne({
+        _id: new ObjectId(id),
+      });
     if (!row) throw new NotFoundException({ message: "النموذج غير موجود" });
     return toTemplateJson(row);
   }
@@ -231,7 +338,9 @@ export class ClientsMongoService {
     if (!name) throw new BadRequestException({ message: "اسم النموذج مطلوب" });
     const fields = normalizeFields(body.fields);
     if (fields.length === 0) {
-      throw new BadRequestException({ message: "أضف حقلًا واحدًا على الأقل للنموذج" });
+      throw new BadRequestException({
+        message: "أضف حقلًا واحدًا على الأقل للنموذج",
+      });
     }
     assertSelectFieldsHaveOptions(fields);
     const db = await getMongoDb();
@@ -242,45 +351,63 @@ export class ClientsMongoService {
       createdAt: now,
       updatedAt: now,
     };
-    const { insertedId } = await db.collection(FORM_TEMPLATES_COLLECTION).insertOne(doc);
-    const row = await db.collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION).findOne({
-      _id: insertedId,
-    });
+    const { insertedId } = await db
+      .collection(FORM_TEMPLATES_COLLECTION)
+      .insertOne(doc);
+    const row = await db
+      .collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION)
+      .findOne({
+        _id: insertedId,
+      });
     if (!row) throw new NotFoundException();
     return toTemplateJson(row);
   }
 
-  async updateFormTemplate(id: string, body: { name?: string; fields?: unknown }) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
+  async updateFormTemplate(
+    id: string,
+    body: { name?: string; fields?: unknown },
+  ) {
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name) throw new BadRequestException({ message: "اسم النموذج مطلوب" });
     const fields = normalizeFields(body.fields);
     if (fields.length === 0) {
-      throw new BadRequestException({ message: "أضف حقلًا واحدًا على الأقل للنموذج" });
+      throw new BadRequestException({
+        message: "أضف حقلًا واحدًا على الأقل للنموذج",
+      });
     }
     assertSelectFieldsHaveOptions(fields);
     const db = await getMongoDb();
     const _id = new ObjectId(id);
     const now = new Date();
-    const row = await db.collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION).findOneAndUpdate(
-      { _id },
-      { $set: { name, fields, updatedAt: now } },
-      { returnDocument: "after" },
-    );
+    const row = await db
+      .collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION)
+      .findOneAndUpdate(
+        { _id },
+        { $set: { name, fields, updatedAt: now } },
+        { returnDocument: "after" },
+      );
     if (!row) throw new NotFoundException({ message: "النموذج غير موجود" });
     return toTemplateJson(row);
   }
 
   async deleteFormTemplate(id: string) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     const db = await getMongoDb();
     const _id = new ObjectId(id);
-    const del = await db.collection(FORM_TEMPLATES_COLLECTION).deleteOne({ _id });
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "النموذج غير موجود" });
-    await db.collection(CLIENTS_COLLECTION).updateMany(
-      { formTemplateId: id },
-      { $set: { formTemplateId: null, templateFieldValues: {} } },
-    );
+    const del = await db
+      .collection(FORM_TEMPLATES_COLLECTION)
+      .deleteOne({ _id });
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "النموذج غير موجود" });
+    await db
+      .collection(CLIENTS_COLLECTION)
+      .updateMany(
+        { formTemplateId: id },
+        { $set: { formTemplateId: null, templateFieldValues: {} } },
+      );
     return { ok: true };
   }
 
@@ -295,9 +422,12 @@ export class ClientsMongoService {
   }
 
   async getClient(id: string) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
     const db = await getMongoDb();
-    const row = await db.collection<ClientDoc>(CLIENTS_COLLECTION).findOne({ _id: new ObjectId(id) });
+    const row = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOne({ _id: new ObjectId(id) });
     if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
     return toClientJson(row);
   }
@@ -305,13 +435,16 @@ export class ClientsMongoService {
   async createClient(body: Record<string, unknown>) {
     const normalized = normalizeClientBody(body);
     if (!normalized) {
-      throw new BadRequestException({ message: "اسم العميل ونوع العميل مطلوبان" });
+      throw new BadRequestException({
+        message: "اسم العميل ونوع العميل مطلوبان",
+      });
     }
     const db = await getMongoDb();
     const typeOk = await db.collection(CLIENT_TYPES_COLLECTION).findOne({
       _id: new ObjectId(normalized.clientTypeId),
     });
-    if (!typeOk) throw new BadRequestException({ message: "نوع العميل غير صالح" });
+    if (!typeOk)
+      throw new BadRequestException({ message: "نوع العميل غير صالح" });
     if (normalized.formTemplateId) {
       const tpl = await db.collection(FORM_TEMPLATES_COLLECTION).findOne({
         _id: new ObjectId(normalized.formTemplateId),
@@ -324,23 +457,31 @@ export class ClientsMongoService {
       createdAt: now,
       updatedAt: now,
     };
-    const { insertedId } = await db.collection(CLIENTS_COLLECTION).insertOne(doc);
-    const row = await db.collection<ClientDoc>(CLIENTS_COLLECTION).findOne({ _id: insertedId });
+    const { insertedId } = await db
+      .collection(CLIENTS_COLLECTION)
+      .insertOne(doc);
+    const row = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOne({ _id: insertedId });
     if (!row) throw new NotFoundException();
     return toClientJson(row);
   }
 
   async updateClient(id: string, body: Record<string, unknown>) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
     const normalized = normalizeClientBody(body);
     if (!normalized) {
-      throw new BadRequestException({ message: "اسم العميل ونوع العميل مطلوبان" });
+      throw new BadRequestException({
+        message: "اسم العميل ونوع العميل مطلوبان",
+      });
     }
     const db = await getMongoDb();
     const typeOk = await db.collection(CLIENT_TYPES_COLLECTION).findOne({
       _id: new ObjectId(normalized.clientTypeId),
     });
-    if (!typeOk) throw new BadRequestException({ message: "نوع العميل غير صالح" });
+    if (!typeOk)
+      throw new BadRequestException({ message: "نوع العميل غير صالح" });
     if (normalized.formTemplateId) {
       const tpl = await db.collection(FORM_TEMPLATES_COLLECTION).findOne({
         _id: new ObjectId(normalized.formTemplateId),
@@ -349,25 +490,31 @@ export class ClientsMongoService {
     }
     const _id = new ObjectId(id);
     const now = new Date();
-    const row = await db.collection<ClientDoc>(CLIENTS_COLLECTION).findOneAndUpdate(
-      { _id },
-      {
-        $set: {
-          ...normalized,
-          updatedAt: now,
+    const row = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOneAndUpdate(
+        { _id },
+        {
+          $set: {
+            ...normalized,
+            updatedAt: now,
+          },
         },
-      },
-      { returnDocument: "after" },
-    );
+        { returnDocument: "after" },
+      );
     if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
     return toClientJson(row);
   }
 
   async deleteClient(id: string) {
-    if (!ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
     const db = await getMongoDb();
-    const del = await db.collection(CLIENTS_COLLECTION).deleteOne({ _id: new ObjectId(id) });
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "العميل غير موجود" });
+    const del = await db
+      .collection(CLIENTS_COLLECTION)
+      .deleteOne({ _id: new ObjectId(id) });
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "العميل غير موجود" });
     return { ok: true };
   }
 }

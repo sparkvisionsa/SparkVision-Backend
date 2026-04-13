@@ -12,7 +12,8 @@ export type TemplateFieldType =
   | "textarea"
   | "email"
   | "tel"
-  | "select";
+  | "select"
+  | "file";
 
 export type FormFieldDoc = {
   id: string;
@@ -20,6 +21,7 @@ export type FormFieldDoc = {
   fieldType: TemplateFieldType;
   /** عندما يكون النوع `select`: النصوص التي تظهر في القائمة المنسدلة وتُحفظ كقيمة عند الاختيار */
   options?: string[];
+  multiple?: boolean;
 };
 
 export type ClientTypeDoc = {

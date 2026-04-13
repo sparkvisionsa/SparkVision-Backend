@@ -10,11 +10,13 @@ import { AdminController } from "./admin/admin.controller";
 import { ApiErrorFilter } from "./common/api-error.filter";
 import { ClientsModule } from "./clients/clients.module";
 import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
+import { TransactionsModule } from "./transactions/transactions.module"; // 👈 add this
 
 @Module({
   imports: [
     ClientsModule,
     MachineValuationModule,
+    TransactionsModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],
