@@ -173,8 +173,10 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     author4Id: str("author4Id"),
     author4Title: str("author4Title"),
     comparisonRows: arr("comparisonRows"),
+    section1Rows: arr("section1Rows"), // ← ADD THIS LINE
     settlementRows: arr("settlementRows"),
     settlementBases: arr("settlementBases"),
+    settlementWeights: arr<string>("settlementWeights"),
     replacementLines: arr("replacementLines"),
     meterPriceLand: str("meterPriceLand"),
     landSpace: str("landSpace"),

@@ -98,8 +98,10 @@ export type EvalData = {
 
   // comparison & settlement tables
   comparisonRows: any[];
+  section1Rows: any[]; // ← ADD THIS LINE
   settlementRows: any[];
   settlementBases: string[];
+  settlementWeights: string[];
 
   // replacement cost
   replacementLines: any[];
@@ -186,8 +188,10 @@ export function emptyEvalData(): EvalData {
     author4Id: "",
     author4Title: "",
     comparisonRows: [],
+    section1Rows: [], // ← ADD THIS LINE
     settlementRows: [],
     settlementBases: [],
+    settlementWeights: [],
     replacementLines: [],
     meterPriceLand: "",
     landSpace: "",
