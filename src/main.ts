@@ -9,9 +9,13 @@ import { WinstonModule } from "nest-winston";
 import { format, transports } from "winston";
 import { AppModule } from "./app.module";
 import { triggerSourceIndexWarmup } from "./server/source-indexes";
+import { join } from "path";
 
 function parseCorsOrigins() {
-  const raw = process.env.CORS_ORIGINS ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
+  const raw =
+    process.env.CORS_ORIGINS ??
+    process.env.FRONTEND_ORIGIN ??
+    "http://localhost:3000";
   return raw
     .split(",")
     .map((item) => item.trim())
@@ -21,7 +25,11 @@ function parseCorsOrigins() {
 async function bootstrap() {
   const logger = WinstonModule.createLogger({
     level: process.env.LOG_LEVEL ?? "info",
-    format: format.combine(format.timestamp(), format.errors({ stack: true }), format.json()),
+    format: format.combine(
+      format.timestamp(),
+      format.errors({ stack: true }),
+      format.json(),
+    ),
     transports: [new transports.Console()],
   });
 
@@ -31,9 +39,27 @@ async function bootstrap() {
   app.useBodyParser("json", { limit: "100mb" });
   app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
 
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+      crossOriginOpenerPolicy: { policy: "unsafe-none" },
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
   app.use(compression());
   app.use(cookieParser());
+
+  app.useStaticAssets(join(process.cwd(), "uploads"), {
+    prefix: "/uploads",
+    setHeaders: (res, path) => {
+      if (path.endsWith(".pdf")) {
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+        res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
+      }
+    },
+  });
 
   app.enableCors({
     origin: parseCorsOrigins(),

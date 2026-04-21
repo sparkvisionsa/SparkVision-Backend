@@ -20,6 +20,9 @@ function toTransactionJson(d) {
         authorizationNumber: d.authorizationNumber,
         assignmentDate: d.assignmentDate,
         valuationPurpose: d.valuationPurpose,
+        priority: d.priority ?? "normal",
+        attachmentsCount: d.attachmentsCount ?? 0,
+        imagesCount: d.imagesCount ?? 0,
         intendedUse: d.intendedUse,
         valuationBasis: d.valuationBasis,
         ownershipType: d.ownershipType,
@@ -233,6 +236,9 @@ let TransactionsMongoService = class TransactionsMongoService {
             templateFieldValues,
             evalData: (0, transactions_model_1.emptyEvalData)(),
             createdAt: now,
+            priority: body.priority ?? "normal",
+            attachmentsCount: 0,
+            imagesCount: 0,
             updatedAt: now,
         };
         const { insertedId } = await db

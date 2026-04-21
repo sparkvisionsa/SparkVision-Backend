@@ -223,6 +223,9 @@ export type TransactionDoc = {
   valuationPurpose: string;
   intendedUse: string;
   valuationBasis: string;
+  priority: string; // "normal" | "urgent"  (default "normal")
+  attachmentsCount: number; // default 0
+  imagesCount: number; // default
   ownershipType: string;
   valuationHypothesis: string;
   clientId: string;

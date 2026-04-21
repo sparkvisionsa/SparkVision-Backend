@@ -35,6 +35,9 @@ function toTransactionJson(d: TransactionDoc) {
     authorizationNumber: d.authorizationNumber,
     assignmentDate: d.assignmentDate,
     valuationPurpose: d.valuationPurpose,
+    priority: d.priority ?? "normal",
+    attachmentsCount: d.attachmentsCount ?? 0,
+    imagesCount: d.imagesCount ?? 0,
     intendedUse: d.intendedUse,
     valuationBasis: d.valuationBasis,
     ownershipType: d.ownershipType,
@@ -290,6 +293,9 @@ export class TransactionsMongoService {
       templateFieldValues, // dynamic template fields, set once
       evalData: emptyEvalData(), // all eval fields start empty, status = "new"
       createdAt: now,
+      priority: (body as any).priority ?? "normal",
+      attachmentsCount: 0,
+      imagesCount: 0,
       updatedAt: now,
     };
 
