@@ -14,6 +14,8 @@ const transactions_media_controller_1 = require("./transactions-media.controller
 const transactions_media_service_1 = require("./transactions-media.service");
 const transactions_notes_controller_1 = require("./transactions-notes.controller");
 const transactions_notes_service_1 = require("./transactions-notes.service");
+const transactions_pdf_controller_1 = require("./transactions-pdf.controller");
+const transactions_pdf_service_1 = require("./transactions-pdf.service");
 let TransactionsModule = class TransactionsModule {
 };
 exports.TransactionsModule = TransactionsModule;
@@ -23,11 +25,13 @@ exports.TransactionsModule = TransactionsModule = __decorate([
             transactions_api_controllers_1.TransactionsController,
             transactions_media_controller_1.TransactionsMediaController,
             transactions_notes_controller_1.TransactionsNotesController,
+            transactions_pdf_controller_1.TransactionsPdfController,
         ],
         providers: [
             transactions_mongo_service_1.TransactionsMongoService,
             transactions_media_service_1.TransactionsMediaService,
             transactions_notes_service_1.TransactionsNotesService,
+            transactions_pdf_service_1.TransactionsPdfService,
         ],
     })
 ], TransactionsModule);
