@@ -15,8 +15,12 @@ import { diskStorage } from "multer";
 import { extname, join } from "path";
 import { Request } from "express";
 import { TransactionsMediaService } from "./transactions-media.service";
+import { TransactionsVisionService } from "./transactions-ocr.service";
+import { BadRequestException } from "@nestjs/common";
 
 // ─── Shared multer storage (reuse the same uploads/ dir) ─────────────────────
+//
+//
 
 const multerStorage = diskStorage({
   destination: join(process.cwd(), "uploads"),
@@ -30,7 +34,10 @@ const multerStorage = diskStorage({
 
 @Controller("transactions")
 export class TransactionsMediaController {
-  constructor(private readonly svc: TransactionsMediaService) {}
+  constructor(
+    private readonly svc: TransactionsMediaService,
+    private readonly ocr: TransactionsVisionService,
+  ) {}
 
   // ── Edit core fields ────────────────────────────────────────────────────────
   //
@@ -153,6 +160,29 @@ export class TransactionsMediaController {
   @Delete(":id/images")
   bulkDeleteImages(@Param("id") id: string, @Body("ids") ids: string[]) {
     return this.svc.bulkDeleteImages(id, ids ?? []);
+  }
+
+  @Post(":id/ocr")
+  @UseInterceptors(
+    AnyFilesInterceptor({
+      storage: multerStorage,
+      fileFilter: (_req, file, cb) => {
+        cb(null, file.mimetype.startsWith("image/"));
+      },
+    }),
+  )
+  async extractOcr(
+    @Param("id") id: string,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    if (!files?.length) {
+      throw new BadRequestException("لم يتم إرفاق أي صورة");
+    }
+
+    const file = files[0];
+    const relativePath = `uploads/${file.filename}`;
+
+    return this.ocr.extractFromImage(relativePath);
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────

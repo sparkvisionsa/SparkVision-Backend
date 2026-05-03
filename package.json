@@ -15,6 +15,7 @@
     "optimize:indexes": "node scripts/optimize-source-indexes.mjs"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@nestjs/cache-manager": "^3.0.1",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.0",
@@ -44,6 +45,8 @@
     "pdfmake": "^0.3.7",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "^0.34.5",
+    "tesseract.js": "^7.0.0",
     "typeorm": "^0.3.24",
     "winston": "^3.18.3",
     "zod": "^3.24.2"

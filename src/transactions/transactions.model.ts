@@ -19,6 +19,11 @@ export type EvalData = {
   assetCategoryId: string;
   propertyTypeId: string;
 
+  address: string;
+  inspector: string;
+  contactNo: string;
+  reviewer: string;
+
   // basic property data
   propertyCode: string;
   deedNumber: string;
@@ -26,6 +31,8 @@ export type EvalData = {
   ownerName: string;
   clientName: string;
   authorizedName: string;
+  propertyType: string;
+  landUse: string;
 
   // boundaries
   northBoundary: string;
@@ -68,6 +75,7 @@ export type EvalData = {
   marketWeightPct: string;
   marketMethodTotal: string;
   marketReason: string;
+  propertyArea: string;
   propertyAreaMethod: string;
 
   // valuation methods — cost
@@ -106,7 +114,6 @@ export type EvalData = {
   // replacement cost
   replacementLines: any[];
   meterPriceLand: string;
-  landSpace: string;
   managementPct: string;
   professionalPct: string;
   utilityNetworkPct: string;
@@ -135,7 +142,13 @@ export function emptyEvalData(): EvalData {
     propertyCode: "",
     deedNumber: "",
     deedDate: "",
+    address: "",
+    inspector: "",
+    contactNo: "",
+    reviewer: "",
     ownerName: "",
+    propertyType: "",
+    landUse: "",
     clientName: "",
     authorizedName: "",
     northBoundary: "",
@@ -169,6 +182,7 @@ export function emptyEvalData(): EvalData {
     marketMethodTotal: "",
     marketReason: "",
     propertyAreaMethod: "",
+    propertyArea: "",
     costNetBuildings: "",
     costNetLandPrice: "",
     costLandBuildTotal: "",
@@ -194,7 +208,6 @@ export function emptyEvalData(): EvalData {
     settlementWeights: [],
     replacementLines: [],
     meterPriceLand: "",
-    landSpace: "",
     managementPct: "",
     professionalPct: "",
     utilityNetworkPct: "",

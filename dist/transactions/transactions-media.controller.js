@@ -18,6 +18,8 @@ const platform_express_1 = require("@nestjs/platform-express");
 const multer_1 = require("multer");
 const path_1 = require("path");
 const transactions_media_service_1 = require("./transactions-media.service");
+const transactions_ocr_service_1 = require("./transactions-ocr.service");
+const common_2 = require("@nestjs/common");
 const multerStorage = (0, multer_1.diskStorage)({
     destination: (0, path_1.join)(process.cwd(), "uploads"),
     filename: (_req, file, cb) => {
@@ -26,8 +28,9 @@ const multerStorage = (0, multer_1.diskStorage)({
     },
 });
 let TransactionsMediaController = class TransactionsMediaController {
-    constructor(svc) {
+    constructor(svc, ocr) {
         this.svc = svc;
+        this.ocr = ocr;
     }
     editCore(id, body) {
         return this.svc.editCoreFields(id, body);
@@ -66,6 +69,14 @@ let TransactionsMediaController = class TransactionsMediaController {
     }
     bulkDeleteImages(id, ids) {
         return this.svc.bulkDeleteImages(id, ids ?? []);
+    }
+    async extractOcr(id, files) {
+        if (!files?.length) {
+            throw new common_2.BadRequestException("لم يتم إرفاق أي صورة");
+        }
+        const file = files[0];
+        const relativePath = `uploads/${file.filename}`;
+        return this.ocr.extractFromImage(relativePath);
     }
     extractNames(body) {
         const names = {};
@@ -185,7 +196,22 @@ __decorate([
     __metadata("design:paramtypes", [String, Array]),
     __metadata("design:returntype", void 0)
 ], TransactionsMediaController.prototype, "bulkDeleteImages", null);
+__decorate([
+    (0, common_1.Post)(":id/ocr"),
+    (0, common_1.UseInterceptors)((0, platform_express_1.AnyFilesInterceptor)({
+        storage: multerStorage,
+        fileFilter: (_req, file, cb) => {
+            cb(null, file.mimetype.startsWith("image/"));
+        },
+    })),
+    __param(0, (0, common_1.Param)("id")),
+    __param(1, (0, common_1.UploadedFiles)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Array]),
+    __metadata("design:returntype", Promise)
+], TransactionsMediaController.prototype, "extractOcr", null);
 exports.TransactionsMediaController = TransactionsMediaController = __decorate([
     (0, common_1.Controller)("transactions"),
-    __metadata("design:paramtypes", [transactions_media_service_1.TransactionsMediaService])
+    __metadata("design:paramtypes", [transactions_media_service_1.TransactionsMediaService,
+        transactions_ocr_service_1.TransactionsVisionService])
 ], TransactionsMediaController);

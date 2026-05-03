@@ -7,6 +7,7 @@ import { TransactionsNotesController } from "./transactions-notes.controller";
 import { TransactionsNotesService } from "./transactions-notes.service";
 import { TransactionsPdfController } from "./transactions-pdf.controller"; // ← add
 import { TransactionsPdfService } from "./transactions-pdf.service"; // ← add
+import { TransactionsVisionService } from "./transactions-ocr.service";
 
 @Module({
   controllers: [
@@ -18,6 +19,7 @@ import { TransactionsPdfService } from "./transactions-pdf.service"; // ← add
   providers: [
     TransactionsMongoService,
     TransactionsMediaService,
+    TransactionsVisionService,
     TransactionsNotesService,
     TransactionsPdfService, // ← add
   ],
