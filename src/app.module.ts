@@ -9,12 +9,14 @@ import { AuthTrackingController } from "./auth-tracking/auth-tracking.controller
 import { AdminController } from "./admin/admin.controller";
 import { ApiErrorFilter } from "./common/api-error.filter";
 import { ClientsModule } from "./clients/clients.module";
+import { LocationsModule } from "./location/locations.module";
 import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
 import { TransactionsModule } from "./transactions/transactions.module"; // 👈 add this
 
 @Module({
   imports: [
     ClientsModule,
+    LocationsModule,
     MachineValuationModule,
     TransactionsModule,
     ConfigModule.forRoot({

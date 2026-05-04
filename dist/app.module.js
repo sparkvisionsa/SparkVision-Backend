@@ -18,6 +18,7 @@ const auth_tracking_controller_1 = require("./auth-tracking/auth-tracking.contro
 const admin_controller_1 = require("./admin/admin.controller");
 const api_error_filter_1 = require("./common/api-error.filter");
 const clients_module_1 = require("./clients/clients.module");
+const locations_module_1 = require("./location/locations.module");
 const machine_valuation_module_1 = require("./machine-valuation/machine-valuation.module");
 const transactions_module_1 = require("./transactions/transactions.module");
 let AppModule = class AppModule {
@@ -27,6 +28,7 @@ exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
         imports: [
             clients_module_1.ClientsModule,
+            locations_module_1.LocationsModule,
             machine_valuation_module_1.MachineValuationModule,
             transactions_module_1.TransactionsModule,
             config_1.ConfigModule.forRoot({

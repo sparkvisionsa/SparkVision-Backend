@@ -21,6 +21,9 @@ const ALLOWED_FIELD_TYPES = [
     "tel",
     "select",
     "file",
+    "region",
+    "city",
+    "neighborhood",
 ];
 function normalizeOptions(raw) {
     if (!Array.isArray(raw))

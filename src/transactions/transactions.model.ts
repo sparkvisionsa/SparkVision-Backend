@@ -14,7 +14,10 @@ export type EvalData = {
 
   // location & classification
   regionId: string;
+  regionName: string;
+  cityId: string;
   cityName: string;
+  neighborhoodId: string;
   neighborhoodName: string;
   assetCategoryId: string;
   propertyTypeId: string;
@@ -135,7 +138,10 @@ export function emptyEvalData(): EvalData {
   return {
     status: "new",
     regionId: "",
+    regionName: "",
+    cityId: "",
     cityName: "",
+    neighborhoodId: "",
     neighborhoodName: "",
     assetCategoryId: "",
     propertyTypeId: "",

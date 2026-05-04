@@ -116,7 +116,10 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
   return {
     status: str("status") || "new",
     regionId: str("regionId"),
+    regionName: str("regionName"),
+    cityId: str("cityId"),
     cityName: str("cityName"),
+    neighborhoodId: str("neighborhoodId"),
     neighborhoodName: str("neighborhoodName"),
     assetCategoryId: str("assetCategoryId"),
     propertyTypeId: str("propertyTypeId"),

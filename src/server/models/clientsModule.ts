@@ -13,7 +13,10 @@ export type TemplateFieldType =
   | "email"
   | "tel"
   | "select"
-  | "file";
+  | "file"
+  | "region"
+  | "city"
+  | "neighborhood";
 
 export type FormFieldDoc = {
   id: string;

@@ -26,7 +26,10 @@ const ALLOWED_FIELD_TYPES: TemplateFieldType[] = [
   "email",
   "tel",
   "select",
-  "file", // ← added
+  "file",
+  "region",
+  "city",
+  "neighborhood",
 ];
 
 function normalizeOptions(raw: unknown): string[] {

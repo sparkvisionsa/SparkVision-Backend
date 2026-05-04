@@ -7,7 +7,10 @@ function emptyEvalData() {
     return {
         status: "new",
         regionId: "",
+        regionName: "",
+        cityId: "",
         cityName: "",
+        neighborhoodId: "",
         neighborhoodName: "",
         assetCategoryId: "",
         propertyTypeId: "",
