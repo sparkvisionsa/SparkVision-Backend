@@ -117,6 +117,7 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     status: str("status") || "new",
     regionId: str("regionId"),
     regionName: str("regionName"),
+    opponentStatements: str("opponentStatements"),
     cityId: str("cityId"),
     cityName: str("cityName"),
     neighborhoodId: str("neighborhoodId"),
@@ -299,8 +300,11 @@ export class TransactionsMongoService {
     const doc: Omit<TransactionDoc, "_id"> = {
       ...normalized,
       templateId,
-      templateFieldValues, // dynamic template fields, set once
-      evalData: emptyEvalData(), // all eval fields start empty, status = "new"
+      templateFieldValues,
+      evalData: {
+        ...emptyEvalData(),
+        opponentStatements: body.opponentStatements?.trim() ?? "",
+      },
       createdAt: now,
       priority: (body as any).priority ?? "normal",
       attachmentsCount: 0,

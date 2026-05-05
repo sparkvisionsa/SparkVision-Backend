@@ -18,6 +18,7 @@ export type EvalData = {
   cityId: string;
   cityName: string;
   neighborhoodId: string;
+  opponentStatements: string;
   neighborhoodName: string;
   assetCategoryId: string;
   propertyTypeId: string;
@@ -144,6 +145,7 @@ export function emptyEvalData(): EvalData {
     neighborhoodId: "",
     neighborhoodName: "",
     assetCategoryId: "",
+    opponentStatements: "",
     propertyTypeId: "",
     propertyCode: "",
     deedNumber: "",

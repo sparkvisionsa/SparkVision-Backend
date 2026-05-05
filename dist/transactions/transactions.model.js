@@ -13,6 +13,7 @@ function emptyEvalData() {
         neighborhoodId: "",
         neighborhoodName: "",
         assetCategoryId: "",
+        opponentStatements: "",
         propertyTypeId: "",
         propertyCode: "",
         deedNumber: "",
