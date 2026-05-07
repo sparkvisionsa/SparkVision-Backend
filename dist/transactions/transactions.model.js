@@ -22,6 +22,8 @@ function emptyEvalData() {
         inspector: "",
         contactNo: "",
         reviewer: "",
+        landTitle: "",
+        landSpace: "",
         ownerName: "",
         propertyType: "",
         landUse: "",
@@ -98,6 +100,9 @@ function emptyEvalData() {
         careerPct: "",
         maintenancePrice: "",
         finishesPrice: "",
+        maintenanceDesc: "",
+        finishesDesc: "",
+        replacementNotes: "",
         completionPct: "",
     };
 }

@@ -28,6 +28,9 @@ export type EvalData = {
   contactNo: string;
   reviewer: string;
 
+  landTitle: string; // ← ADD (near meterPriceLand)
+  landSpace: string; //
+
   // basic property data
   propertyCode: string;
   deedNumber: string;
@@ -132,6 +135,9 @@ export type EvalData = {
   careerPct: string;
   maintenancePrice: string;
   finishesPrice: string;
+  maintenanceDesc: string;
+  finishesDesc: string;
+  replacementNotes: string;
   completionPct: string;
 };
 
@@ -154,6 +160,8 @@ export function emptyEvalData(): EvalData {
     inspector: "",
     contactNo: "",
     reviewer: "",
+    landTitle: "", // ← ADD
+    landSpace: "", // ← ADD
     ownerName: "",
     propertyType: "",
     landUse: "",
@@ -230,6 +238,9 @@ export function emptyEvalData(): EvalData {
     careerPct: "",
     maintenancePrice: "",
     finishesPrice: "",
+    maintenanceDesc: "",
+    finishesDesc: "",
+    replacementNotes: "",
     completionPct: "",
   };
 }

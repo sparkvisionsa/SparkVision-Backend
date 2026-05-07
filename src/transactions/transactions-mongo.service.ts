@@ -167,6 +167,8 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     marketWeightPct: str("marketWeightPct"),
     marketMethodTotal: str("marketMethodTotal"),
     marketReason: str("marketReason"),
+    landTitle: str("landTitle"), // ← ADD
+    landSpace: str("landSpace"), // ← ADD
     propertyAreaMethod: str("propertyAreaMethod"),
     costNetBuildings: str("costNetBuildings"),
     costNetLandPrice: str("costNetLandPrice"),
@@ -208,6 +210,9 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     maintenancePrice: str("maintenancePrice"),
     finishesPrice: str("finishesPrice"),
     completionPct: str("completionPct"),
+    maintenanceDesc: str("maintenanceDesc"),
+    finishesDesc: str("finishesDesc"),
+    replacementNotes: str("replacementNotes"),
   };
 }
 

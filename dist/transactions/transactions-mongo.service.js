@@ -134,6 +134,8 @@ function extractEvalData(body) {
         marketWeightPct: str("marketWeightPct"),
         marketMethodTotal: str("marketMethodTotal"),
         marketReason: str("marketReason"),
+        landTitle: str("landTitle"),
+        landSpace: str("landSpace"),
         propertyAreaMethod: str("propertyAreaMethod"),
         costNetBuildings: str("costNetBuildings"),
         costNetLandPrice: str("costNetLandPrice"),
@@ -175,6 +177,9 @@ function extractEvalData(body) {
         maintenancePrice: str("maintenancePrice"),
         finishesPrice: str("finishesPrice"),
         completionPct: str("completionPct"),
+        maintenanceDesc: str("maintenanceDesc"),
+        finishesDesc: str("finishesDesc"),
+        replacementNotes: str("replacementNotes"),
     };
 }
 function mergeFileFields(rawFieldValues, files) {
