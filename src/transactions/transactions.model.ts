@@ -138,7 +138,31 @@ export type EvalData = {
   maintenanceDesc: string;
   finishesDesc: string;
   replacementNotes: string;
+  // ADD these fields
+  subDivisionRecordNumber: string;
+  otherUsers: string;
+  deedSource: string;
+  buildingLicense: string;
+  buildingLicenseDate: string;
+  elevation: string;
+  inspectionBoundaries: string;
   completionPct: string;
+
+  previousDeedNumber: string;
+  previousDeedDate: string;
+  operationType: string;
+  propertyStatus: string;
+  restrictions: string;
+  ownerId: string;
+  ownerNationality: string;
+  ownershipPercentage: string;
+  propertyId: string;
+  parcelNumber: string;
+  blockNumber: string;
+  districtPart: string;
+  propertyModel: string;
+  locationDescription: string;
+  planNumber: string;
 };
 
 export function emptyEvalData(): EvalData {
@@ -242,6 +266,29 @@ export function emptyEvalData(): EvalData {
     finishesDesc: "",
     replacementNotes: "",
     completionPct: "",
+
+    previousDeedNumber: "",
+    subDivisionRecordNumber: "",
+    otherUsers: "",
+    deedSource: "",
+    buildingLicense: "",
+    buildingLicenseDate: "",
+    elevation: "",
+    inspectionBoundaries: "",
+    previousDeedDate: "",
+    operationType: "",
+    propertyStatus: "",
+    restrictions: "",
+    ownerId: "",
+    ownerNationality: "",
+    ownershipPercentage: "",
+    propertyId: "",
+    parcelNumber: "",
+    blockNumber: "",
+    districtPart: "",
+    propertyModel: "",
+    locationDescription: "",
+    planNumber: "",
   };
 }
 
