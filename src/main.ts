@@ -1,5 +1,7 @@
+import "./register-path-aliases";
 import compression from "compression";
 import cookieParser from "cookie-parser";
+import type { NextFunction, Request, Response } from "express";
 import helmet from "helmet";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
@@ -32,6 +34,16 @@ async function bootstrap() {
   app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
 
   app.use(helmet());
+  /** تعطيل ضغط الاستجابة لبث GridFS/إعادة توجيه الملفات — يتجنب تلف الملفات الثنائية ويعمل مع الوكيل. */
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const path = String(req.originalUrl || req.url || "")
+      .split("?")[0]
+      .toLowerCase();
+    if (path.includes("/inspectorfiles/") && path.includes("/download")) {
+      req.headers["x-no-compression"] = "true";
+    }
+    next();
+  });
   app.use(compression());
   app.use(cookieParser());
 

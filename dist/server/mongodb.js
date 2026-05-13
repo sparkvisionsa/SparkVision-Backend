@@ -3,10 +3,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getMongoClient = getMongoClient;
+exports.applyMongoDnsFromEnv = applyMongoDnsFromEnv;
 exports.getMongoDb = getMongoDb;
+exports.getMongoClient = getMongoClient;
 const node_dns_1 = __importDefault(require("node:dns"));
-const mongodb_1 = require("mongodb");
+const mongoose_1 = __importDefault(require("mongoose"));
 let mongoDnsConfigured = false;
 function applyMongoDnsFromEnv() {
     if (mongoDnsConfigured)
@@ -27,30 +28,35 @@ function applyMongoDnsFromEnv() {
         node_dns_1.default.setDefaultResultOrder("ipv4first");
     }
 }
-const globalCache = global.mongoScrapping ?? { client: null, promise: null };
-global.mongoScrapping = globalCache;
-async function getMongoClient() {
-    const mongoUrl = process.env.MONGO_URL_SCRAPPING;
-    if (!mongoUrl) {
+async function getMongoDb() {
+    applyMongoDnsFromEnv();
+    const uri = process.env.MONGO_URL_SCRAPPING;
+    const dbName = process.env.MONGO_DBNAME_SCRAPPING;
+    if (!uri) {
         throw new Error("Missing MONGO_URL_SCRAPPING environment variable.");
     }
-    applyMongoDnsFromEnv();
-    if (globalCache.client) {
-        return globalCache.client;
-    }
-    if (!globalCache.promise) {
-        globalCache.promise = new mongodb_1.MongoClient(mongoUrl, {
-            serverSelectionTimeoutMS: 30_000,
-        }).connect();
-    }
-    globalCache.client = await globalCache.promise;
-    return globalCache.client;
-}
-async function getMongoDb() {
-    const dbName = process.env.MONGO_DBNAME_SCRAPPING;
     if (!dbName) {
         throw new Error("Missing MONGO_DBNAME_SCRAPPING environment variable.");
     }
-    const client = await getMongoClient();
-    return client.db(dbName);
+    if (mongoose_1.default.connection.readyState === 1 && mongoose_1.default.connection.db) {
+        return mongoose_1.default.connection.db;
+    }
+    if (mongoose_1.default.connection.readyState === 0) {
+        await mongoose_1.default.connect(uri, {
+            dbName,
+            serverSelectionTimeoutMS: 30_000,
+        });
+    }
+    else {
+        await mongoose_1.default.connection.asPromise();
+    }
+    const db = mongoose_1.default.connection.db;
+    if (!db) {
+        throw new Error("MongoDB not connected");
+    }
+    return db;
+}
+async function getMongoClient() {
+    await getMongoDb();
+    return mongoose_1.default.connection.getClient();
 }

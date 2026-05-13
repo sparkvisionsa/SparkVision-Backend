@@ -1,5 +1,3 @@
-import type { ObjectId } from "mongodb";
-
 /** MongoDB collection names for Value Tech clients UI */
 export const CLIENT_TYPES_COLLECTION = "client_types";
 export const FORM_TEMPLATES_COLLECTION = "form_templates";
@@ -22,22 +20,11 @@ export type FormFieldDoc = {
   options?: string[];
 };
 
-export type ClientTypeDoc = {
-  _id: ObjectId;
-  name: string;
-  createdAt: Date;
-};
-
-export type FormTemplateDoc = {
-  _id: ObjectId;
-  name: string;
-  fields: FormFieldDoc[];
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-export type ClientDoc = {
-  _id: ObjectId;
+/**
+ * حقول إنشاء/تحديث العميل بدون معرف مستند —
+ * `_id` و`createdAt` و`updatedAt` يضيفها MongoDB/Mongoose تلقائيًا.
+ */
+export interface ClientUpsertFields {
   name: string;
   phone: string;
   email: string;
@@ -50,6 +37,4 @@ export type ClientDoc = {
   templateFieldValues: Record<string, string>;
   clientTypeId: string;
   formTemplateId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
+}

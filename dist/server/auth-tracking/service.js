@@ -11,6 +11,20 @@ exports.loginUser = loginUser;
 exports.logoutUser = logoutUser;
 exports.getUserProfile = getUserProfile;
 exports.updateUserProfile = updateUserProfile;
+exports.createCompanyBySuperAdmin = createCompanyBySuperAdmin;
+exports.listCompaniesForSuperAdmin = listCompaniesForSuperAdmin;
+exports.listCompanyUsersForCompanyAdmin = listCompanyUsersForCompanyAdmin;
+exports.getCompanyReportDefaultsForMember = getCompanyReportDefaultsForMember;
+exports.updateCompanyBrandingByCompanyAdmin = updateCompanyBrandingByCompanyAdmin;
+exports.updateCompanyMemberReportSignatureByCompanyAdmin = updateCompanyMemberReportSignatureByCompanyAdmin;
+exports.createCompanyUserByCompanyAdmin = createCompanyUserByCompanyAdmin;
+exports.updateCompanyUserByCompanyAdmin = updateCompanyUserByCompanyAdmin;
+exports.deleteCompanyUserByCompanyAdmin = deleteCompanyUserByCompanyAdmin;
+exports.getCompanyDetailForSuperAdmin = getCompanyDetailForSuperAdmin;
+exports.updateCompanyBySuperAdmin = updateCompanyBySuperAdmin;
+exports.deleteCompanyBySuperAdmin = deleteCompanyBySuperAdmin;
+exports.deleteCompanyMemberBySuperAdmin = deleteCompanyMemberBySuperAdmin;
+exports.setActiveCompanyForUser = setActiveCompanyForUser;
 exports.getAdminConfigPayload = getAdminConfigPayload;
 exports.updateAdminConfigPayload = updateAdminConfigPayload;
 exports.listAdminUsers = listAdminUsers;
@@ -27,9 +41,18 @@ const yallaMotor_1 = require("../models/yallaMotor");
 const collections_1 = require("./collections");
 const config_1 = require("./config");
 const context_1 = require("./context");
+const object_id_util_1 = require("../../common/object-id.util");
 const crypto_1 = require("./crypto");
 const rate_limit_1 = require("./rate-limit");
 const session_store_1 = require("./session-store");
+const types_1 = require("./types");
+const COMPANY_MEMBERSHIP_ROLE_LABELS_AR = {
+    company_admin: "مدير الشركة",
+    valuer: "مقيم",
+    data_entry: "مدخل بيانات",
+    reviewer: "مراجع",
+    inspector: "مفتش ميداني",
+};
 class HttpError extends Error {
     constructor(status, code, message, details) {
         super(message);
@@ -39,12 +62,6 @@ class HttpError extends Error {
     }
 }
 exports.HttpError = HttpError;
-const registerSchema = zod_1.z.object({
-    username: zod_1.z.string().trim().min(3).max(32).regex(/^[A-Za-z0-9_.-]+$/),
-    password: zod_1.z.string().min(8).max(128),
-    email: zod_1.z.string().email().optional().or(zod_1.z.literal("")),
-    phone: zod_1.z.string().trim().max(32).optional().or(zod_1.z.literal("")),
-});
 const loginSchema = zod_1.z.object({
     username: zod_1.z.string().trim().min(3).max(32),
     password: zod_1.z.string().min(1).max(128),
@@ -110,18 +127,79 @@ function readCookie(request, name) {
     }
     return undefined;
 }
-function toPublicUser(user) {
+function resolveValueTechProductIds(user, company) {
+    if (user.role === "super_admin")
+        return null;
+    if (!company)
+        return null;
+    const ids = company.valueTechProductIds;
+    if (!ids || ids.length === 0)
+        return [];
+    return [...ids];
+}
+function effectivePublicRole(user, membership) {
+    if (user.role === "super_admin")
+        return "super_admin";
+    if (membership) {
+        const mr = membership.role;
+        if (mr === "viewer")
+            return "valuer";
+        return membership.role;
+    }
+    const ur = user.role;
+    if (ur === "viewer")
+        return "valuer";
+    return user.role;
+}
+function toPublicUser(user, company = null, opts) {
     if (!user)
         return null;
+    const companyIds = opts?.allCompanyIds ??
+        (company ? [company._id.toString()] : []);
     return {
-        id: user._id,
+        id: user._id.toString(),
         username: user.username,
         email: user.email ?? null,
         phone: user.phone ?? null,
-        role: user.role,
+        role: effectivePublicRole(user, opts?.membership ?? null),
+        companyId: company?._id.toString() ?? (user.company ? user.company.toString() : null),
+        companyIds,
+        companyName: company?.name ?? null,
+        valueTechProductIds: resolveValueTechProductIds(user, company),
         createdAt: user.createdAt.toISOString(),
         lastLoginAt: toIso(user.lastLoginAt),
     };
+}
+function toPublicUserProfile(doc, fallback) {
+    if (!doc && !fallback)
+        return null;
+    if (doc) {
+        return {
+            id: doc._id.toString(),
+            userId: doc.userId.toString(),
+            email: doc.email ?? null,
+            phone: doc.phone ?? null,
+            additionalInfo: doc.additionalInfo ?? null,
+            updatedAt: doc.updatedAt.toISOString(),
+        };
+    }
+    const f = fallback;
+    return {
+        userId: f.userId.toString(),
+        email: f.email ?? null,
+        phone: f.phone ?? null,
+        additionalInfo: null,
+        updatedAt: f.updatedAt.toISOString(),
+    };
+}
+function publicUserFromContext(context) {
+    if (!context.user)
+        return null;
+    const ids = context.companyMemberships.map((m) => m.companyId.toString());
+    return toPublicUser(context.user, context.company, {
+        membership: context.companyMembership,
+        allCompanyIds: ids,
+    });
 }
 function coerceDate(input) {
     if (!input)
@@ -719,6 +797,11 @@ async function recordActivities(sessionId, identityId, userId, actions, requestM
         return { inserted: 0 };
     const db = await (0, mongodb_1.getMongoDb)();
     const { activities } = (0, collections_1.getAuthCollections)(db);
+    const userIdStr = userId === null || userId === undefined
+        ? null
+        : typeof userId === "string"
+            ? userId
+            : userId.toString();
     const docs = actions
         .slice(0, 100)
         .map((action) => {
@@ -729,7 +812,7 @@ async function recordActivities(sessionId, identityId, userId, actions, requestM
         return {
             activityId: (0, crypto_1.randomId)(),
             userIdentifier: identityId,
-            userId,
+            userId: userIdStr,
             sessionId,
             actionType: value.actionType,
             actionDetails: stripUnknown(value.actionDetails),
@@ -812,13 +895,20 @@ async function handleSessionPayload(request, payload) {
                 lastSeenAt: now.toISOString(),
                 isActive: payload.eventType !== "end",
             },
-            user: toPublicUser(context.user),
-            profile: context.profile,
+            user: publicUserFromContext(context),
+            profile: toPublicUserProfile(context.profile, context.user
+                ? {
+                    userId: context.user._id,
+                    email: context.user.email ?? null,
+                    phone: context.user.phone ?? null,
+                    updatedAt: context.user.updatedAt,
+                }
+                : undefined),
             guestAccess,
             config: {
                 guestAttemptLimit: context.config.guestAttemptLimit,
                 registrationRequired: context.config.registrationRequired,
-                sessionTimeoutMinutes: context.config.sessionTimeoutMinutes,
+                sessionTimeoutMinutes: (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes),
                 dataRetentionDays: context.config.dataRetentionDays,
                 enableTracking: context.config.enableTracking,
             },
@@ -832,8 +922,15 @@ async function getSessionSnapshot(request) {
     return {
         context,
         payload: {
-            user: toPublicUser(context.user),
-            profile: context.profile,
+            user: publicUserFromContext(context),
+            profile: toPublicUserProfile(context.profile, context.user
+                ? {
+                    userId: context.user._id,
+                    email: context.user.email ?? null,
+                    phone: context.user.phone ?? null,
+                    updatedAt: context.user.updatedAt,
+                }
+                : undefined),
             guestAccess,
             session: {
                 id: context.session._id,
@@ -844,7 +941,7 @@ async function getSessionSnapshot(request) {
             config: {
                 guestAttemptLimit: context.config.guestAttemptLimit,
                 registrationRequired: context.config.registrationRequired,
-                sessionTimeoutMinutes: context.config.sessionTimeoutMinutes,
+                sessionTimeoutMinutes: (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes),
                 dataRetentionDays: context.config.dataRetentionDays,
                 enableTracking: context.config.enableTracking,
             },
@@ -852,110 +949,9 @@ async function getSessionSnapshot(request) {
         },
     };
 }
-async function registerUser(request, body) {
-    const context = await (0, context_1.resolveRequestContext)(request);
-    if (context.isIdentityBlocked) {
-        throw new HttpError(403, "identity_blocked", "Access blocked by administrator.");
-    }
-    if (context.user) {
-        throw new HttpError(400, "already_authenticated", "Already logged in.");
-    }
-    const ipKey = `${context.ipAddress}:register`;
-    const limiter = (0, rate_limit_1.consumeRateLimit)(ipKey, { limit: 10, windowMs: 10 * 60 * 1000 });
-    if (!limiter.allowed) {
-        throw new HttpError(429, "rate_limited", "Too many registration attempts.");
-    }
-    const parsed = registerSchema.safeParse(body);
-    if (!parsed.success) {
-        throw new HttpError(400, "invalid_payload", "Invalid registration payload.");
-    }
-    const db = await (0, mongodb_1.getMongoDb)();
-    const { users, userProfiles, sessions } = (0, collections_1.getAuthCollections)(db);
-    const payload = parsed.data;
-    const username = payload.username.trim();
-    const usernameLower = username.toLowerCase();
-    const email = normalizeOptionalText(payload.email);
-    const phone = normalizeOptionalText(payload.phone);
-    const existing = await users.findOne({ usernameLower });
-    if (existing) {
-        throw new HttpError(409, "username_exists", "Username is already in use.");
-    }
-    const now = new Date();
-    const userId = (0, crypto_1.randomId)();
-    const passwordHash = await (0, crypto_1.hashPassword)(payload.password);
-    try {
-        await users.insertOne({
-            _id: userId,
-            username,
-            usernameLower,
-            passwordHash,
-            ...(email ? { email } : {}),
-            ...(phone ? { phone } : {}),
-            role: "user",
-            createdAt: now,
-            updatedAt: now,
-            lastLoginAt: now,
-            isBlocked: false,
-            blockedAt: null,
-        });
-    }
-    catch (insertError) {
-        if (isDuplicateKeyError(insertError)) {
-            throw new HttpError(409, "registration_conflict", "Username or email is already in use.");
-        }
-        throw insertError;
-    }
-    await userProfiles.updateOne({ userId }, {
-        $set: {
-            userId,
-            email: email ?? null,
-            phone: phone ?? null,
-            additionalInfo: null,
-            updatedAt: now,
-        },
-    }, { upsert: true });
-    await sessions.updateOne({ _id: context.session._id }, {
-        $set: {
-            userId,
-            isRemembered: false,
-            lastSeenAt: now,
-        },
-    });
-    const user = await users.findOne({ _id: userId });
-    if (!user) {
-        throw new HttpError(500, "registration_failed", "Failed to create user.");
-    }
-    const nextSession = {
-        ...context.session,
-        userId,
-        isRemembered: false,
-        lastSeenAt: now,
-    };
-    await (0, session_store_1.writeCachedSession)(nextSession);
-    await recordActivities(context.session._id, context.identityId, userId, [
-        {
-            actionType: "auth_register",
-            actionDetails: {
-                username,
-            },
-        },
-        {
-            actionType: "auth_login",
-            actionDetails: {
-                via: "registration",
-            },
-        },
-    ], {
-        ipAddress: context.ipAddress,
-        userAgent: context.userAgent,
-        referrer: readHeader(request, "referer"),
-    });
-    const guestAccess = await resolveGuestAccessStatus(context.identityId, context.config);
-    return {
-        context,
-        user: toPublicUser(user),
-        guestAccess,
-    };
+async function registerUser(request, _body) {
+    await (0, context_1.resolveRequestContext)(request);
+    throw new HttpError(403, "registration_disabled", "تم تعطيل التسجيل الذاتي. يُنشئ المسؤول الحسابات من لوحة السوبر أدمن.");
 }
 async function loginUser(request, body) {
     const context = await (0, context_1.resolveRequestContext)(request);
@@ -975,7 +971,7 @@ async function loginUser(request, body) {
         throw new HttpError(429, "rate_limited", "Too many login attempts.");
     }
     const db = await (0, mongodb_1.getMongoDb)();
-    const { users, userProfiles, sessions } = (0, collections_1.getAuthCollections)(db);
+    const { users, userProfiles, sessions, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const usernameLower = payload.username.toLowerCase();
     const user = await users.findOne({ usernameLower });
     if (!user) {
@@ -995,9 +991,12 @@ async function loginUser(request, body) {
             updatedAt: now,
         },
     });
+    const memberships = await userCompanyMemberships.find({ userId: user._id }).toArray();
+    const activeCompanyId = user.role === "super_admin" ? null : memberships[0]?.companyId ?? null;
     await sessions.updateOne({ _id: context.session._id }, {
         $set: {
             userId: user._id,
+            activeCompanyId,
             isRemembered: Boolean(payload.rememberMe),
             lastSeenAt: now,
         },
@@ -1005,12 +1004,13 @@ async function loginUser(request, body) {
     const nextSession = {
         ...context.session,
         userId: user._id,
+        activeCompanyId,
         isRemembered: Boolean(payload.rememberMe),
         lastSeenAt: now,
     };
     await (0, session_store_1.writeCachedSession)(nextSession, payload.rememberMe
         ? config_1.authTrackingConfig.rememberMeDays * 24 * 60 * 60
-        : context.config.sessionTimeoutMinutes * 60);
+        : (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes) * 60);
     const profile = await userProfiles.findOne({ userId: user._id });
     await recordActivities(context.session._id, context.identityId, user._id, [
         {
@@ -1025,13 +1025,32 @@ async function loginUser(request, body) {
         referrer: readHeader(request, "referer"),
     });
     const guestAccess = await resolveGuestAccessStatus(context.identityId, context.config);
+    let company = null;
+    let membership = null;
+    if (user.role === "super_admin") {
+        company = null;
+    }
+    else if (memberships.length > 0) {
+        const cid = activeCompanyId ?? memberships[0].companyId;
+        membership =
+            memberships.find((m) => m.companyId.equals(cid)) ?? memberships[0] ?? null;
+        company = cid ? await companies.findOne({ _id: cid }) : null;
+    }
     return {
         context,
         user: toPublicUser({
             ...user,
             lastLoginAt: now,
+        }, company, {
+            membership,
+            allCompanyIds: memberships.map((m) => m.companyId.toString()),
         }),
-        profile,
+        profile: toPublicUserProfile(profile, {
+            userId: user._id,
+            email: user.email ?? null,
+            phone: user.phone ?? null,
+            updatedAt: user.updatedAt,
+        }),
         rememberMe: Boolean(payload.rememberMe),
         guestAccess,
     };
@@ -1063,17 +1082,16 @@ async function getUserProfile(request) {
     if (context.isUserBlocked) {
         throw new HttpError(403, "user_blocked", "User account is blocked.");
     }
-    const profile = context.profile ?? {
+    const profile = toPublicUserProfile(context.profile, {
         userId: context.user._id,
         email: context.user.email ?? null,
         phone: context.user.phone ?? null,
-        additionalInfo: null,
         updatedAt: context.user.updatedAt,
-    };
+    });
     return {
         context,
         payload: {
-            user: toPublicUser(context.user),
+            user: publicUserFromContext(context),
             profile,
         },
     };
@@ -1094,7 +1112,7 @@ async function updateUserProfile(request, body) {
     const payload = parsed.data;
     const now = new Date();
     const db = await (0, mongodb_1.getMongoDb)();
-    const { users, userProfiles } = (0, collections_1.getAuthCollections)(db);
+    const { users, userProfiles, companies } = (0, collections_1.getAuthCollections)(db);
     const email = normalizeOptionalText(payload.email ?? undefined);
     const phone = normalizeOptionalText(payload.phone ?? undefined);
     const userSet = {
@@ -1143,13 +1161,18 @@ async function updateUserProfile(request, body) {
         userAgent: context.userAgent,
         referrer: readHeader(request, "referer"),
     });
-    const updatedUser = await users.findOne({ _id: context.user._id });
     const updatedProfile = await userProfiles.findOne({ userId: context.user._id });
+    const nextContext = await (0, context_1.resolveRequestContext)(request);
     return {
-        context,
+        context: nextContext,
         payload: {
-            user: toPublicUser(updatedUser),
-            profile: updatedProfile,
+            user: publicUserFromContext(nextContext),
+            profile: toPublicUserProfile(updatedProfile, {
+                userId: context.user._id,
+                email: context.user.email ?? null,
+                phone: context.user.phone ?? null,
+                updatedAt: context.user.updatedAt,
+            }),
         },
     };
 }
@@ -1163,6 +1186,1080 @@ function assertAdminUser(user, isBlocked) {
     if (user.role !== "super_admin") {
         throw new HttpError(403, "forbidden", "Super admin access required.");
     }
+}
+function assertCompanyAdminUser(context) {
+    if (!context.user) {
+        throw new HttpError(401, "not_authenticated", "Authentication required.");
+    }
+    if (context.isUserBlocked || context.user.isBlocked) {
+        throw new HttpError(403, "user_blocked", "User account is blocked.");
+    }
+    if (!context.company ||
+        !context.companyMembership ||
+        context.companyMembership.role !== "company_admin") {
+        throw new HttpError(403, "forbidden", "Company administrator access required.");
+    }
+}
+function assertCompanyMemberUser(context) {
+    if (!context.user) {
+        throw new HttpError(401, "not_authenticated", "Authentication required.");
+    }
+    if (context.isUserBlocked || context.user.isBlocked) {
+        throw new HttpError(403, "user_blocked", "User account is blocked.");
+    }
+    if (!context.company || !context.companyMembership) {
+        throw new HttpError(403, "forbidden", "Company membership required.");
+    }
+}
+const updateCompanyBrandingSchema = zod_1.z
+    .object({
+    logoDataUrl: zod_1.z
+        .union([
+        zod_1.z.string().max(900_000).refine((s) => s.startsWith("data:image/"), { message: "logo must be data URL" }),
+        zod_1.z.literal(""),
+        zod_1.z.null(),
+    ])
+        .optional(),
+})
+    .refine((v) => v.logoDataUrl !== undefined, {
+    message: "Provide logoDataUrl.",
+});
+const updateMemberSignatureBodySchema = zod_1.z.object({
+    userId: zod_1.z.string().trim().min(1).max(64),
+    valuationReportSignatureDataUrl: zod_1.z.union([
+        zod_1.z
+            .string()
+            .max(700_000)
+            .refine((s) => s === "" || s.startsWith("data:image/"), {
+            message: "signature must be data URL or empty",
+        }),
+        zod_1.z.null(),
+    ]),
+});
+const valueTechProductIdSchema = zod_1.z.enum([
+    "real-estate-valuation",
+    "machine-valuation",
+    "evaluation-source",
+    "value-tech-app",
+    "asset-inventory",
+    "asset-inspection",
+]);
+const createCompanySchema = zod_1.z.object({
+    companyName: zod_1.z.string().trim().min(2).max(120),
+    username: zod_1.z.string().trim().min(3).max(32).regex(/^[A-Za-z0-9_.-]+$/),
+    password: zod_1.z.string().min(8).max(128),
+    email: zod_1.z.string().email().optional().or(zod_1.z.literal("")),
+    phone: zod_1.z.string().trim().max(32).optional().or(zod_1.z.literal("")),
+    valueTechProductIds: zod_1.z.array(valueTechProductIdSchema).default([]),
+});
+const companyUserMemberRoleSchema = zod_1.z
+    .union([
+    zod_1.z.enum(["valuer", "data_entry", "reviewer", "inspector"]),
+    zod_1.z.literal("viewer"),
+])
+    .transform((r) => (r === "viewer" ? "valuer" : r));
+function coerceRequestJsonBody(body) {
+    if (body == null)
+        return {};
+    if (typeof body === "string") {
+        const t = body.trim();
+        if (!t)
+            return {};
+        try {
+            return JSON.parse(t);
+        }
+        catch {
+            return {};
+        }
+    }
+    if (typeof body !== "object" || Array.isArray(body))
+        return {};
+    return body;
+}
+function sanitizeCompanyUserJsonBody(body) {
+    const base = coerceRequestJsonBody(body);
+    if (!base || typeof base !== "object" || Array.isArray(base))
+        return base;
+    const o = { ...base };
+    if (o.email === null || o.email === "")
+        delete o.email;
+    if (o.phone === null || o.phone === "")
+        delete o.phone;
+    return o;
+}
+function asTrimmedString(v) {
+    if (typeof v === "string")
+        return v;
+    if (v === null || v === undefined)
+        return "";
+    return String(v);
+}
+const createCompanyUserSchema = zod_1.z.object({
+    username: zod_1.z.preprocess(asTrimmedString, zod_1.z.string().trim().min(3).max(32).regex(/^[A-Za-z0-9_.-]+$/)),
+    password: zod_1.z.preprocess(asTrimmedString, zod_1.z.string().min(8).max(128)),
+    role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
+    email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    phone: zod_1.z.union([zod_1.z.string().trim().max(32), zod_1.z.literal("")]).optional(),
+});
+const updateCompanyUserByCompanyAdminBodySchema = zod_1.z
+    .object({
+    role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
+    email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    phone: zod_1.z.union([zod_1.z.string().trim().max(32), zod_1.z.literal("")]).optional(),
+    newPassword: zod_1.z.string().min(8).max(128).optional(),
+})
+    .superRefine((data, ctx) => {
+    if (data.role === undefined &&
+        data.email === undefined &&
+        data.phone === undefined &&
+        data.newPassword === undefined) {
+        ctx.addIssue({
+            code: zod_1.z.ZodIssueCode.custom,
+            message: "يجب إرسال حقل واحد على الأقل للتحديث.",
+        });
+    }
+});
+function sanitizeCompanyUserUpdateJsonBody(body) {
+    const base = coerceRequestJsonBody(body);
+    if (!base || typeof base !== "object" || Array.isArray(base))
+        return base;
+    const o = { ...base };
+    if (o.email === null)
+        o.email = "";
+    if (o.phone === null)
+        o.phone = "";
+    return o;
+}
+async function createCompanyBySuperAdmin(request, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    assertCsrf(request);
+    const parsed = createCompanySchema.safeParse(body);
+    if (!parsed.success) {
+        throw new HttpError(400, "invalid_payload", "Invalid company payload.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, companies, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const payload = parsed.data;
+    const username = payload.username.trim();
+    const usernameLower = username.toLowerCase();
+    const email = normalizeOptionalText(payload.email);
+    const phone = normalizeOptionalText(payload.phone);
+    const existing = await users.findOne({ usernameLower });
+    if (existing) {
+        throw new HttpError(409, "username_exists", "Username is already in use.");
+    }
+    const now = new Date();
+    const passwordHash = await (0, crypto_1.hashPassword)(payload.password);
+    const productIds = payload.valueTechProductIds ?? [];
+    const companyInsert = await companies.insertOne({
+        name: payload.companyName.trim(),
+        valueTechProductIds: productIds,
+        createdAt: now,
+        updatedAt: now,
+        createdByUserId: context.user._id,
+    });
+    const companyId = companyInsert.insertedId;
+    let userId;
+    let adminMembershipDoc = null;
+    try {
+        const userInsert = await users.insertOne({
+            username,
+            usernameLower,
+            passwordHash,
+            ...(email ? { email } : {}),
+            ...(phone ? { phone } : {}),
+            role: "company_admin",
+            company: companyId,
+            createdAt: now,
+            updatedAt: now,
+            lastLoginAt: null,
+            isBlocked: false,
+            blockedAt: null,
+        });
+        userId = userInsert.insertedId;
+        const memIns = await userCompanyMemberships.insertOne({
+            userId,
+            companyId,
+            role: "company_admin",
+            createdAt: now,
+            updatedAt: now,
+        });
+        adminMembershipDoc =
+            (await userCompanyMemberships.findOne({ _id: memIns.insertedId })) ?? null;
+        await companies.updateOne({ _id: companyId }, { $set: { adminUserId: userId, updatedAt: now } });
+    }
+    catch (insertError) {
+        await companies.deleteOne({ _id: companyId });
+        if (isDuplicateKeyError(insertError)) {
+            throw new HttpError(409, "registration_conflict", "Username or email conflict.");
+        }
+        throw insertError;
+    }
+    await userProfiles.updateOne({ userId }, {
+        $set: {
+            userId,
+            email: email ?? null,
+            phone: phone ?? null,
+            additionalInfo: null,
+            updatedAt: now,
+        },
+    }, { upsert: true });
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_created",
+            actionDetails: {
+                companyId: companyId.toString(),
+                companyName: payload.companyName.trim(),
+                adminUsername: username,
+            },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    const company = await companies.findOne({ _id: companyId });
+    const adminUser = await users.findOne({ _id: userId });
+    return {
+        context,
+        payload: {
+            companyId: companyId.toString(),
+            company: company
+                ? {
+                    id: company._id.toString(),
+                    name: company.name,
+                    valueTechProductIds: company.valueTechProductIds,
+                    adminUserId: (company.adminUserId ?? userId).toString(),
+                    createdAt: company.createdAt.toISOString(),
+                }
+                : null,
+            adminUser: toPublicUser(adminUser, company, {
+                membership: adminMembershipDoc,
+                allCompanyIds: [companyId.toString()],
+            }),
+        },
+    };
+}
+async function listCompaniesForSuperAdmin(request) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies, users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const rows = await companies.find().sort({ createdAt: -1 }).limit(500).toArray();
+    const companyIds = rows.map((c) => c._id);
+    const adminByCompany = new Map();
+    if (companyIds.length > 0) {
+        const adminMems = await userCompanyMemberships
+            .find({ companyId: { $in: companyIds }, role: "company_admin" })
+            .toArray();
+        const adminUserIds = [...new Set(adminMems.map((m) => m.userId))];
+        const adminDocs = adminUserIds.length > 0
+            ? await users
+                .find({ _id: { $in: adminUserIds } })
+                .project({ _id: 1, username: 1 })
+                .toArray()
+            : [];
+        const nameById = new Map(adminDocs.map((u) => [u._id.toString(), u.username]));
+        for (const m of adminMems) {
+            const cid = m.companyId.toString();
+            if (!adminByCompany.has(cid)) {
+                adminByCompany.set(cid, {
+                    id: m.userId.toString(),
+                    username: nameById.get(m.userId.toString()) ?? "",
+                });
+            }
+        }
+    }
+    const memberCountByCompany = new Map();
+    if (companyIds.length > 0) {
+        const counts = await userCompanyMemberships
+            .aggregate([
+            {
+                $match: {
+                    companyId: { $in: companyIds },
+                    role: { $in: [...types_1.COMPANY_MEMBER_ROLES] },
+                },
+            },
+            { $group: { _id: "$companyId", n: { $sum: 1 } } },
+        ])
+            .toArray();
+        for (const row of counts) {
+            if (row._id)
+                memberCountByCompany.set(row._id.toString(), row.n);
+        }
+    }
+    return {
+        context,
+        payload: {
+            companies: rows.map((c) => {
+                const adm = adminByCompany.get(c._id.toString());
+                return {
+                    id: c._id.toString(),
+                    name: c.name,
+                    valueTechProductIds: c.valueTechProductIds,
+                    adminUserId: c.adminUserId?.toString() ?? adm?.id ?? "",
+                    adminUsername: adm?.username ?? "",
+                    memberCount: memberCountByCompany.get(c._id.toString()) ?? 0,
+                    createdAt: c.createdAt.toISOString(),
+                };
+            }),
+        },
+    };
+}
+async function listCompanyUsersForCompanyAdmin(request) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const companyId = context.company._id;
+    const company = await companies.findOne({ _id: companyId });
+    const memberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+    const memberIds = memberLinks.map((m) => m.userId);
+    const roleByUserId = new Map(memberLinks.map((m) => [m.userId.toString(), m.role]));
+    const rows = await users
+        .find({ _id: { $in: memberIds } })
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .toArray();
+    return {
+        context,
+        payload: {
+            company: company
+                ? {
+                    id: company._id.toString(),
+                    name: company.name,
+                    valueTechProductIds: company.valueTechProductIds,
+                    logoDataUrl: company.logoDataUrl ?? null,
+                    employeeCount: memberLinks.length,
+                }
+                : null,
+            users: rows.map((u) => ({
+                id: u._id.toString(),
+                username: u.username,
+                role: roleByUserId.get(u._id.toString()) ?? "valuer",
+                companyId: companyId.toString(),
+                email: u.email ?? null,
+                phone: u.phone ?? null,
+                createdAt: u.createdAt.toISOString(),
+                lastLoginAt: toIso(u.lastLoginAt),
+                valuationReportSignatureDataUrl: typeof u.valuationReportSignatureDataUrl === "string" &&
+                    u.valuationReportSignatureDataUrl.startsWith("data:image/")
+                    ? u.valuationReportSignatureDataUrl
+                    : null,
+            })),
+        },
+    };
+}
+async function getCompanyReportDefaultsForMember(request) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyMemberUser(context);
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const companyId = context.company._id;
+    const company = await companies.findOne({ _id: companyId });
+    const memberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+    const memberIds = memberLinks.map((m) => m.userId);
+    const roleByUserId = new Map(memberLinks.map((m) => [m.userId.toString(), m.role]));
+    const memberUsers = await users
+        .find({ _id: { $in: memberIds } })
+        .sort({ username: 1 })
+        .limit(200)
+        .toArray();
+    const reportSignatoryRows = memberUsers.map((u) => {
+        const memRole = roleByUserId.get(u._id.toString()) ?? "valuer";
+        const roleLabel = COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ?? memRole;
+        const sig = typeof u.valuationReportSignatureDataUrl === "string" &&
+            u.valuationReportSignatureDataUrl.startsWith("data:image/")
+            ? u.valuationReportSignatureDataUrl
+            : "";
+        return {
+            id: u._id.toString(),
+            name: u.username,
+            roleLabel,
+            signatureImageDataUrl: sig,
+        };
+    });
+    return {
+        context,
+        payload: {
+            companyName: company?.name ?? "",
+            logoDataUrl: company?.logoDataUrl ?? null,
+            reportSignatoryRows,
+        },
+    };
+}
+async function updateCompanyBrandingByCompanyAdmin(request, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    assertCsrf(request);
+    const parsed = updateCompanyBrandingSchema.safeParse(coerceRequestJsonBody(body));
+    if (!parsed.success) {
+        const flat = parsed.error.flatten();
+        const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) => (msgs ?? []).map((m) => `${key}: ${m}`));
+        const hint = fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid payload.";
+        throw new HttpError(400, "invalid_payload", hint, {
+            issues: flat,
+        });
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies } = (0, collections_1.getAuthCollections)(db);
+    const companyId = context.company._id;
+    const now = new Date();
+    const $set = { updatedAt: now };
+    if (parsed.data.logoDataUrl !== undefined) {
+        const v = parsed.data.logoDataUrl;
+        $set.logoDataUrl = v === "" || v === null ? null : v;
+    }
+    await companies.updateOne({ _id: companyId }, { $set });
+    return {
+        context,
+        payload: { ok: true },
+    };
+}
+async function updateCompanyMemberReportSignatureByCompanyAdmin(request, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    assertCsrf(request);
+    const parsed = updateMemberSignatureBodySchema.safeParse(coerceRequestJsonBody(body));
+    if (!parsed.success) {
+        const flat = parsed.error.flatten();
+        const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) => (msgs ?? []).map((m) => `${key}: ${m}`));
+        const hint = fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid payload.";
+        throw new HttpError(400, "invalid_payload", hint, {
+            issues: flat,
+        });
+    }
+    const targetOid = (0, object_id_util_1.tryParseObjectId)(parsed.data.userId);
+    if (!targetOid) {
+        throw new HttpError(400, "invalid_user_id", "Invalid user id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const companyId = context.company._id;
+    const link = await userCompanyMemberships.findOne({ companyId, userId: targetOid });
+    if (!link) {
+        throw new HttpError(403, "forbidden", "User is not a member of this company.");
+    }
+    const raw = parsed.data.valuationReportSignatureDataUrl;
+    const url = raw === "" || raw === null ? null : raw;
+    const now = new Date();
+    const result = await users.updateOne({ _id: targetOid }, {
+        $set: {
+            valuationReportSignatureDataUrl: url,
+            updatedAt: now,
+        },
+    });
+    if (result.matchedCount === 0) {
+        throw new HttpError(404, "not_found", "User not found.");
+    }
+    return {
+        context,
+        payload: { ok: true },
+    };
+}
+async function createCompanyUserByCompanyAdmin(request, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    assertCsrf(request);
+    const parsed = createCompanyUserSchema.safeParse(sanitizeCompanyUserJsonBody(body));
+    if (!parsed.success) {
+        const flat = parsed.error.flatten();
+        const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) => (msgs ?? []).map((m) => `${key}: ${m}`));
+        const hint = fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid user payload.";
+        throw new HttpError(400, "invalid_payload", hint, {
+            issues: flat,
+        });
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, userProfiles, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const payload = parsed.data;
+    const username = payload.username.trim();
+    const usernameLower = username.toLowerCase();
+    const email = normalizeOptionalText(payload.email);
+    const phone = normalizeOptionalText(payload.phone);
+    const existing = await users.findOne({ usernameLower });
+    if (existing) {
+        throw new HttpError(409, "username_exists", "Username is already in use.");
+    }
+    const now = new Date();
+    const passwordHash = await (0, crypto_1.hashPassword)(payload.password);
+    const companyId = context.company._id;
+    let userId;
+    let newMembership = null;
+    try {
+        const inserted = await users.insertOne({
+            username,
+            usernameLower,
+            passwordHash,
+            ...(email ? { email } : {}),
+            ...(phone ? { phone } : {}),
+            role: payload.role,
+            company: companyId,
+            createdAt: now,
+            updatedAt: now,
+            lastLoginAt: null,
+            isBlocked: false,
+            blockedAt: null,
+        });
+        userId = inserted.insertedId;
+        const memIns = await userCompanyMemberships.insertOne({
+            userId,
+            companyId,
+            role: payload.role,
+            createdAt: now,
+            updatedAt: now,
+        });
+        newMembership =
+            (await userCompanyMemberships.findOne({ _id: memIns.insertedId })) ?? null;
+    }
+    catch (insertError) {
+        if (isDuplicateKeyError(insertError)) {
+            throw new HttpError(409, "registration_conflict", "Username or email conflict.");
+        }
+        throw insertError;
+    }
+    await userProfiles.updateOne({ userId }, {
+        $set: {
+            userId,
+            email: email ?? null,
+            phone: phone ?? null,
+            additionalInfo: null,
+            updatedAt: now,
+        },
+    }, { upsert: true });
+    const company = await companies.findOne({ _id: companyId });
+    const newUser = await users.findOne({ _id: userId });
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_user_created",
+            actionDetails: {
+                targetUserId: userId,
+                role: payload.role,
+                username,
+            },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return {
+        context,
+        payload: {
+            user: toPublicUser(newUser, company, {
+                membership: newMembership,
+                allCompanyIds: [companyId.toString()],
+            }),
+        },
+    };
+}
+async function updateCompanyUserByCompanyAdmin(request, userId, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    assertCsrf(request);
+    const parsed = updateCompanyUserByCompanyAdminBodySchema.safeParse(sanitizeCompanyUserUpdateJsonBody(body));
+    if (!parsed.success) {
+        const flat = parsed.error.flatten();
+        const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) => (msgs ?? []).map((m) => `${key}: ${m}`));
+        const hint = fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid update.";
+        throw new HttpError(400, "invalid_payload", hint, {
+            issues: flat,
+        });
+    }
+    const targetOid = (0, object_id_util_1.tryParseObjectId)(userId);
+    if (!targetOid) {
+        throw new HttpError(400, "invalid_id", "Invalid user id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const companyId = context.company._id;
+    const link = await userCompanyMemberships.findOne({ companyId, userId: targetOid });
+    if (!link) {
+        throw new HttpError(403, "forbidden", "User is not a member of this company.");
+    }
+    const isSelf = targetOid.equals(context.user._id);
+    if (link.role === "company_admin") {
+        if (!isSelf) {
+            throw new HttpError(403, "forbidden", "Only super admin can modify another company administrator.");
+        }
+        if (parsed.data.role !== undefined) {
+            throw new HttpError(400, "invalid_action", "Cannot change your own role from this panel.");
+        }
+    }
+    const now = new Date();
+    const userSet = { updatedAt: now };
+    const profileSet = { updatedAt: now };
+    if (parsed.data.newPassword) {
+        userSet.passwordHash = await (0, crypto_1.hashPassword)(parsed.data.newPassword);
+    }
+    if (parsed.data.email !== undefined) {
+        const em = normalizeOptionalText(parsed.data.email === "" ? undefined : parsed.data.email);
+        userSet.email = em ?? null;
+        profileSet.email = em ?? null;
+    }
+    if (parsed.data.phone !== undefined) {
+        const ph = normalizeOptionalText(parsed.data.phone === "" ? undefined : parsed.data.phone);
+        userSet.phone = ph ?? null;
+        profileSet.phone = ph ?? null;
+    }
+    if (parsed.data.role !== undefined) {
+        const nextRole = parsed.data.role;
+        await userCompanyMemberships.updateOne({ _id: link._id }, { $set: { role: nextRole, updatedAt: now } });
+        const targetUser = await users.findOne({ _id: targetOid });
+        if (targetUser?.company && targetUser.company.equals(companyId)) {
+            userSet.role = nextRole;
+        }
+    }
+    if (Object.keys(userSet).length > 1 || userSet.passwordHash) {
+        const res = await users.updateOne({ _id: targetOid }, { $set: userSet });
+        if (res.matchedCount === 0) {
+            throw new HttpError(404, "not_found", "User not found.");
+        }
+    }
+    await userProfiles.updateOne({ userId: targetOid }, {
+        $set: {
+            userId: targetOid,
+            ...profileSet,
+            updatedAt: now,
+            additionalInfo: null,
+        },
+    }, { upsert: true });
+    if (parsed.data.newPassword && !isSelf) {
+        await forceLogoutUserSessions([targetOid]);
+    }
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_user_updated",
+            actionDetails: {
+                targetUserId: targetOid.toString(),
+                fields: Object.keys(parsed.data).filter((k) => parsed.data[k] !== undefined),
+            },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return {
+        context,
+        payload: { ok: true },
+    };
+}
+async function deleteCompanyUserByCompanyAdmin(request, userId) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertCompanyAdminUser(context);
+    assertCsrf(request);
+    const companyOid = context.company._id;
+    const memberOid = (0, object_id_util_1.tryParseObjectId)(userId);
+    if (!memberOid) {
+        throw new HttpError(400, "invalid_id", "Invalid user id.");
+    }
+    if (memberOid.equals(context.user._id)) {
+        throw new HttpError(400, "invalid_action", "Cannot delete your own account.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const link = await userCompanyMemberships.findOne({
+        userId: memberOid,
+        companyId: companyOid,
+    });
+    if (!link) {
+        throw new HttpError(404, "not_found", "User not found in this company.");
+    }
+    if (link.role === "company_admin") {
+        throw new HttpError(400, "invalid_action", "Cannot delete a company administrator.");
+    }
+    await userCompanyMemberships.deleteOne({ _id: link._id });
+    const remaining = await userCompanyMemberships.countDocuments({ userId: memberOid });
+    if (remaining === 0) {
+        const user = await users.findOne({ _id: memberOid });
+        if (user && user.role !== "super_admin") {
+            await forceLogoutUserSessions([memberOid]);
+            await userProfiles.deleteOne({ userId: memberOid });
+            await users.deleteOne({ _id: memberOid });
+        }
+    }
+    else {
+        const all = await userCompanyMemberships.find({ userId: memberOid }).toArray();
+        const adminMem = all.find((x) => x.role === "company_admin");
+        const primary = adminMem ?? all[0];
+        if (primary) {
+            const newRole = primary.role === "company_admin" ? "company_admin" : primary.role;
+            await users.updateOne({ _id: memberOid }, {
+                $set: {
+                    role: newRole,
+                    company: primary.companyId,
+                    updatedAt: new Date(),
+                },
+                $unset: { companyId: "", company_id: "" },
+            });
+        }
+    }
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_user_deleted",
+            actionDetails: { companyId: companyOid.toString(), targetUserId: memberOid.toString() },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return {
+        context,
+        payload: { success: true },
+    };
+}
+async function forceLogoutUserSessions(userIds) {
+    if (userIds.length === 0)
+        return;
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { sessions } = (0, collections_1.getAuthCollections)(db);
+    const now = new Date();
+    await sessions.updateMany({ userId: { $in: userIds }, isActive: true }, {
+        $set: {
+            isActive: false,
+            endTime: now,
+            lastSeenAt: now,
+        },
+    });
+}
+const updateCompanyBySuperAdminSchema = zod_1.z.object({
+    companyName: zod_1.z.string().trim().min(2).max(120).optional(),
+    valueTechProductIds: zod_1.z.array(valueTechProductIdSchema).optional(),
+    adminEmail: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    adminPhone: zod_1.z.union([zod_1.z.string().trim().max(32), zod_1.z.literal("")]).optional(),
+    adminNewPassword: zod_1.z.string().min(8).max(128).optional(),
+});
+async function getCompanyDetailForSuperAdmin(request, companyId) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    const companyOid = (0, object_id_util_1.tryParseObjectId)(companyId);
+    if (!companyOid) {
+        throw new HttpError(400, "invalid_id", "Invalid company id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const company = await companies.findOne({ _id: companyOid });
+    if (!company) {
+        throw new HttpError(404, "not_found", "Company not found.");
+    }
+    let adminId = company.adminUserId;
+    if (!adminId) {
+        const fallbackAdmin = await userCompanyMemberships.findOne({
+            companyId: companyOid,
+            role: "company_admin",
+        });
+        adminId = fallbackAdmin?.userId;
+    }
+    const adminUser = adminId ? await users.findOne({ _id: adminId }) : null;
+    const adminProfile = adminId ? await userProfiles.findOne({ userId: adminId }) : null;
+    const adminMembership = adminId && adminUser
+        ? await userCompanyMemberships.findOne({
+            userId: adminId,
+            companyId: companyOid,
+        })
+        : null;
+    const memberLinks = await userCompanyMemberships
+        .find({
+        companyId: companyOid,
+        role: { $in: [...types_1.COMPANY_MEMBER_ROLES] },
+    })
+        .toArray();
+    const memberUsers = memberLinks.length > 0
+        ? await users
+            .find({ _id: { $in: memberLinks.map((m) => m.userId) } })
+            .sort({ createdAt: -1 })
+            .toArray()
+        : [];
+    const memByUserId = new Map(memberLinks.map((m) => [m.userId.toString(), m]));
+    const memberProfiles = await userProfiles
+        .find({ userId: { $in: memberUsers.map((u) => u._id) } })
+        .toArray();
+    const profileByUserId = new Map(memberProfiles.map((p) => [p.userId.toString(), p]));
+    return {
+        context,
+        payload: {
+            company: {
+                id: company._id.toString(),
+                name: company.name,
+                valueTechProductIds: company.valueTechProductIds,
+                adminUserId: adminId ? adminId.toString() : "",
+                createdAt: company.createdAt.toISOString(),
+                updatedAt: company.updatedAt.toISOString(),
+            },
+            admin: adminUser
+                ? {
+                    user: toPublicUser(adminUser, company, {
+                        membership: adminMembership,
+                        allCompanyIds: [companyOid.toString()],
+                    }),
+                    profile: toPublicUserProfile(adminProfile, {
+                        userId: adminUser._id,
+                        email: adminUser.email ?? null,
+                        phone: adminUser.phone ?? null,
+                        updatedAt: adminUser.updatedAt,
+                    }),
+                }
+                : null,
+            members: memberUsers.map((u) => ({
+                user: toPublicUser(u, company, {
+                    membership: memByUserId.get(u._id.toString()) ?? null,
+                    allCompanyIds: [companyOid.toString()],
+                }),
+                profile: toPublicUserProfile(profileByUserId.get(u._id.toString()) ?? null, {
+                    userId: u._id,
+                    email: u.email ?? null,
+                    phone: u.phone ?? null,
+                    updatedAt: u.updatedAt,
+                }),
+            })),
+        },
+    };
+}
+async function updateCompanyBySuperAdmin(request, companyId, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    assertCsrf(request);
+    const parsed = updateCompanyBySuperAdminSchema.safeParse(body);
+    if (!parsed.success) {
+        throw new HttpError(400, "invalid_payload", "Invalid update payload.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const companyOid = (0, object_id_util_1.tryParseObjectId)(companyId);
+    if (!companyOid) {
+        throw new HttpError(400, "invalid_id", "Invalid company id.");
+    }
+    const company = await companies.findOne({ _id: companyOid });
+    if (!company) {
+        throw new HttpError(404, "not_found", "Company not found.");
+    }
+    const now = new Date();
+    const updates = parsed.data;
+    if (updates.companyName !== undefined || updates.valueTechProductIds !== undefined) {
+        await companies.updateOne({ _id: companyOid }, {
+            $set: {
+                ...(updates.companyName !== undefined ? { name: updates.companyName } : {}),
+                ...(updates.valueTechProductIds !== undefined
+                    ? { valueTechProductIds: updates.valueTechProductIds }
+                    : {}),
+                updatedAt: now,
+            },
+        });
+    }
+    let adminId = company.adminUserId;
+    if (!adminId) {
+        const adm = await userCompanyMemberships.findOne({
+            companyId: companyOid,
+            role: "company_admin",
+        });
+        adminId = adm?.userId;
+    }
+    if (adminId) {
+        if (updates.adminNewPassword) {
+            await users.updateOne({ _id: adminId }, {
+                $set: {
+                    passwordHash: await (0, crypto_1.hashPassword)(updates.adminNewPassword),
+                    updatedAt: now,
+                },
+            });
+        }
+        if (updates.adminEmail !== undefined) {
+            const e = normalizeOptionalText(updates.adminEmail);
+            await users.updateOne({ _id: adminId }, {
+                $set: {
+                    email: e ?? null,
+                    updatedAt: now,
+                },
+            });
+        }
+        if (updates.adminPhone !== undefined) {
+            const p = normalizeOptionalText(updates.adminPhone);
+            await users.updateOne({ _id: adminId }, {
+                $set: {
+                    phone: p ?? null,
+                    updatedAt: now,
+                },
+            });
+        }
+        if (adminId && (updates.adminEmail !== undefined || updates.adminPhone !== undefined)) {
+            const u = await users.findOne({ _id: adminId });
+            if (u) {
+                await userProfiles.updateOne({ userId: adminId }, {
+                    $set: {
+                        userId: adminId,
+                        email: u.email ?? null,
+                        phone: u.phone ?? null,
+                        updatedAt: now,
+                    },
+                }, { upsert: true });
+            }
+        }
+    }
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_updated_by_super_admin",
+            actionDetails: { companyId: companyOid.toString(), keys: Object.keys(updates) },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return getCompanyDetailForSuperAdmin(request, companyOid.toString());
+}
+async function deleteCompanyBySuperAdmin(request, companyId) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    assertCsrf(request);
+    const companyOid = (0, object_id_util_1.tryParseObjectId)(companyId);
+    if (!companyOid) {
+        throw new HttpError(400, "invalid_id", "Invalid company id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const company = await companies.findOne({ _id: companyOid });
+    if (!company) {
+        throw new HttpError(404, "not_found", "Company not found.");
+    }
+    const memberRows = await userCompanyMemberships.find({ companyId: companyOid }).toArray();
+    const affectedUserIds = memberRows.map((m) => m.userId);
+    await forceLogoutUserSessions(affectedUserIds);
+    await userCompanyMemberships.deleteMany({ companyId: companyOid });
+    for (const uid of affectedUserIds) {
+        const remaining = await userCompanyMemberships.countDocuments({ userId: uid });
+        if (remaining > 0)
+            continue;
+        const u = await users.findOne({ _id: uid });
+        if (u?.role === "super_admin")
+            continue;
+        await userProfiles.deleteOne({ userId: uid });
+        await users.deleteOne({ _id: uid });
+    }
+    await companies.deleteOne({ _id: companyOid });
+    await recordActivities(context.session._id, context.identityId, context.user._id, [{ actionType: "company_deleted", actionDetails: { companyId: companyOid.toString(), name: company.name } }], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return {
+        context,
+        payload: { success: true },
+    };
+}
+async function deleteCompanyMemberBySuperAdmin(request, companyId, userId) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    assertAdminUser(context.user, context.isUserBlocked);
+    assertCsrf(request);
+    const companyOid = (0, object_id_util_1.tryParseObjectId)(companyId);
+    const memberOid = (0, object_id_util_1.tryParseObjectId)(userId);
+    if (!companyOid || !memberOid) {
+        throw new HttpError(400, "invalid_id", "Invalid company or user id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const link = await userCompanyMemberships.findOne({
+        userId: memberOid,
+        companyId: companyOid,
+    });
+    if (!link) {
+        throw new HttpError(404, "not_found", "User not found in this company.");
+    }
+    if (link.role === "company_admin") {
+        throw new HttpError(400, "invalid_action", "Cannot delete company admin. Delete the whole company instead.");
+    }
+    await userCompanyMemberships.deleteOne({ _id: link._id });
+    const remaining = await userCompanyMemberships.countDocuments({ userId: memberOid });
+    if (remaining === 0) {
+        const user = await users.findOne({ _id: memberOid });
+        if (user && user.role !== "super_admin") {
+            await forceLogoutUserSessions([memberOid]);
+            await userProfiles.deleteOne({ userId: memberOid });
+            await users.deleteOne({ _id: memberOid });
+        }
+    }
+    else {
+        const all = await userCompanyMemberships.find({ userId: memberOid }).toArray();
+        const adminMem = all.find((x) => x.role === "company_admin");
+        const primary = adminMem ?? all[0];
+        if (primary) {
+            const newRole = primary.role === "company_admin" ? "company_admin" : primary.role;
+            await users.updateOne({ _id: memberOid }, {
+                $set: {
+                    role: newRole,
+                    company: primary.companyId,
+                    updatedAt: new Date(),
+                },
+                $unset: { companyId: "", company_id: "" },
+            });
+        }
+    }
+    await recordActivities(context.session._id, context.identityId, context.user._id, [
+        {
+            actionType: "company_member_deleted",
+            actionDetails: { companyId: companyOid.toString(), targetUserId: memberOid.toString() },
+        },
+    ], {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+    });
+    return {
+        context,
+        payload: { success: true },
+    };
+}
+const setActiveCompanySchema = zod_1.z.object({
+    companyId: zod_1.z.string().trim().min(1),
+});
+async function setActiveCompanyForUser(request, body) {
+    const context = await (0, context_1.resolveRequestContext)(request);
+    if (!context.user) {
+        throw new HttpError(401, "not_authenticated", "Authentication required.");
+    }
+    if (context.isUserBlocked) {
+        throw new HttpError(403, "user_blocked", "User account is blocked.");
+    }
+    assertCsrf(request);
+    const parsed = setActiveCompanySchema.safeParse(body);
+    if (!parsed.success) {
+        throw new HttpError(400, "invalid_payload", "companyId required.");
+    }
+    const oid = (0, object_id_util_1.tryParseObjectId)(parsed.data.companyId);
+    if (!oid) {
+        throw new HttpError(400, "invalid_id", "Invalid company id.");
+    }
+    const db = await (0, mongodb_1.getMongoDb)();
+    const { companies, userCompanyMemberships, sessions } = (0, collections_1.getAuthCollections)(db);
+    if (context.user.role === "super_admin") {
+        const co = await companies.findOne({ _id: oid });
+        if (!co) {
+            throw new HttpError(404, "not_found", "Company not found.");
+        }
+    }
+    else {
+        const ok = await userCompanyMemberships.findOne({
+            userId: context.user._id,
+            companyId: oid,
+        });
+        if (!ok) {
+            throw new HttpError(403, "forbidden", "Not a member of this company.");
+        }
+    }
+    const now = new Date();
+    await sessions.updateOne({ _id: context.session._id }, { $set: { activeCompanyId: oid, lastSeenAt: now } });
+    const nextSession = { ...context.session, activeCompanyId: oid, lastSeenAt: now };
+    await (0, session_store_1.writeCachedSession)(nextSession, (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes) * 60);
+    const nextContext = await (0, context_1.resolveRequestContext)(request);
+    return {
+        context: nextContext,
+        payload: {
+            ok: true,
+            user: publicUserFromContext(nextContext),
+        },
+    };
 }
 async function getAdminConfigPayload(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
@@ -1188,7 +2285,7 @@ async function updateAdminConfigPayload(request, body) {
         $set: {
             ...updates,
             updatedAt: now,
-            updatedBy: context.user._id,
+            updatedBy: context.user._id.toString(),
         },
     });
     (0, context_1.invalidateSystemConfigCache)();
@@ -1244,7 +2341,7 @@ async function listAdminUsers(request) {
         guestAttempts.find().toArray(),
         blockedEntities.find({ entityType: "identity" }).toArray(),
     ]);
-    const usersById = new Map(userDocs.map((user) => [user._id, user]));
+    const usersById = new Map(userDocs.map((user) => [user._id.toString(), user]));
     const guestAttemptsByIdentity = new Map(guestDocs.map((item) => [item.identityId, item.attemptCount]));
     const blockedIdentitySet = new Set(blockedDocs.map((item) => item.entityId));
     const toTimestamp = (value) => {
@@ -1255,7 +2352,7 @@ async function listAdminUsers(request) {
     };
     const identityNodes = identitySessionStats.map((item) => ({
         identityId: item._id,
-        userId: item.userId ?? null,
+        userId: item.userId != null ? String(item.userId) : null,
         localBackupId: normalizeOptionalText(item.localBackupId) ?? null,
         totalSessions: item.totalSessions ?? 0,
         activeSessions: item.activeSessions ?? 0,
@@ -1347,8 +2444,8 @@ async function listAdminUsers(request) {
             .sort((left, right) => toTimestamp(right.lastActiveAt) - toTimestamp(left.lastActiveAt))[0] ??
             nodes[0];
         return buildRowFromNodes(nodes, {
-            entityId: `user:${user._id}`,
-            userId: user._id,
+            entityId: `user:${user._id.toString()}`,
+            userId: user._id.toString(),
             username: user.username,
             role: user.role,
             registrationStatus: "registered",
@@ -1487,7 +2584,11 @@ async function updateAdminUserState(request, body) {
     const db = await (0, mongodb_1.getMongoDb)();
     const { users, sessions, blockedEntities } = (0, collections_1.getAuthCollections)(db);
     if (payload.targetType === "user") {
-        const user = await users.findOne({ _id: payload.targetId });
+        const targetOid = (0, object_id_util_1.tryParseObjectId)(payload.targetId);
+        if (!targetOid) {
+            throw new HttpError(400, "invalid_id", "Invalid user id.");
+        }
+        const user = await users.findOne({ _id: targetOid });
         if (!user) {
             throw new HttpError(404, "user_not_found", "User not found.");
         }
@@ -1546,7 +2647,7 @@ async function updateAdminUserState(request, body) {
                             entityId: identityId,
                             reason: payload.reason ?? "Blocked by admin",
                             blockedAt: new Date(),
-                            blockedBy: adminUserId,
+                            blockedBy: adminUserId.toString(),
                         },
                     },
                     upsert: true,

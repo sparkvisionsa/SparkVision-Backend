@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+require("./register-path-aliases");
 const compression_1 = __importDefault(require("compression"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const helmet_1 = __importDefault(require("helmet"));
@@ -32,6 +33,15 @@ async function bootstrap() {
     app.useBodyParser("json", { limit: "100mb" });
     app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
     app.use((0, helmet_1.default)());
+    app.use((req, _res, next) => {
+        const path = String(req.originalUrl || req.url || "")
+            .split("?")[0]
+            .toLowerCase();
+        if (path.includes("/inspectorfiles/") && path.includes("/download")) {
+            req.headers["x-no-compression"] = "true";
+        }
+        next();
+    });
     app.use((0, compression_1.default)());
     app.use((0, cookie_parser_1.default)());
     app.enableCors({

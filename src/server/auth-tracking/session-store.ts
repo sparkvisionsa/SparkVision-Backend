@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { hydrateOptionalObjectId } from "@/common/object-id.util";
 import { authTrackingConfig } from "./config";
 import { parseDateFromUnknown } from "./crypto";
 import type { SessionDoc } from "./types";
@@ -54,7 +55,8 @@ function hydrateSession(raw: Record<string, unknown>): SessionDoc {
   const session = raw as unknown as Partial<SessionDoc>;
   return {
     _id: String(session._id ?? ""),
-    userId: session.userId ?? null,
+    userId: hydrateOptionalObjectId(session.userId),
+    activeCompanyId: hydrateOptionalObjectId(session.activeCompanyId),
     identityId: String(session.identityId ?? ""),
     fingerprintId: String(session.fingerprintId ?? ""),
     localBackupId: session.localBackupId ?? null,

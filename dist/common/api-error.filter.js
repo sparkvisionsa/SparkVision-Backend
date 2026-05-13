@@ -41,7 +41,20 @@ let ApiErrorFilter = ApiErrorFilter_1 = class ApiErrorFilter {
             });
             return;
         }
-        this.logger.error("Unhandled API error", exception);
+        const text = exception instanceof Error
+            ? exception.message
+            : typeof exception === "string"
+                ? exception
+                : (() => {
+                    try {
+                        return JSON.stringify(exception);
+                    }
+                    catch {
+                        return String(exception);
+                    }
+                })();
+        const stack = exception instanceof Error ? exception.stack : undefined;
+        this.logger.error(`Unhandled API error: ${text}`, stack);
         response.status(common_1.HttpStatus.INTERNAL_SERVER_ERROR).json({
             error: "internal_error",
             message: "Unexpected server error.",

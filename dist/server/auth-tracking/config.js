@@ -27,7 +27,7 @@ exports.authTrackingConfig = {
         process.env.NEXTAUTH_SECRET ??
         "spark-vision-dev-secret-change-me",
     authCookieDays: readNumber("AUTH_COOKIE_DAYS", 730),
-    sessionTimeoutMinutes: readNumber("SESSION_TIMEOUT_MINUTES", 30),
+    sessionTimeoutMinutes: readNumber("SESSION_TIMEOUT_MINUTES", 1440),
     rememberMeDays: readNumber("REMEMBER_ME_DAYS", 30),
     guestAttemptLimitDefault: readNumber("GUEST_ATTEMPT_LIMIT_DEFAULT", 5),
     registrationRequiredDefault: readBoolean("REGISTRATION_REQUIRED_DEFAULT", true),

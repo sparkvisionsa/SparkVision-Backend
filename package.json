@@ -15,11 +15,13 @@
     "optimize:indexes": "node scripts/optimize-source-indexes.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1041.0",
     "@nestjs/cache-manager": "^3.0.1",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/jwt": "^11.0.0",
+    "@nestjs/mongoose": "^11.0.4",
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/throttler": "^6.4.0",
     "@nestjs/typeorm": "^11.0.0",
@@ -37,7 +39,9 @@
     "ioredis": "^5.9.2",
     "iterare": "1.2.1",
     "mammoth": "^1.12.0",
+    "module-alias": "^2.3.4",
     "mongodb": "^6.8.0",
+    "mongoose": "^8.23.0",
     "multer": "^2.1.1",
     "nest-winston": "^1.10.2",
     "pdf-parse": "^2.4.5",
@@ -56,6 +60,7 @@
     "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.0",
+    "@types/module-alias": "^2.0.4",
     "@types/node": "^20.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"

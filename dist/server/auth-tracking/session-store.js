@@ -7,6 +7,7 @@ exports.readCachedSession = readCachedSession;
 exports.writeCachedSession = writeCachedSession;
 exports.deleteCachedSession = deleteCachedSession;
 const ioredis_1 = __importDefault(require("ioredis"));
+const object_id_util_1 = require("../../common/object-id.util");
 const config_1 = require("./config");
 const crypto_1 = require("./crypto");
 let redisClient;
@@ -55,7 +56,8 @@ function hydrateSession(raw) {
     const session = raw;
     return {
         _id: String(session._id ?? ""),
-        userId: session.userId ?? null,
+        userId: (0, object_id_util_1.hydrateOptionalObjectId)(session.userId),
+        activeCompanyId: (0, object_id_util_1.hydrateOptionalObjectId)(session.activeCompanyId),
         identityId: String(session.identityId ?? ""),
         fingerprintId: String(session.fingerprintId ?? ""),
         localBackupId: session.localBackupId ?? null,

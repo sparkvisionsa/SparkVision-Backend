@@ -7,14 +7,19 @@ import { HealthController } from "./health/health.controller";
 import { SourcesController } from "./sources/sources.controller";
 import { AuthTrackingController } from "./auth-tracking/auth-tracking.controller";
 import { AdminController } from "./admin/admin.controller";
+import { OrganizationController } from "./organization/organization.controller";
 import { ApiErrorFilter } from "./common/api-error.filter";
+import { DatabaseModule } from "./database/database.module";
 import { ClientsModule } from "./clients/clients.module";
 import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
+import { AssetsModule } from "./assets/assets.module";
 
 @Module({
   imports: [
+    DatabaseModule,
     ClientsModule,
     MachineValuationModule,
+    AssetsModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],
@@ -36,6 +41,7 @@ import { MachineValuationModule } from "./machine-valuation/machine-valuation.mo
     SourcesController,
     AuthTrackingController,
     AdminController,
+    OrganizationController,
   ],
   providers: [
     {

@@ -1,5 +1,5 @@
 import dns from "node:dns";
-import { MongoClient } from "mongodb";
+import mongoose from "mongoose";
 
 let mongoDnsConfigured = false;
 
@@ -7,7 +7,7 @@ let mongoDnsConfigured = false;
  * mongodb+srv:// يعتمد على استعلامات DNS من نوع SRV. على بعض الشبكات/ويندوز يفشل
  * querySrv بـ ECONNREFUSED. تعيين MONGO_DNS_SERVERS يوجّه الاستعلام لخوادم DNS عامة.
  */
-function applyMongoDnsFromEnv(): void {
+export function applyMongoDnsFromEnv(): void {
   if (mongoDnsConfigured) return;
   mongoDnsConfigured = true;
 
@@ -28,47 +28,43 @@ function applyMongoDnsFromEnv(): void {
   }
 }
 
-type MongoClientCache = {
-  client: MongoClient | null;
-  promise: Promise<MongoClient> | null;
-};
-
-declare global {
-  // eslint-disable-next-line no-var
-  var mongoScrapping: MongoClientCache | undefined;
-}
-
-const globalCache = global.mongoScrapping ?? { client: null, promise: null };
-
-global.mongoScrapping = globalCache;
-
-export async function getMongoClient(): Promise<MongoClient> {
-  const mongoUrl = process.env.MONGO_URL_SCRAPPING;
-  if (!mongoUrl) {
+/**
+ * نفس اتصال Mongoose: وصول للـ driver الخام (GridFS، سكربتات، إلخ).
+ * معرّف `_id` يُولَّد من Atlas/MongoDB تلقائيًا — لا يُمرَّر من التطبيق.
+ */
+/** يعيد نفس `Db` الذي يستخدمه Mongoose (متوافق مع حزمة mongodb في المشروع عبر التحويل). */
+export async function getMongoDb(): Promise<import("mongodb").Db> {
+  applyMongoDnsFromEnv();
+  const uri = process.env.MONGO_URL_SCRAPPING;
+  const dbName = process.env.MONGO_DBNAME_SCRAPPING;
+  if (!uri) {
     throw new Error("Missing MONGO_URL_SCRAPPING environment variable.");
   }
-
-  applyMongoDnsFromEnv();
-
-  if (globalCache.client) {
-    return globalCache.client;
-  }
-
-  if (!globalCache.promise) {
-    globalCache.promise = new MongoClient(mongoUrl, {
-      serverSelectionTimeoutMS: 30_000,
-    }).connect();
-  }
-
-  globalCache.client = await globalCache.promise;
-  return globalCache.client;
-}
-
-export async function getMongoDb() {
-  const dbName = process.env.MONGO_DBNAME_SCRAPPING;
   if (!dbName) {
     throw new Error("Missing MONGO_DBNAME_SCRAPPING environment variable.");
   }
-  const client = await getMongoClient();
-  return client.db(dbName);
+
+  if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    return mongoose.connection.db as unknown as import("mongodb").Db;
+  }
+
+  if (mongoose.connection.readyState === 0) {
+    await mongoose.connect(uri, {
+      dbName,
+      serverSelectionTimeoutMS: 30_000,
+    });
+  } else {
+    await mongoose.connection.asPromise();
+  }
+
+  const db = mongoose.connection.db;
+  if (!db) {
+    throw new Error("MongoDB not connected");
+  }
+  return db as unknown as import("mongodb").Db;
+}
+
+export async function getMongoClient(): Promise<import("mongodb").MongoClient> {
+  await getMongoDb();
+  return mongoose.connection.getClient() as unknown as import("mongodb").MongoClient;
 }

@@ -12,6 +12,7 @@ exports.verifyPassword = verifyPassword;
 exports.parseDateFromUnknown = parseDateFromUnknown;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const node_crypto_1 = __importDefault(require("node:crypto"));
+const mongodb_1 = require("mongodb");
 const config_1 = require("./config");
 function toBase64Url(value) {
     return Buffer.from(value).toString("base64url");
@@ -20,7 +21,7 @@ function fromBase64Url(value) {
     return Buffer.from(value, "base64url").toString("utf8");
 }
 function randomId() {
-    return node_crypto_1.default.randomUUID();
+    return new mongodb_1.ObjectId().toString();
 }
 function sha256(value) {
     return node_crypto_1.default.createHash("sha256").update(value).digest("hex");

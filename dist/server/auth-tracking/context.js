@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getRequestIp = getRequestIp;
+exports.getEffectiveSessionTimeoutMinutes = getEffectiveSessionTimeoutMinutes;
 exports.applyContextCookies = applyContextCookies;
 exports.invalidateSystemConfigCache = invalidateSystemConfigCache;
 exports.resolveRequestContext = resolveRequestContext;
@@ -92,15 +93,19 @@ function detectBrowser(userAgent) {
     return "Unknown";
 }
 const SESSION_PERSIST_INTERVAL_MS = 20_000;
+const MIN_SESSION_TIMEOUT_MINUTES = 24 * 60;
 const SYSTEM_CONFIG_CACHE_PREFIX = "auth:system-config";
 const SYSTEM_CONFIG_CACHE_KEY = `${SYSTEM_CONFIG_CACHE_PREFIX}:system`;
 const SYSTEM_CONFIG_CACHE_TTL_MS = 15_000;
 const SYSTEM_CONFIG_CACHE_STALE_TTL_MS = 60_000;
+function getEffectiveSessionTimeoutMinutes(timeoutMinutes) {
+    const minutes = timeoutMinutes ?? config_1.authTrackingConfig.sessionTimeoutMinutes;
+    return Math.max(MIN_SESSION_TIMEOUT_MINUTES, minutes);
+}
 function sessionCookieMaxAgeSeconds(rememberMe = false, timeoutMinutes) {
     if (rememberMe)
         return config_1.authTrackingConfig.rememberMeDays * 24 * 60 * 60;
-    const minutes = timeoutMinutes ?? config_1.authTrackingConfig.sessionTimeoutMinutes;
-    return Math.max(5, minutes) * 60;
+    return getEffectiveSessionTimeoutMinutes(timeoutMinutes) * 60;
 }
 function toCookieMaxAgeMs(seconds) {
     if (seconds === undefined)
@@ -253,7 +258,7 @@ async function resolveRequestContext(request, payload) {
     const fingerprintId = createFingerprintId(identityId, ipAddress, userAgent, payload);
     let session = (await (0, session_store_1.readCachedSession)(sessionPayload.sid)) ??
         (await collections.sessions.findOne({ _id: sessionPayload.sid }));
-    const timeoutMs = config.sessionTimeoutMinutes * 60 * 1000;
+    const timeoutMs = getEffectiveSessionTimeoutMinutes(config.sessionTimeoutMinutes) * 60 * 1000;
     const isSessionExpired = session &&
         now.getTime() - new Date(session.lastSeenAt).getTime() > timeoutMs;
     if (!session || session.identityId !== identityId || isSessionExpired) {
@@ -327,6 +332,35 @@ async function resolveRequestContext(request, payload) {
             entityId: identityId,
         }),
     ]);
+    const companyMemberships = user
+        ? await collections.userCompanyMemberships.find({ userId: user._id }).toArray()
+        : [];
+    let company = null;
+    let companyMembership = null;
+    if (user?.role === "super_admin") {
+        const ac = session.activeCompanyId;
+        company = ac ? await collections.companies.findOne({ _id: ac }) : null;
+        companyMembership = null;
+    }
+    else if (user && companyMemberships.length > 0) {
+        let activeCid = session.activeCompanyId ?? null;
+        const valid = activeCid &&
+            companyMemberships.some((m) => m.companyId.equals(activeCid));
+        if (!valid) {
+            activeCid = companyMemberships[0].companyId;
+        }
+        companyMembership =
+            companyMemberships.find((m) => m.companyId.equals(activeCid)) ?? null;
+        company = activeCid
+            ? await collections.companies.findOne({ _id: activeCid })
+            : null;
+        if (activeCid &&
+            (!session.activeCompanyId || !session.activeCompanyId.equals(activeCid))) {
+            await collections.sessions.updateOne({ _id: session._id }, { $set: { activeCompanyId: activeCid } });
+            session = { ...session, activeCompanyId: activeCid };
+            await (0, session_store_1.writeCachedSession)(session);
+        }
+    }
     const isUserBlocked = Boolean(user?.isBlocked);
     return {
         now,
@@ -335,6 +369,9 @@ async function resolveRequestContext(request, payload) {
         sessionId: session._id,
         session,
         user,
+        company,
+        companyMembership,
+        companyMemberships,
         profile,
         guestAttempts,
         isIdentityBlocked: Boolean(blockedIdentity),

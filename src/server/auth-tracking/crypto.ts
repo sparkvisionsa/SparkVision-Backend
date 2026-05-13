@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
+import { ObjectId } from "mongodb";
 import { authTrackingConfig } from "./config";
 
 function toBase64Url(value: string) {
@@ -10,8 +11,9 @@ function fromBase64Url(value: string) {
   return Buffer.from(value, "base64url").toString("utf8");
 }
 
+/** معرّف عشوائي لجلسات/CSRF/أنشطة — ليس `_id` لمستندات MongoDB (تُولَّد هناك تلقائياً). */
 export function randomId() {
-  return crypto.randomUUID();
+  return new ObjectId().toString();
 }
 
 export function sha256(value: string) {

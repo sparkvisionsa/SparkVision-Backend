@@ -57,12 +57,12 @@ let AuthTrackingController = class AuthTrackingController {
         };
     }
     async register(req, res, body) {
-        const result = await (0, service_1.registerUser)(req, body);
+        await (0, service_1.registerUser)(req, body);
+    }
+    async setActiveCompany(req, res, body) {
+        const result = await (0, service_1.setActiveCompanyForUser)(req, body);
         (0, context_1.applyContextCookies)(res, result.context);
-        return {
-            user: result.user,
-            guestAccess: result.guestAccess,
-        };
+        return result.payload;
     }
     async logout(req, res) {
         const result = await (0, service_1.logoutUser)(req);
@@ -128,6 +128,15 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, Object]),
     __metadata("design:returntype", Promise)
 ], AuthTrackingController.prototype, "register", null);
+__decorate([
+    (0, common_1.Post)("auth/active-company"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, Object]),
+    __metadata("design:returntype", Promise)
+], AuthTrackingController.prototype, "setActiveCompany", null);
 __decorate([
     (0, common_1.Post)("auth/logout"),
     __param(0, (0, common_1.Req)()),

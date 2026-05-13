@@ -12,6 +12,7 @@ import {
   submitTrackingActions,
   updateUserProfile,
   getUserProfile,
+  setActiveCompanyForUser,
 } from "@/server/auth-tracking/service";
 
 const sessionSchema = z.object({
@@ -69,12 +70,18 @@ export class AuthTrackingController {
     @Res({ passthrough: true }) res: Response,
     @Body() body: unknown,
   ) {
-    const result = await registerUser(req, body);
+    await registerUser(req, body);
+  }
+
+  @Post("auth/active-company")
+  async setActiveCompany(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await setActiveCompanyForUser(req, body);
     applyContextCookies(res, result.context);
-    return {
-      user: result.user,
-      guestAccess: result.guestAccess,
-    };
+    return result.payload;
   }
 
   @Post("auth/logout")

@@ -8,13 +8,24 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ClientsModule = void 0;
 const common_1 = require("@nestjs/common");
+const mongoose_1 = require("@nestjs/mongoose");
 const clients_api_controllers_1 = require("./clients-api.controllers");
 const clients_mongo_service_1 = require("./clients-mongo.service");
+const client_schema_1 = require("./schemas/client.schema");
+const client_type_schema_1 = require("./schemas/client-type.schema");
+const form_template_schema_1 = require("./schemas/form-template.schema");
 let ClientsModule = class ClientsModule {
 };
 exports.ClientsModule = ClientsModule;
 exports.ClientsModule = ClientsModule = __decorate([
     (0, common_1.Module)({
+        imports: [
+            mongoose_1.MongooseModule.forFeature([
+                { name: client_type_schema_1.ClientType.name, schema: client_type_schema_1.ClientTypeSchema },
+                { name: form_template_schema_1.FormTemplate.name, schema: form_template_schema_1.FormTemplateSchema },
+                { name: client_schema_1.Client.name, schema: client_schema_1.ClientSchema },
+            ]),
+        ],
         controllers: [clients_api_controllers_1.ClientTypesController, clients_api_controllers_1.FormTemplatesController, clients_api_controllers_1.ClientsCrudController],
         providers: [clients_mongo_service_1.ClientsMongoService],
     })
