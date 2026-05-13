@@ -28,6 +28,10 @@ const ALLOWED_FIELD_TYPES = [
     "email",
     "tel",
     "select",
+    "file",
+    "region",
+    "city",
+    "neighborhood",
 ];
 function normalizeOptions(raw) {
     if (!Array.isArray(raw))
@@ -62,6 +66,10 @@ function normalizeFields(raw) {
             const options = normalizeOptions(rec.options);
             out.push({ id, label, fieldType: "select", options });
         }
+        else if (fieldType === "file") {
+            const multiple = rec.multiple === true;
+            out.push({ id, label, fieldType: "file", multiple });
+        }
         else {
             out.push({ id, label, fieldType });
         }
@@ -89,13 +97,21 @@ function normalizeClientBody(body) {
         return null;
     const address = typeof body.address === "string" ? body.address.trim() : "";
     const clientAddress = typeof body.clientAddress === "string" ? body.clientAddress.trim() : "";
-    const formTemplateId = typeof body.formTemplateId === "string" && body.formTemplateId ? body.formTemplateId : null;
-    const templateFieldValues = body.templateFieldValues && typeof body.templateFieldValues === "object" && !Array.isArray(body.templateFieldValues)
+    const formTemplateId = typeof body.formTemplateId === "string" && body.formTemplateId
+        ? body.formTemplateId
+        : null;
+    const templateFieldValues = body.templateFieldValues &&
+        typeof body.templateFieldValues === "object" &&
+        !Array.isArray(body.templateFieldValues)
         ? body.templateFieldValues
         : {};
     const bankName = typeof body.bankName === "string" ? body.bankName.trim() : "";
-    const bankAccountAddress = typeof body.bankAccountAddress === "string" ? body.bankAccountAddress.trim() : "";
-    const bankAccountNumber = typeof body.bankAccountNumber === "string" ? body.bankAccountNumber.trim() : "";
+    const bankAccountAddress = typeof body.bankAccountAddress === "string"
+        ? body.bankAccountAddress.trim()
+        : "";
+    const bankAccountNumber = typeof body.bankAccountNumber === "string"
+        ? body.bankAccountNumber.trim()
+        : "";
     return {
         name,
         phone,
@@ -181,12 +197,58 @@ let ClientsMongoService = class ClientsMongoService {
             throw new common_1.NotFoundException({ message: "النوع غير موجود" });
         const count = await this.clientModel.countDocuments({ clientTypeId: id }).exec();
         if (count > 0) {
-            throw new common_1.ConflictException({ message: "لا يمكن حذف النوع لوجود عملاء مرتبطين به" });
+            throw new common_1.ConflictException({
+                message: "لا يمكن حذف النوع لوجود عملاء مرتبطين به",
+            });
         }
         const del = await this.clientTypeModel.deleteOne({ _id: new mongoose_2.Types.ObjectId(id) }).exec();
         if (del.deletedCount === 0)
             throw new common_1.NotFoundException({ message: "النوع غير موجود" });
         return { ok: true };
+    }
+    async addClientFiles(clientId, fieldId, filenames) {
+        if (!mongoose_2.Types.ObjectId.isValid(clientId))
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        const client = await this.clientModel.findById(clientId).exec();
+        if (!client)
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        const existing = Array.isArray(client.templateFieldValues?.[fieldId])
+            ? client.templateFieldValues[fieldId]
+            : [];
+        const merged = [...existing, ...filenames];
+        const row = await this.clientModel
+            .findOneAndUpdate({ _id: new mongoose_2.Types.ObjectId(clientId) }, {
+            $set: {
+                [`templateFieldValues.${fieldId}`]: merged,
+                updatedAt: new Date(),
+            },
+        }, { new: true })
+            .exec();
+        if (!row)
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        return toClientJson(row);
+    }
+    async removeClientFile(clientId, fieldId, filename) {
+        if (!mongoose_2.Types.ObjectId.isValid(clientId))
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        const client = await this.clientModel.findById(clientId).exec();
+        if (!client)
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        const existing = Array.isArray(client.templateFieldValues?.[fieldId])
+            ? client.templateFieldValues[fieldId]
+            : [];
+        const filtered = existing.filter((f) => f !== filename);
+        const row = await this.clientModel
+            .findOneAndUpdate({ _id: new mongoose_2.Types.ObjectId(clientId) }, {
+            $set: {
+                [`templateFieldValues.${fieldId}`]: filtered,
+                updatedAt: new Date(),
+            },
+        }, { new: true })
+            .exec();
+        if (!row)
+            throw new common_1.NotFoundException({ message: "العميل غير موجود" });
+        return toClientJson(row);
     }
     async listFormTemplates() {
         const rows = await this.formTemplateModel.find({}).sort({ updatedAt: -1 }).exec();
@@ -206,7 +268,9 @@ let ClientsMongoService = class ClientsMongoService {
             throw new common_1.BadRequestException({ message: "اسم النموذج مطلوب" });
         const fields = normalizeFields(body.fields);
         if (fields.length === 0) {
-            throw new common_1.BadRequestException({ message: "أضف حقلًا واحدًا على الأقل للنموذج" });
+            throw new common_1.BadRequestException({
+                message: "أضف حقلًا واحدًا على الأقل للنموذج",
+            });
         }
         assertSelectFieldsHaveOptions(fields);
         const created = await this.formTemplateModel.create({ name, fields });
@@ -220,7 +284,9 @@ let ClientsMongoService = class ClientsMongoService {
             throw new common_1.BadRequestException({ message: "اسم النموذج مطلوب" });
         const fields = normalizeFields(body.fields);
         if (fields.length === 0) {
-            throw new common_1.BadRequestException({ message: "أضف حقلًا واحدًا على الأقل للنموذج" });
+            throw new common_1.BadRequestException({
+                message: "أضف حقلًا واحدًا على الأقل للنموذج",
+            });
         }
         assertSelectFieldsHaveOptions(fields);
         const now = new Date();
@@ -257,7 +323,9 @@ let ClientsMongoService = class ClientsMongoService {
     async createClient(body) {
         const normalized = normalizeClientBody(body);
         if (!normalized) {
-            throw new common_1.BadRequestException({ message: "اسم العميل ونوع العميل مطلوبان" });
+            throw new common_1.BadRequestException({
+                message: "اسم العميل ونوع العميل مطلوبان",
+            });
         }
         const typeOk = await this.clientTypeModel.findById(normalized.clientTypeId).exec();
         if (!typeOk)
@@ -275,7 +343,9 @@ let ClientsMongoService = class ClientsMongoService {
             throw new common_1.NotFoundException({ message: "العميل غير موجود" });
         const normalized = normalizeClientBody(body);
         if (!normalized) {
-            throw new common_1.BadRequestException({ message: "اسم العميل ونوع العميل مطلوبان" });
+            throw new common_1.BadRequestException({
+                message: "اسم العميل ونوع العميل مطلوبان",
+            });
         }
         const typeOk = await this.clientTypeModel.findById(normalized.clientTypeId).exec();
         if (!typeOk)
@@ -308,7 +378,7 @@ exports.ClientsMongoService = ClientsMongoService = __decorate([
     __param(0, (0, mongoose_1.InjectModel)(client_type_schema_1.ClientType.name)),
     __param(1, (0, mongoose_1.InjectModel)(form_template_schema_1.FormTemplate.name)),
     __param(2, (0, mongoose_1.InjectModel)(client_schema_1.Client.name)),
-    __metadata("design:paramtypes", [mongoose_2.Model,
+    __metadata("design-paramtypes", [mongoose_2.Model,
         mongoose_2.Model,
         mongoose_2.Model])
 ], ClientsMongoService);

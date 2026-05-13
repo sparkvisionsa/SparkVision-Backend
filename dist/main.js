@@ -14,8 +14,11 @@ const nest_winston_1 = require("nest-winston");
 const winston_1 = require("winston");
 const app_module_1 = require("./app.module");
 const source_indexes_1 = require("./server/source-indexes");
+const path_1 = require("path");
 function parseCorsOrigins() {
-    const raw = process.env.CORS_ORIGINS ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
+    const raw = process.env.CORS_ORIGINS ??
+        process.env.FRONTEND_ORIGIN ??
+        "http://localhost:3000";
     return raw
         .split(",")
         .map((item) => item.trim())
@@ -42,8 +45,24 @@ async function bootstrap() {
         }
         next();
     });
+    app.use((0, helmet_1.default)({
+        contentSecurityPolicy: false,
+        crossOriginResourcePolicy: { policy: "cross-origin" },
+        crossOriginOpenerPolicy: { policy: "unsafe-none" },
+        crossOriginEmbedderPolicy: false,
+    }));
     app.use((0, compression_1.default)());
     app.use((0, cookie_parser_1.default)());
+    app.useStaticAssets((0, path_1.join)(process.cwd(), "uploads"), {
+        prefix: "/uploads",
+        setHeaders: (res, path) => {
+            if (path.endsWith(".pdf")) {
+                res.setHeader("Content-Type", "application/pdf");
+                res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+                res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
+            }
+        },
+    });
     app.enableCors({
         origin: parseCorsOrigins(),
         credentials: true,

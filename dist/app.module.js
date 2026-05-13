@@ -20,8 +20,10 @@ const organization_controller_1 = require("./organization/organization.controlle
 const api_error_filter_1 = require("./common/api-error.filter");
 const database_module_1 = require("./database/database.module");
 const clients_module_1 = require("./clients/clients.module");
+const locations_module_1 = require("./location/locations.module");
 const machine_valuation_module_1 = require("./machine-valuation/machine-valuation.module");
 const assets_module_1 = require("./assets/assets.module");
+const transactions_module_1 = require("./transactions/transactions.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
@@ -30,8 +32,10 @@ exports.AppModule = AppModule = __decorate([
         imports: [
             database_module_1.DatabaseModule,
             clients_module_1.ClientsModule,
+            locations_module_1.LocationsModule,
             machine_valuation_module_1.MachineValuationModule,
             assets_module_1.AssetsModule,
+            transactions_module_1.TransactionsModule,
             config_1.ConfigModule.forRoot({
                 isGlobal: true,
                 envFilePath: [".env.local", ".env"],
