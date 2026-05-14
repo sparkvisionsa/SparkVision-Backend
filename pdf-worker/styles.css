@@ -1,0 +1,601 @@
+@import "styles/components.css";
+
+@page {
+    size: A3 portrait;
+    margin: 0;
+}
+
+:root {
+    --page-width: 297mm;
+    --page-height: 420mm;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    font-family: "DejaVu Sans", sans-serif;
+}
+
+/* ==========================================================================
+   COVER PAGE
+   ========================================================================== */
+
+.cover-page {
+    position: relative;
+    width: var(--page-width);
+    height: var(--page-height);
+    overflow: hidden;
+    color: white;
+    background: #0f766e;
+}
+
+/* ==========================================================================
+   BACKGROUND
+   ========================================================================== */
+
+.bg-gradient {
+    position: absolute;
+    inset: 0;
+
+    background:
+        radial-gradient(
+            circle at top left,
+            rgba(70, 220, 220, 0.25),
+            transparent 35%
+        ),
+        linear-gradient(180deg, #0b5f63 0%, #0d7b82 45%, #0c5960 100%);
+}
+
+.bg-overlay {
+    position: absolute;
+    inset: 0;
+
+    background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, 0.03),
+        transparent 60%
+    );
+}
+
+/* ==========================================================================
+   DECORATIVE CURVES
+   ========================================================================== */
+
+.curve {
+    position: absolute;
+    border: 1.8pt solid rgba(255, 255, 255, 0.45);
+    border-radius: 999px;
+}
+
+.curve-1 {
+    width: 240mm;
+    height: 120mm;
+
+    top: 58mm;
+    left: -90mm;
+}
+
+.curve-2 {
+    width: 250mm;
+    height: 150mm;
+
+    bottom: -20mm;
+    right: -105mm;
+}
+
+/* ==========================================================================
+   HEADER
+   ========================================================================== */
+
+.cover-header {
+    position: absolute;
+
+    top: 20mm;
+    left: 18mm;
+    right: 18mm;
+
+    z-index: 5;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.brand-icon {
+    width: 22mm;
+    height: 10mm;
+
+    border-radius: 20px;
+
+    background: linear-gradient(90deg, white, rgba(255, 255, 255, 0.8));
+}
+
+.brand-text {
+    line-height: 1.1;
+}
+
+.brand-ar {
+    font-size: 18pt;
+    font-weight: 700;
+}
+
+.brand-en {
+    font-size: 11pt;
+    opacity: 0.95;
+}
+
+/* ==========================================================================
+   HERO IMAGE AREA
+   ========================================================================== */
+
+.hero-card {
+    position: absolute;
+
+    top: 92mm;
+    left: 16mm;
+
+    width: 178mm;
+    height: 100mm;
+
+    overflow: hidden;
+
+    border-top-left-radius: 42mm;
+    border-bottom-right-radius: 42mm;
+
+    background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, 0.15),
+        rgba(255, 255, 255, 0.04)
+    );
+
+    z-index: 2;
+}
+
+/* Fake city texture */
+.hero-grid {
+    position: absolute;
+    inset: 0;
+
+    background:
+        repeating-linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.05),
+            rgba(255, 255, 255, 0.05) 1px,
+            transparent 1px,
+            transparent 12px
+        ),
+        repeating-linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.04),
+            rgba(255, 255, 255, 0.04) 1px,
+            transparent 1px,
+            transparent 12px
+        );
+}
+
+.hero-overlay {
+    position: absolute;
+    inset: 0;
+
+    background: linear-gradient(
+        180deg,
+        rgba(255, 140, 0, 0.28),
+        rgba(0, 0, 0, 0.25)
+    );
+}
+
+/* ==========================================================================
+   CONTENT PANEL
+   ========================================================================== */
+
+.content-panel {
+    position: absolute;
+
+    bottom: 42mm;
+    right: 18mm;
+
+    width: 118mm;
+
+    padding: 14mm;
+
+    border-radius: 10mm;
+
+    background: rgba(255, 255, 255, 0.13);
+
+    border: 1px solid rgba(255, 255, 255, 0.12);
+
+    z-index: 6;
+}
+
+.content-panel h1 {
+    margin: 0 0 10mm 0;
+
+    font-size: 22pt;
+    font-weight: 700;
+
+    color: white;
+}
+
+.content-item {
+    margin-bottom: 5mm;
+
+    line-height: 1.8;
+
+    font-size: 11pt;
+}
+
+.label {
+    font-weight: 700;
+}
+
+.value {
+    opacity: 0.96;
+}
+
+/* ==========================================================================
+   META BOXES
+   ========================================================================== */
+
+.meta-row {
+    display: flex;
+    gap: 5mm;
+
+    margin-top: 10mm;
+}
+
+.meta-box {
+    flex: 1;
+
+    padding: 5mm;
+
+    border-radius: 5mm;
+
+    background: rgba(255, 255, 255, 0.08);
+
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.meta-label {
+    font-size: 8pt;
+    opacity: 0.85;
+
+    margin-bottom: 2mm;
+}
+
+.meta-value {
+    font-size: 11pt;
+    font-weight: 700;
+}
+
+/* ==========================================================================
+   FOOTER
+   ========================================================================== */
+
+.cover-footer {
+    position: absolute;
+
+    bottom: 12mm;
+    left: 18mm;
+    right: 18mm;
+
+    display: flex;
+    justify-content: space-between;
+
+    font-size: 8.5pt;
+
+    opacity: 0.92;
+
+    z-index: 5;
+}
+
+/* ==========================================================================
+   PAGE 2
+   ========================================================================== */
+
+.statement-page {
+    position: relative;
+
+    width: var(--page-width);
+    height: var(--page-height);
+
+    padding: 18mm 16mm 20mm 16mm;
+
+    box-sizing: border-box;
+
+    background: white;
+
+    color: #333;
+
+    overflow: hidden;
+
+    font-family: "DejaVu Sans", sans-serif;
+}
+
+/* ==========================================================================
+   WATERMARK
+   ========================================================================== */
+
+.statement-watermark {
+    position: absolute;
+
+    inset: 0;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    font-size: 110pt;
+    font-weight: 700;
+
+    color: rgba(15, 139, 148, 0.04);
+
+    z-index: 0;
+}
+
+/* ==========================================================================
+   HEADER
+   ========================================================================== */
+
+.statement-header {
+    position: relative;
+
+    z-index: 2;
+
+    margin-bottom: 18mm;
+}
+
+.statement-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.logo-mark {
+    width: 22mm;
+    height: 10mm;
+
+    border-radius: 20px;
+
+    background: linear-gradient(90deg, #0f8b94, #1b6b73);
+}
+
+.logo-text {
+    line-height: 1.1;
+}
+
+.logo-ar {
+    font-size: 16pt;
+    font-weight: 700;
+    color: #0f8b94;
+}
+
+.logo-en {
+    font-size: 10pt;
+    color: #1b6b73;
+}
+
+/* ==========================================================================
+   INTRO
+   ========================================================================== */
+
+.statement-intro {
+    position: relative;
+    z-index: 2;
+
+    text-align: center;
+
+    font-size: 10.5pt;
+
+    line-height: 2.1;
+
+    color: #444;
+
+    margin-bottom: 14mm;
+}
+
+.statement-intro p {
+    margin: 0 0 5mm 0;
+}
+
+.highlight {
+    color: #0f8b94;
+    font-weight: 700;
+}
+
+/* ==========================================================================
+   TABLE
+   ========================================================================== */
+
+.statement-table {
+    position: relative;
+    z-index: 2;
+
+    margin-bottom: 16mm;
+}
+
+.table-header {
+    background: #0f8b94;
+
+    color: white;
+
+    text-align: center;
+
+    padding: 3mm;
+
+    font-size: 10pt;
+    font-weight: 700;
+
+    border-radius: 2mm 2mm 0 0;
+}
+
+.statement-table table {
+    width: 100%;
+
+    border-collapse: collapse;
+
+    font-size: 9.5pt;
+}
+
+.statement-table td {
+    border: 1px solid #d8e3e5;
+
+    padding: 4mm;
+
+    text-align: center;
+
+    background: #fafcfc;
+}
+
+/* ==========================================================================
+   VALUE SECTION
+   ========================================================================== */
+
+.statement-value {
+    position: relative;
+    z-index: 2;
+
+    text-align: center;
+
+    margin-top: 12mm;
+}
+
+.value-title {
+    font-size: 10.5pt;
+
+    color: #444;
+
+    margin-bottom: 6mm;
+}
+
+.value-amount {
+    font-size: 11pt;
+
+    color: #0f8b94;
+
+    line-height: 2;
+
+    margin-bottom: 5mm;
+}
+
+.big-value {
+    font-size: 20pt;
+    font-weight: 700;
+
+    color: #1b6b73;
+
+    margin-bottom: 4mm;
+}
+
+.value-note {
+    font-size: 10pt;
+
+    color: #555;
+}
+
+/* ==========================================================================
+   SIGNATURE
+   ========================================================================== */
+
+.signature-section {
+    position: relative;
+    z-index: 2;
+
+    margin-top: 25mm;
+
+    display: flex;
+    justify-content: flex-start;
+}
+
+.signature-box {
+    width: 60mm;
+
+    text-align: center;
+}
+
+.sig-label {
+    font-size: 9pt;
+    color: #666;
+
+    margin-bottom: 3mm;
+}
+
+.sig-name {
+    font-size: 11pt;
+    font-weight: 700;
+
+    color: #1b6b73;
+
+    margin-bottom: 2mm;
+}
+
+.sig-id {
+    font-size: 8.5pt;
+    color: #777;
+
+    margin-bottom: 8mm;
+}
+
+.fake-signature {
+    font-size: 24pt;
+
+    color: #0f8b94;
+
+    transform: rotate(-8deg);
+}
+
+/* ==========================================================================
+   FOOTER
+   ========================================================================== */
+
+.statement-footer {
+    position: absolute;
+
+    bottom: 0;
+    left: 0;
+    right: 0;
+
+    z-index: 2;
+}
+
+.footer-ribbon {
+    position: absolute;
+
+    bottom: 0;
+    left: 0;
+
+    width: 28mm;
+    height: 16mm;
+
+    background: #0f8b94;
+
+    border-top-right-radius: 12mm;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.footer-page {
+    color: white;
+
+    font-size: 11pt;
+    font-weight: 700;
+}
+
+.footer-content {
+    border-top: 2px solid #0f8b94;
+
+    margin: 0 16mm 5mm 16mm;
+
+    padding-top: 4mm;
+
+    display: flex;
+    justify-content: space-between;
+
+    font-size: 8pt;
+
+    color: #666;
+}

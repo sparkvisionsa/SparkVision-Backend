@@ -1,0 +1,563 @@
+/* ==========================================================================
+   TAQDEER DESIGN SYSTEM — Reusable Components
+   ========================================================================== */
+
+/* ------------------------------------------------------------------
+   TOKENS
+   ------------------------------------------------------------------ */
+
+:root {
+    --teal-primary: #0f8b94;
+    --teal-dark: #1b6b73;
+    --teal-faint: rgba(15, 139, 148, 0.04);
+
+    --text-body: #444;
+    --text-muted: #666;
+    --text-subtle: #777;
+
+    --border-light: #d8e3e5;
+    --bg-table-cell: #fafcfc;
+
+    --page-pad-v: 18mm;
+    --page-pad-h: 16mm;
+}
+
+/* ==========================================================================
+   COMPONENT 1 — PAGE LOGO HEADER
+   ========================================================================== */
+
+.c-page-header {
+    position: relative;
+    z-index: 2;
+    margin-bottom: 8mm;
+}
+
+.c-page-header__logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.c-page-header__mark {
+    width: 18mm;
+    height: 8mm;
+    border-radius: 20px;
+    background: linear-gradient(90deg, var(--teal-primary), var(--teal-dark));
+    flex-shrink: 0;
+}
+
+.c-page-header__text {
+    line-height: 1.15;
+}
+
+.c-page-header__ar {
+    font-size: 13pt;
+    font-weight: 700;
+    color: var(--teal-primary);
+}
+
+.c-page-header__en {
+    font-size: 9pt;
+    color: var(--teal-dark);
+}
+
+/* ==========================================================================
+   COMPONENT 2 — SECTION HEADING BAR
+   ========================================================================== */
+
+.c-section-heading {
+    background: var(--teal-primary);
+    color: white;
+    text-align: center;
+    padding: 2.5mm 3mm;
+    font-size: 10pt;
+    font-weight: 700;
+    border-radius: 2mm 2mm 0 0;
+}
+
+.c-section-heading--pill {
+    border-radius: 2mm;
+}
+
+/* ==========================================================================
+   COMPONENT 3 — CHECKBOX OPTION TABLE
+   ========================================================================== */
+
+.c-checkbox-block {
+    margin-bottom: 8mm;
+}
+
+.c-checkbox-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    color: var(--text-body);
+}
+
+.c-checkbox-table td {
+    border: 1px solid var(--border-light);
+    padding: 3.5mm 4mm;
+    text-align: center;
+    background: var(--bg-table-cell);
+}
+
+/* ==========================================================================
+   COMPONENT 4 — BODY TYPOGRAPHY SCALE
+   line-height 1.6 + explicit margin-bottom instead of inflated line-height
+   ========================================================================== */
+
+.c-text-body {
+    font-size: 10.5pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--text-body);
+}
+
+.c-text-primary {
+    font-size: 10.5pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--teal-primary);
+}
+
+.c-text-value {
+    font-size: 12pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--teal-dark);
+    font-weight: 600;
+}
+
+.c-highlight {
+    color: var(--teal-primary);
+    font-weight: 600;
+}
+
+.c-text-small {
+    font-size: 9pt;
+    color: var(--text-muted);
+}
+
+.c-text-tiny {
+    font-size: 8.5pt;
+    color: var(--text-subtle);
+}
+
+/* ==========================================================================
+   COMPONENT 5 — COMPACT LABEL/VALUE TABLE  (.c-table-compact)
+   Right col: teal label. Left col: dark teal bold value, faint bg.
+   Rows separated by hairline, no outer border.
+
+   Usage:
+     <table class="c-table-compact">
+       <tr>
+         <td class="c-table-compact__label">الاسم</td>
+         <td class="c-table-compact__value">حمد بن عبدالله بن ناصر الحمد</td>
+       </tr>
+     </table>
+   ========================================================================== */
+
+.c-table-compact {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+}
+
+.c-table-compact tr {
+    border-bottom: 1px solid var(--border-light);
+}
+
+.c-table-compact tr:last-child {
+    border-bottom: none;
+}
+
+.c-table-compact__label {
+    color: var(--teal-primary);
+    text-align: right;
+    padding: 3.5mm 4mm 3.5mm 6mm;
+    width: 45%;
+    vertical-align: middle;
+}
+
+.c-table-compact__value {
+    color: var(--teal-dark);
+    font-weight: 600;
+    text-align: right;
+    padding: 3.5mm 6mm 3.5mm 4mm;
+    vertical-align: middle;
+    background: var(--bg-table-cell);
+}
+
+/* ==========================================================================
+   COMPONENT 6 — ALTERNATING KEY / VALUE TABLE  (.c-table-kv)
+
+   Each pair of <tr> rows forms a key→value unit:
+     - Odd rows  (.c-table-kv__key)   = light teal heading stripe
+     - Even rows (.c-table-kv__val)   = white/faint background with content
+
+   The component also handles a level-header band (.c-table-kv__level)
+   that spans all columns and marks Level 1 / 2 / 3.
+
+   Usage:
+     <table class="c-table-kv">
+       <tr class="c-table-kv__level">
+         <td colspan="3">الأول (Level 1)</td>
+       </tr>
+       <tr class="c-table-kv__key">
+         <td>التوضيح</td>
+         <td>بيان المدخلات</td>
+         <td>التصنيف</td>
+       </tr>
+       <tr class="c-table-kv__val">
+         <td>هي الأسعار المعلنة …</td>
+         <td>لا توجد أسعار معلنة …</td>
+         <td>لا ينطبق</td>
+       </tr>
+       ... repeat key/val pairs ...
+     </table>
+   ========================================================================== */
+
+.c-table-kv {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    color: var(--text-body);
+    direction: rtl;
+}
+
+/* ── Level banner ─────────────────────────────────────────────────────────── */
+
+.c-table-kv__level td {
+    background: var(--teal-dark);
+    color: white;
+    font-weight: 700;
+    font-size: 10pt;
+    text-align: right;
+    padding: 3mm 4mm;
+    border: 1px solid var(--teal-dark);
+}
+
+/* ── Key row (label stripe) ───────────────────────────────────────────────── */
+
+.c-table-kv__key td {
+    background: rgba(15, 139, 148, 0.1); /* teal-primary @ 10% */
+    color: var(--teal-primary);
+    font-weight: 700;
+    font-size: 9pt;
+    text-align: right;
+    padding: 2.5mm 4mm;
+    border: 1px solid var(--border-light);
+}
+
+/* ── Value row (content) ─────────────────────────────────────────────────── */
+
+.c-table-kv__val td {
+    background: var(--bg-table-cell);
+    color: var(--text-body);
+    font-size: 9.5pt;
+    text-align: right;
+    padding: 3mm 4mm;
+    border: 1px solid var(--border-light);
+    line-height: 1.6;
+}
+
+/* ── Column widths (4 cols: التوضيح | بيان المدخلات | التصنيف | المصدر | الحكم) */
+/* Let the browser distribute evenly; override per page if needed.            */
+.c-table-kv col {
+    width: auto;
+}
+
+/* ==========================================================================
+   TAQDEER DESIGN SYSTEM — Reusable Components
+   ========================================================================== */
+
+/* ------------------------------------------------------------------
+   TOKENS
+   ------------------------------------------------------------------ */
+
+:root {
+    --teal-primary: #0f8b94;
+    --teal-dark: #1b6b73;
+    --teal-faint: rgba(15, 139, 148, 0.04);
+
+    --text-body: #444;
+    --text-muted: #666;
+    --text-subtle: #777;
+
+    --border-light: #d8e3e5;
+    --bg-table-cell: #fafcfc;
+
+    --page-pad-v: 18mm;
+    --page-pad-h: 16mm;
+}
+
+/* ==========================================================================
+   COMPONENT 1 — PAGE LOGO HEADER
+   ========================================================================== */
+
+.c-page-header {
+    position: relative;
+    z-index: 2;
+    margin-bottom: 8mm;
+}
+
+.c-page-header__logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.c-page-header__mark {
+    width: 18mm;
+    height: 8mm;
+    border-radius: 20px;
+    background: linear-gradient(90deg, var(--teal-primary), var(--teal-dark));
+    flex-shrink: 0;
+}
+
+.c-page-header__text {
+    line-height: 1.15;
+}
+
+.c-page-header__ar {
+    font-size: 13pt;
+    font-weight: 700;
+    color: var(--teal-primary);
+}
+
+.c-page-header__en {
+    font-size: 9pt;
+    color: var(--teal-dark);
+}
+
+/* ==========================================================================
+   COMPONENT 2 — SECTION HEADING BAR
+   ========================================================================== */
+
+.c-section-heading {
+    background: var(--teal-primary);
+    color: white;
+    text-align: center;
+    padding: 2.5mm 3mm;
+    font-size: 10pt;
+    font-weight: 700;
+    border-radius: 2mm 2mm 0 0;
+}
+
+.c-section-heading--pill {
+    border-radius: 2mm;
+}
+
+/* ==========================================================================
+   COMPONENT 3 — CHECKBOX OPTION TABLE
+   ========================================================================== */
+
+.c-checkbox-block {
+    margin-bottom: 8mm;
+}
+
+.c-checkbox-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    color: var(--text-body);
+}
+
+.c-checkbox-table td {
+    border: 1px solid var(--border-light);
+    padding: 3.5mm 4mm;
+    text-align: center;
+    background: var(--bg-table-cell);
+}
+
+/* ==========================================================================
+   COMPONENT 4 — BODY TYPOGRAPHY SCALE
+   line-height 1.6 + explicit margin-bottom instead of inflated line-height
+   ========================================================================== */
+
+.c-text-body {
+    font-size: 10.5pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--text-body);
+}
+
+.c-text-primary {
+    font-size: 10.5pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--teal-primary);
+}
+
+.c-text-value {
+    font-size: 12pt;
+    line-height: 1.6;
+    margin-bottom: 3mm;
+    color: var(--teal-dark);
+    font-weight: 600;
+}
+
+.c-highlight {
+    color: var(--teal-primary);
+    font-weight: 600;
+}
+
+.c-text-small {
+    font-size: 9pt;
+    color: var(--text-muted);
+}
+
+.c-text-tiny {
+    font-size: 8.5pt;
+    color: var(--text-subtle);
+}
+
+/* ==========================================================================
+   COMPONENT 5 — COMPACT LABEL/VALUE TABLE  (.c-table-compact)
+   Right col: teal label. Left col: dark teal bold value, faint bg.
+   Rows separated by hairline, no outer border.
+
+   Usage:
+     <table class="c-table-compact">
+       <tr>
+         <td class="c-table-compact__label">الاسم</td>
+         <td class="c-table-compact__value">حمد بن عبدالله بن ناصر الحمد</td>
+       </tr>
+     </table>
+   ========================================================================== */
+
+.c-table-compact {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+}
+
+.c-table-compact tr {
+    border-bottom: 1px solid var(--border-light);
+}
+
+.c-table-compact tr:last-child {
+    border-bottom: none;
+}
+
+.c-table-compact__label {
+    color: var(--teal-primary);
+    text-align: right;
+    padding: 3.5mm 4mm 3.5mm 6mm;
+    width: 45%;
+    vertical-align: middle;
+}
+
+.c-table-compact__value {
+    color: var(--teal-dark);
+    font-weight: 600;
+    text-align: right;
+    padding: 3.5mm 6mm 3.5mm 4mm;
+    vertical-align: middle;
+    background: var(--bg-table-cell);
+}
+
+/* ==========================================================================
+   COMPONENT 6 — DOUBLE COMPACT TABLE  (.c-table-double)
+   Four-column table: two label/value pairs side by side.
+   Mirrors c-table-compact but splits the row into two pairs.
+   Used when you have a dense grid of short key-value facts (e.g. appraiser
+   licence details) and want to use horizontal space efficiently.
+
+   Usage:
+     <table class="c-table-double">
+       <tr>
+         <td class="c-table-double__label">الاسم</td>
+         <td class="c-table-double__value">حمد بن عبدالله</td>
+         <td class="c-table-double__label">تاريخ الترخيص</td>
+         <td class="c-table-double__value">24-04-1438 هـ</td>
+       </tr>
+     </table>
+   ========================================================================== */
+
+.c-table-double {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+}
+
+.c-table-double tr {
+    border-bottom: 1px solid var(--border-light);
+}
+
+.c-table-double tr:last-child {
+    border-bottom: none;
+}
+
+/* Label cells — teal, right-aligned, fixed narrow width */
+.c-table-double__label {
+    color: var(--teal-primary);
+    text-align: right;
+    padding: 3mm 4mm 3mm 2mm;
+    width: 22%; /* ~quarter of page, labels stay compact */
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+/* Value cells — dark teal bold, faint bg */
+.c-table-double__value {
+    color: var(--teal-dark);
+    font-weight: 600;
+    text-align: right;
+    padding: 3mm 2mm 3mm 6mm;
+    width: 28%; /* takes the remaining half of each pair */
+    vertical-align: middle;
+    background: var(--bg-table-cell);
+}
+
+/* Thin visual divider between the two pairs */
+.c-table-double__value:first-of-type {
+    border-left: 2px solid var(--border-light);
+}
+
+/* ==========================================================================
+   COMPONENT 7 — NARRATIVE TABLE  (.c-table-narrative)
+   Two-column table: narrow teal label on the right, wide value on the left.
+   Value column takes ~70% of width to accommodate multi-sentence content.
+   Used for scope-of-work, assumptions, methodology descriptions, etc.
+
+   Usage:
+     <table class="c-table-narrative">
+       <tr>
+         <td class="c-table-narrative__label">الغرض من التقييم</td>
+         <td class="c-table-narrative__value">أغراض إعداد التقارير المالية...</td>
+       </tr>
+     </table>
+   ========================================================================== */
+
+.c-table-narrative {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+}
+
+.c-table-narrative tr {
+    border-bottom: 1px solid var(--border-light);
+}
+
+.c-table-narrative tr:last-child {
+    border-bottom: none;
+}
+
+.c-table-narrative__label {
+    color: var(--teal-primary);
+    text-align: right;
+    padding: 3mm 4mm 3mm 3mm;
+    width: 30%; /* narrow — label is always short */
+    vertical-align: top;
+    white-space: nowrap;
+}
+
+.c-table-narrative__value {
+    color: var(--text-body);
+    text-align: right;
+    padding: 3mm 3mm 3mm 4mm;
+    line-height: 1.7;
+    vertical-align: top;
+    background: var(--bg-table-cell);
+}

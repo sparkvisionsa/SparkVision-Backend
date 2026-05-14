@@ -1,0 +1,120 @@
+{
+  "fontDir": "/usr/share/fonts/truetype/noto",
+  "tx": {
+    "_id": "6841a2b3c4d5e6f7a8b9c0d1",
+    "assignmentNumber": "6299",
+    "assignmentDate": "2025-12-15",
+    "valuationPurpose": "2",
+    "valuationBasis": "1",
+    "ownershipType": "1",
+    "valuationHypothesis": "2",
+    "clientId": "شركة نجوم السلام للاستثمار والتطوير العقاري",
+    "templateId": "T-001",
+    "intendedUse": "تقييم مجمع تجاري في مدينة الزلفي",
+    "templateFieldValues": {
+      "f1": { "label": "العنوان",      "value": "الزلفي، حي النخيل، شارع الملك فهد" },
+      "f2": { "label": "نوع الأصل",   "value": "مجمع تجاري" },
+      "f3": { "label": "مساحة الأصل", "value": "2450" },
+      "f4": { "label": "الاستخدام",   "value": "تجاري" },
+      "f5": { "label": "المعاين",     "value": "م. أحمد العتيبي" },
+      "f6": { "label": "رقم التواصل", "value": "0501234567" },
+      "f7": { "label": "المراجع",     "value": "م. خالد الدوسري" }
+    }
+  },
+  "ev": {
+    "status": "approved",
+    "regionId": "4",
+    "regionName": "منطقة القصيم",
+    "cityId": "401",
+    "cityName": "الزلفي",
+    "neighborhoodId": "40101",
+    "neighborhoodName": "حي النخيل",
+    "assetCategoryId": "2",
+    "propertyTypeId": "28",
+    "propertyCode": "ZLF-2025-0099",
+    "deedNumber": "123456789",
+    "deedDate": "1445-06-15",
+    "ownerName": "محمد بن سعد العنزي",
+    "clientName": "شركة نجوم السلام للاستثمار والتطوير العقاري",
+    "authorizedName": "عبدالله بن محمد الشمري",
+    "landSpace": "2450",
+    "northBoundary": "شارع الملك فهد",  "northLength": "65",
+    "southBoundary": "ملك خاص",          "southLength": "65",
+    "eastBoundary": "ملك خاص",           "eastLength": "37.7",
+    "westBoundary": "شارع فرعي",         "westLength": "37.7",
+    "buildingState": "10002",
+    "floorsCount": "3",
+    "propertyAge": "8",
+    "finishLevel": "23",
+    "buildQuality": "44",
+    "evalDate": "2025-12-10",
+    "completedDate": "2025-12-12",
+    "reportDate": "2025-12-15",
+    "finalAssetValue": "17769600.00",
+    "appraiserDesc": "المجمع التجاري في وضع جيد ومكتمل التشطيبات، يتمتع بموقع استراتيجي على الشارع الرئيسي في مدينة الزلفي مما يعزز قيمته السوقية وعوائده الإيجارية المتوقعة.",
+    "appraiserNotes": "لا توجد نواقص جوهرية تؤثر على القيمة، إلا أن بعض الأجهزة الكهربائية تحتاج إلى صيانة دورية.",
+    "standards": "معايير التقييم الدولية IVS 2025",
+    "scope": "شمل نطاق البحث دراسة السوق المحلي في مدينة الزلفي ومقارنة العقارات المماثلة.",
+    "assumptions": "يُفترض أن جميع مستندات الملكية صحيحة ومكتملة ولا تخضع لأي نزاعات قانونية.",
+    "risks": "قد تتأثر القيمة بتغيرات السوق المحلي أو أي قرارات تنظيمية مستقبلية.",
+    "author1Id": "1210000414",
+    "author1Title": "الرئيس التنفيذي",
+    "comparisonRows": [
+      {
+        "source": "السوق المحلي",
+        "street": "20 م",
+        "roads": "2",
+        "description": "مجمع تجاري مماثل",
+        "total": "19500000",
+        "price": "7500",
+        "landSpace": "2600",
+        "comparisonKind": "بيع",
+        "propertyTypeId": "28",
+        "evalDate": "2025-09-01"
+      },
+      {
+        "source": "السوق المحلي",
+        "street": "15 م",
+        "roads": "1",
+        "description": "عمارة تجارية",
+        "total": "14000000",
+        "price": "7000",
+        "landSpace": "2000",
+        "comparisonKind": "بيع",
+        "propertyTypeId": "28",
+        "evalDate": "2025-10-15"
+      }
+    ],
+    "section1Rows": [
+      { "title": "ظروف السوق", "valueM": "—", "colAdj": ["-3", "0"] },
+      { "title": "شروط التمويل", "valueM": "—", "colAdj": ["0", "-2"] }
+    ],
+    "settlementRows": [
+      { "title": "الموقع والإطلالة", "valueM": "جيد جداً", "colAdj": ["-5", "-2"], "inReport": true },
+      { "title": "المساحة",          "valueM": "2450 م²",  "colAdj": ["2",  "5"],  "inReport": true },
+      { "title": "جودة البناء",      "valueM": "ممتاز",    "colAdj": ["3",  "5"],  "inReport": true },
+      { "title": "عمر المبنى",       "valueM": "8 سنوات",  "colAdj": ["-3", "-3"], "inReport": true }
+    ],
+    "settlementBases": ["7500", "7000"],
+    "settlementWeights": ["60", "40"]
+  },
+  "labelMaps": {
+    "valuationPurposes":  { "2": "الشراء" },
+    "valuationBases":     { "1": "القيمة السوقية" },
+    "ownershipTypes":     { "1": "الملكية المطلقة" },
+    "valuationHypotheses":{ "2": "الاستخدام الأعلى والأفضل" },
+    "propertyTypes": {
+      "1": "أرض", "2": "شقة", "3": "فيلا سكنية", "4": "عمارة",
+      "5": "إستراحة", "9": "محل تجاري", "10": "دور",
+      "21": "أرض سكنية", "22": "أرض تجارية", "24": "فندق",
+      "28": "مبنى تجاري", "67": "عمارة سكنية"
+    },
+    "regions": {
+      "1": "منطقة الرياض", "2": "منطقة مكة المكرمة", "3": "منطقة المدينة المنورة",
+      "4": "منطقة القصيم", "5": "المنطقة الشرقية"
+    },
+    "buildingStates": { "10001": "جديد", "10002": "مستخدم", "10003": "تحت الإنشاء" },
+    "finishLevels":   { "23": "تشطيب فاخر", "24": "تشطيب متوسط", "25": "تشطيب عادي" },
+    "buildQuality":   { "44": "ممتاز", "45": "جيد جداً", "46": "ردئ", "10058": "جيد" }
+  }
+}
