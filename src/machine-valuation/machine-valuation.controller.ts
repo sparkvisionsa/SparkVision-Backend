@@ -105,6 +105,17 @@ export class MachineValuationController {
     return this.mvService.listInspectorFiles(id, toMvAccess(context));
   }
 
+  @Get("projects/:id/inspectors")
+  async listProjectInspectors(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.listProjectInspectors(id, toMvAccess(context));
+  }
+
   @Post("projects/:id/inspectorFiles")
   @UseInterceptors(
     FileInterceptor("file", {
@@ -117,13 +128,14 @@ export class MachineValuationController {
     @Res({ passthrough: true }) res: Response,
     @Param("id") id: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body: { locationIds?: unknown },
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     if (!file?.buffer) {
       throw new BadRequestException("لم يُرفع أي ملف.");
     }
-    return this.mvService.uploadInspectorFile(id, file, toMvAccess(context));
+    return this.mvService.uploadInspectorFile(id, file, toMvAccess(context), body?.locationIds);
   }
 
   @Delete("projects/:id/inspectorFiles/:fileId")
@@ -255,6 +267,7 @@ export class MachineValuationController {
       reportData?: unknown;
       locations?: unknown[];
       contacts?: unknown[];
+      inspectionAssignments?: unknown[];
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
     },
@@ -277,6 +290,7 @@ export class MachineValuationController {
       reportData?: unknown;
       locations?: unknown[];
       contacts?: unknown[];
+      inspectionAssignments?: unknown[];
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
     },

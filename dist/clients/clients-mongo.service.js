@@ -378,7 +378,7 @@ exports.ClientsMongoService = ClientsMongoService = __decorate([
     __param(0, (0, mongoose_1.InjectModel)(client_type_schema_1.ClientType.name)),
     __param(1, (0, mongoose_1.InjectModel)(form_template_schema_1.FormTemplate.name)),
     __param(2, (0, mongoose_1.InjectModel)(client_schema_1.Client.name)),
-    __metadata("design-paramtypes", [mongoose_2.Model,
+    __metadata("design:paramtypes", [mongoose_2.Model,
         mongoose_2.Model,
         mongoose_2.Model])
 ], ClientsMongoService);

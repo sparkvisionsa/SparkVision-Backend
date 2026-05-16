@@ -79,24 +79,40 @@ function sanitizeProjectLocations(value, strict = true) {
     }
     return value
         .slice(0, 10)
-        .map((item) => {
+        .map((item, index) => {
         const data = item && typeof item === "object" && !Array.isArray(item)
             ? item
             : {};
+        const id = sanitizeOptionalText(data.id ?? data.siteId ?? data.locationId ?? data._id, 80) ||
+            `site-${index + 1}`;
         const region = sanitizeOptionalText(data.region, 120);
         const city = sanitizeOptionalText(data.city, 120);
         const latitude = sanitizeCoordinate(data.latitude ?? data.lat, "lat");
         const longitude = sanitizeCoordinate(data.longitude ?? data.lng, "lng");
         const mapUrl = sanitizeOptionalText(data.mapUrl ?? data.url, 600);
-        if (!region && !city && latitude === null && longitude === null && !mapUrl) {
+        const name = sanitizeOptionalText(data.name ?? data.label ?? data.title, 120);
+        const primaryPhone = sanitizeOptionalText(data.primaryPhone ?? data.primaryContactPhone ?? data.contactPhone ?? data.phone, 60);
+        const secondaryPhone = sanitizeOptionalText(data.secondaryPhone ?? data.secondaryContactPhone ?? data.backupPhone ?? data.alternatePhone, 60);
+        if (!name &&
+            !region &&
+            !city &&
+            latitude === null &&
+            longitude === null &&
+            !mapUrl &&
+            !primaryPhone &&
+            !secondaryPhone) {
             return null;
         }
         return {
+            id,
+            ...(name ? { name } : {}),
             region,
             city,
             latitude,
             longitude,
             ...(mapUrl ? { mapUrl } : {}),
+            ...(primaryPhone ? { primaryPhone } : {}),
+            ...(secondaryPhone ? { secondaryPhone } : {}),
         };
     })
         .filter((item) => item != null);
@@ -110,7 +126,7 @@ function sanitizeProjectContacts(value, strict = true) {
         throw new common_1.BadRequestException("contacts must be an array");
     }
     return value
-        .slice(0, 10)
+        .slice(0, 20)
         .flatMap((item, index) => {
         if (typeof item === "string") {
             const phone = sanitizeOptionalText(item, 60);
@@ -121,10 +137,225 @@ function sanitizeProjectContacts(value, strict = true) {
         const data = item && typeof item === "object" && !Array.isArray(item)
             ? item
             : {};
-        const type = data.type === "secondary" ? "secondary" : "primary";
-        const phone = sanitizeOptionalText(data.phone ?? data.value ?? data.number, 60);
-        return phone ? [{ type, phone }] : [];
+        const primaryPhone = sanitizeOptionalText(data.primaryPhone ?? data.primaryContactPhone ?? data.contactPhone, 60);
+        const secondaryPhone = sanitizeOptionalText(data.secondaryPhone ?? data.secondaryContactPhone ?? data.backupPhone ?? data.alternatePhone, 60);
+        const type = data.type === "secondary" || (!data.type && !data.phone && !data.value && !data.number && secondaryPhone)
+            ? "secondary"
+            : "primary";
+        const phone = sanitizeOptionalText(data.phone ?? data.value ?? data.number ?? (type === "secondary" ? secondaryPhone : primaryPhone), 60);
+        const locationId = sanitizeOptionalText(data.locationId ?? data.siteId, 80);
+        const rawLocationIndex = Number(data.locationIndex ?? data.siteIndex);
+        const locationIndex = Number.isInteger(rawLocationIndex) && rawLocationIndex >= 0 && rawLocationIndex < 10
+            ? rawLocationIndex
+            : undefined;
+        const locationName = sanitizeOptionalText(data.locationName ?? data.siteName, 120);
+        return phone
+            ? [
+                {
+                    type,
+                    phone,
+                    ...(locationId ? { locationId } : {}),
+                    ...(locationIndex !== undefined ? { locationIndex } : {}),
+                    ...(locationName ? { locationName } : {}),
+                },
+            ]
+            : [];
     });
+}
+function mergeProjectContactsWithLocationPhones(contactsRaw, locations, strict = true) {
+    const rawContacts = sanitizeProjectContacts(contactsRaw, strict);
+    const hasExplicitContactLinks = rawContacts.some((contact) => contact.locationId || typeof contact.locationIndex === "number" || contact.locationName);
+    const typeOccurrence = new Map();
+    const contacts = rawContacts.map((contact) => {
+        if (!hasExplicitContactLinks && locations.length > 0) {
+            const occurrence = typeOccurrence.get(contact.type) ?? 0;
+            typeOccurrence.set(contact.type, occurrence + 1);
+            const locationIndex = Math.min(occurrence, locations.length - 1);
+            const location = locations[locationIndex];
+            return {
+                ...contact,
+                locationIndex,
+                ...(location?.id ? { locationId: location.id } : {}),
+                ...(location?.name ? { locationName: location.name } : {}),
+            };
+        }
+        const location = contact.locationId
+            ? locations.find((item) => item.id === contact.locationId)
+            : typeof contact.locationIndex === "number"
+                ? locations[contact.locationIndex]
+                : undefined;
+        return {
+            ...contact,
+            ...(location?.id && !contact.locationId ? { locationId: location.id } : {}),
+            ...(location?.name && !contact.locationName ? { locationName: location.name } : {}),
+        };
+    });
+    const contactKey = (contact) => contact.locationId
+        ? `${contact.type}:id:${contact.locationId}`
+        : `${contact.type}:index:${contact.locationIndex ?? 0}`;
+    const existing = new Set(contacts.map(contactKey));
+    for (const [index, location] of locations.slice(0, 10).entries()) {
+        const locationId = sanitizeOptionalText(location.id, 80) || `site-${index + 1}`;
+        const locationName = sanitizeOptionalText(location.name, 120);
+        const primaryPhone = sanitizeOptionalText(location.primaryPhone, 60);
+        if (primaryPhone && !existing.has(`primary:id:${locationId}`) && !existing.has(`primary:index:${index}`)) {
+            contacts.push({
+                type: "primary",
+                phone: primaryPhone,
+                locationId,
+                locationIndex: index,
+                ...(locationName ? { locationName } : {}),
+            });
+            existing.add(`primary:id:${locationId}`);
+        }
+        const secondaryPhone = sanitizeOptionalText(location.secondaryPhone, 60);
+        if (secondaryPhone && !existing.has(`secondary:id:${locationId}`) && !existing.has(`secondary:index:${index}`)) {
+            contacts.push({
+                type: "secondary",
+                phone: secondaryPhone,
+                locationId,
+                locationIndex: index,
+                ...(locationName ? { locationName } : {}),
+            });
+            existing.add(`secondary:id:${locationId}`);
+        }
+    }
+    return contacts.slice(0, 20);
+}
+function mergeProjectLocationsWithContacts(locations, contacts) {
+    const hasExplicitContactLinks = contacts.some((contact) => contact.locationId || typeof contact.locationIndex === "number" || contact.locationName);
+    const unlinkedPrimaryContacts = hasExplicitContactLinks
+        ? []
+        : contacts.filter((contact) => contact.type === "primary");
+    const unlinkedSecondaryContacts = hasExplicitContactLinks
+        ? []
+        : contacts.filter((contact) => contact.type === "secondary");
+    return locations.map((location, index) => {
+        const locationId = sanitizeOptionalText(location.id, 80) || `site-${index + 1}`;
+        const locationName = sanitizeOptionalText(location.name, 120);
+        const linkedContacts = hasExplicitContactLinks
+            ? contacts.filter((contact) => {
+                if (contact.locationId && contact.locationId === locationId)
+                    return true;
+                if (typeof contact.locationIndex === "number" && contact.locationIndex === index)
+                    return true;
+                return !!contact.locationName && !!locationName && contact.locationName === locationName;
+            })
+            : [unlinkedPrimaryContacts[index], unlinkedSecondaryContacts[index]].filter((contact) => contact != null);
+        const primaryPhone = sanitizeOptionalText(location.primaryPhone, 60) ||
+            linkedContacts.find((contact) => contact.type === "primary")?.phone ||
+            "";
+        const secondaryPhone = sanitizeOptionalText(location.secondaryPhone, 60) ||
+            linkedContacts.find((contact) => contact.type === "secondary")?.phone ||
+            "";
+        return {
+            ...location,
+            id: locationId,
+            ...(primaryPhone ? { primaryPhone } : {}),
+            ...(secondaryPhone ? { secondaryPhone } : {}),
+        };
+    });
+}
+function parseStringArrayField(value) {
+    if (Array.isArray(value))
+        return value;
+    if (typeof value !== "string")
+        return [];
+    const trimmed = value.trim();
+    if (!trimmed)
+        return [];
+    try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed))
+            return parsed;
+    }
+    catch {
+    }
+    return trimmed.split(",");
+}
+function sanitizeLocationIdSelection(value, locations) {
+    const allowed = new Set(locations
+        .map((location, index) => sanitizeOptionalText(location.id, 80) || `site-${index + 1}`)
+        .filter(Boolean));
+    const raw = parseStringArrayField(value);
+    const out = [];
+    const seen = new Set();
+    for (const item of raw) {
+        const id = sanitizeOptionalText(item, 80);
+        if (!id || id === "__all__" || id === "all")
+            return [];
+        if (allowed.size > 0 && !allowed.has(id))
+            continue;
+        if (seen.has(id))
+            continue;
+        seen.add(id);
+        out.push(id);
+        if (out.length >= 20)
+            break;
+    }
+    return out;
+}
+function coerceDate(value, fallback) {
+    if (value instanceof Date && !Number.isNaN(value.getTime()))
+        return value;
+    if (typeof value === "string" || typeof value === "number") {
+        const parsed = new Date(value);
+        if (!Number.isNaN(parsed.getTime()))
+            return parsed;
+    }
+    return fallback;
+}
+function sanitizeInspectionAssignments(value, locations, assignedBy) {
+    if (value === undefined || value === null)
+        return [];
+    if (!Array.isArray(value))
+        throw new common_1.BadRequestException("inspectionAssignments must be an array");
+    const now = new Date();
+    const out = [];
+    const seen = new Set();
+    for (const item of value.slice(0, 50)) {
+        const data = item && typeof item === "object" && !Array.isArray(item)
+            ? item
+            : {};
+        const inspectorUserId = sanitizeOptionalText(data.inspectorUserId ?? data.userId ?? data.id, 80);
+        const inspectorName = sanitizeOptionalText(data.inspectorName ?? data.name ?? data.username, 180);
+        if (!inspectorUserId || !inspectorName)
+            continue;
+        const locationIds = sanitizeLocationIdSelection(data.locationIds, locations);
+        const key = `${inspectorUserId}:${locationIds.length > 0 ? locationIds.join("|") : "all"}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push({
+            id: sanitizeOptionalText(data.id, 80) || (0, node_crypto_1.randomUUID)(),
+            inspectorUserId,
+            inspectorName,
+            ...(locationIds.length > 0 ? { locationIds } : {}),
+            assignedBy: typeof data.assignedBy === "string"
+                ? sanitizeOptionalText(data.assignedBy, 80) || null
+                : assignedBy ?? null,
+            createdAt: coerceDate(data.createdAt, now),
+            updatedAt: coerceDate(data.updatedAt, now),
+        });
+    }
+    return out;
+}
+function serializeInspectionAssignment(row) {
+    const r = row;
+    const now = new Date();
+    const locationIds = parseStringArrayField(r.locationIds)
+        .map((item) => sanitizeOptionalText(item, 80))
+        .filter(Boolean)
+        .slice(0, 20);
+    return {
+        id: sanitizeOptionalText(r.id, 80) || (0, node_crypto_1.randomUUID)(),
+        inspectorUserId: sanitizeOptionalText(r.inspectorUserId ?? r.userId, 80),
+        inspectorName: sanitizeOptionalText(r.inspectorName ?? r.name ?? r.username, 180),
+        locationIds,
+        assignedBy: r.assignedBy != null ? sanitizeOptionalText(r.assignedBy, 80) || null : null,
+        createdAt: coerceDate(r.createdAt, now).toISOString(),
+        updatedAt: coerceDate(r.updatedAt, now).toISOString(),
+    };
 }
 function sanitizeIsoDateOnly(value) {
     const text = sanitizeOptionalText(value, 32);
@@ -145,24 +376,154 @@ function sanitizeFinalValue(value) {
         return null;
     return Math.max(0, Math.round(n * 100) / 100);
 }
+function sanitizeReportTeamMembers(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .slice(0, 12)
+        .map((item, index) => {
+        const data = item && typeof item === "object" && !Array.isArray(item)
+            ? item
+            : {};
+        const name = sanitizeOptionalText(data.name, 180);
+        const title = sanitizeOptionalText(data.title, 180);
+        const membershipNo = sanitizeOptionalText(data.membershipNo, 80);
+        const role = sanitizeOptionalText(data.role, 500);
+        if (!name && !title && !membershipNo && !role)
+            return null;
+        return {
+            id: sanitizeOptionalText(data.id, 80) || `member-${index + 1}`,
+            name,
+            ...(title ? { title } : {}),
+            ...(membershipNo ? { membershipNo } : {}),
+            ...(role ? { role } : {}),
+        };
+    })
+        .filter((item) => item != null);
+}
+function sanitizeReportTextOverrides(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return {};
+    const out = {};
+    for (const [rawKey, rawValue] of Object.entries(value).slice(0, 260)) {
+        const key = sanitizeOptionalText(rawKey, 180);
+        if (!key)
+            continue;
+        out[key] = sanitizeOptionalText(rawValue, 4000);
+    }
+    return out;
+}
+function sanitizeReportEditableSections(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .slice(0, 40)
+        .map((item, index) => {
+        const data = item && typeof item === "object" && !Array.isArray(item)
+            ? item
+            : {};
+        const title = sanitizeOptionalText(data.title, 220);
+        const body = sanitizeOptionalText(data.body, 50_000);
+        if (!title && !body)
+            return null;
+        return {
+            id: sanitizeOptionalText(data.id, 120) || `section-${index + 1}`,
+            title: title || "قسم جديد",
+            body,
+        };
+    })
+        .filter((item) => item != null);
+}
+function sanitizeReportInsertedBlockKind(value) {
+    return value === "paragraph" || value === "image" ? value : "heading";
+}
+function sanitizeReportInsertedBlocks(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .slice(0, 120)
+        .map((item, index) => {
+        const data = item && typeof item === "object" && !Array.isArray(item)
+            ? item
+            : {};
+        const kind = sanitizeReportInsertedBlockKind(data.kind);
+        const content = sanitizeOptionalText(data.content, 50_000);
+        const imageDataUrl = sanitizeOptionalText(data.imageDataUrl, 10_000_000);
+        const caption = sanitizeOptionalText(data.caption, 2000);
+        if (kind === "image" && !imageDataUrl)
+            return null;
+        return {
+            id: sanitizeOptionalText(data.id, 120) || `block-${index + 1}`,
+            anchorId: sanitizeOptionalText(data.anchorId, 180) || "report-cover",
+            kind,
+            ...(content ? { content } : {}),
+            ...(imageDataUrl ? { imageDataUrl } : {}),
+            ...(caption ? { caption } : {}),
+        };
+    })
+        .filter((item) => item != null);
+}
 function sanitizeReportData(raw) {
     const data = raw && typeof raw === "object" ? raw : {};
     return {
+        reportReference: sanitizeOptionalText(data.reportReference, 120),
+        reportTitle: sanitizeOptionalText(data.reportTitle, 220),
         valuationMethod: sanitizeOptionalText(data.valuationMethod, 120),
         valuationPurpose: sanitizeOptionalText(data.valuationPurpose, 120),
         valuePremise: sanitizeOptionalText(data.valuePremise, 120),
+        valuationBasis: sanitizeOptionalText(data.valuationBasis, 220),
+        valuationBasisDefinition: sanitizeOptionalText(data.valuationBasisDefinition, 2000),
         includeAssetImages: data.includeAssetImages !== false,
         includeValuationAccountImages: data.includeValuationAccountImages !== false,
         reportIssueDate: sanitizeIsoDateOnly(data.reportIssueDate),
+        agreementDate: sanitizeIsoDateOnly(data.agreementDate),
         inspectionDate: sanitizeIsoDateOnly(data.inspectionDate),
         valuationDate: sanitizeIsoDateOnly(data.valuationDate),
         clientName: sanitizeOptionalText(data.clientName, 180),
         clientEmail: sanitizeOptionalText(data.clientEmail, 180),
         clientPhone: sanitizeOptionalText(data.clientPhone, 60),
+        clientLegalType: sanitizeOptionalText(data.clientLegalType, 180),
+        clientActivity: sanitizeOptionalText(data.clientActivity, 240),
+        clientRepresentativeName: sanitizeOptionalText(data.clientRepresentativeName, 180),
+        clientRepresentativeRole: sanitizeOptionalText(data.clientRepresentativeRole, 180),
+        intendedUsers: sanitizeOptionalText(data.intendedUsers, 500),
+        intendedUse: sanitizeOptionalText(data.intendedUse, 1000),
+        valuationFirmName: sanitizeOptionalText(data.valuationFirmName, 220),
+        valuationFirmLicense: sanitizeOptionalText(data.valuationFirmLicense, 120),
+        valuationFirmAddress: sanitizeOptionalText(data.valuationFirmAddress, 600),
+        leadValuerName: sanitizeOptionalText(data.leadValuerName, 180),
+        leadValuerTitle: sanitizeOptionalText(data.leadValuerTitle, 180),
+        leadValuerMembershipNo: sanitizeOptionalText(data.leadValuerMembershipNo, 80),
+        reportTypeLabel: sanitizeOptionalText(data.reportTypeLabel, 120),
+        standardsVersion: sanitizeOptionalText(data.standardsVersion, 220),
+        scopeOfWorkDetails: sanitizeOptionalText(data.scopeOfWorkDetails, 6000),
+        useRestriction: sanitizeOptionalText(data.useRestriction, 3000),
+        externalSpecialistUse: sanitizeOptionalText(data.externalSpecialistUse, 2000),
+        esgConsiderations: sanitizeOptionalText(data.esgConsiderations, 2000),
+        informationSources: sanitizeOptionalText(data.informationSources, 6000),
+        assetSubjectDescription: sanitizeOptionalText(data.assetSubjectDescription, 4000),
+        assetDetailedDescription: sanitizeOptionalText(data.assetDetailedDescription, 6000),
+        inspectionLocation: sanitizeOptionalText(data.inspectionLocation, 500),
+        inspectionMapUrl: sanitizeOptionalText(data.inspectionMapUrl, 800),
+        currencyLabel: sanitizeOptionalText(data.currencyLabel, 120),
+        methodologyRationale: sanitizeOptionalText(data.methodologyRationale, 6000),
+        costApproachDetails: sanitizeOptionalText(data.costApproachDetails, 6000),
+        valuationTeam: sanitizeReportTeamMembers(data.valuationTeam),
         importantAssumptions: sanitizeOptionalText(data.importantAssumptions, 4000),
         specialAssumptions: sanitizeOptionalText(data.specialAssumptions, 4000),
         finalValue: sanitizeFinalValue(data.finalValue),
         finalValueWords: sanitizeOptionalText(data.finalValueWords, 500),
+        reportPresentationDraft: data.reportPresentationDraft !== false,
+        receivedClientDocumentsHtml: sanitizeOptionalText(data.receivedClientDocumentsHtml, 50_000),
+        sceRegistrationCertificateHtml: sanitizeOptionalText(data.sceRegistrationCertificateHtml, 50_000),
+        reportTextOverrides: sanitizeReportTextOverrides(data.reportTextOverrides),
+        reportIntroExtraHtml: sanitizeOptionalText(data.reportIntroExtraHtml, 50_000),
+        reportNarrativeB1: sanitizeOptionalText(data.reportNarrativeB1, 50_000),
+        reportNarrativeB2: sanitizeOptionalText(data.reportNarrativeB2, 50_000),
+        reportNarrativeB3: sanitizeOptionalText(data.reportNarrativeB3, 50_000),
+        reportNarrativeB4: sanitizeOptionalText(data.reportNarrativeB4, 50_000),
+        reportEditableSections: sanitizeReportEditableSections(data.reportEditableSections),
+        reportInsertedBlocks: sanitizeReportInsertedBlocks(data.reportInsertedBlocks),
     };
 }
 const MV_VALUATION_WORKSPACE_MAX_JSON_CHARS = 9_500_000;
@@ -2132,6 +2493,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             reportType: 1,
             locations: 1,
             contacts: 1,
+            inspectionAssignments: 1,
         };
         let projects;
         if (ctx.isSuperAdmin) {
@@ -2239,6 +2601,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 reportType: projectReportType(p),
                 locations: sanitizeProjectLocations(p.locations, false),
                 contacts: sanitizeProjectContacts(p.contacts, false),
+                inspectionAssignments: sanitizeInspectionAssignments(p.inspectionAssignments, sanitizeProjectLocations(p.locations, false)).map(serializeInspectionAssignment),
                 createdByUserId: (() => {
                     const id = (0, object_id_util_1.tryCoerceToObjectId)(p.userId);
                     return id?.toString() ?? (typeof p.userId === "string" ? p.userId : null);
@@ -2288,8 +2651,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const db = await (0, mongodb_2.getMongoDb)();
         const now = new Date();
         const reportType = normalizeReportType(reportTypeRaw);
-        const locations = sanitizeProjectLocations(locationsRaw);
-        const contacts = sanitizeProjectContacts(contactsRaw);
+        let locations = sanitizeProjectLocations(locationsRaw);
+        const contacts = mergeProjectContactsWithLocationPhones(contactsRaw, locations);
+        locations = mergeProjectLocationsWithContacts(locations, contacts);
         const doc = {
             name: n,
             companyId: resolvedCompanyId,
@@ -2300,6 +2664,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             reportData: {},
             locations,
             contacts,
+            inspectionAssignments: [],
             inspectorFiles: [],
             ...(uid ? { userId: uid } : {}),
         };
@@ -2322,13 +2687,14 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             subProjectCount: DEFAULT_PROJECT_SUBFOLDERS.length,
             createdByUserId: uid?.toString() ?? null,
             createdByName: null,
+            inspectionAssignments: [],
             inspectorFiles: [],
         };
     }
     async updateProject(id, ctx, body) {
         const db = await (0, mongodb_2.getMongoDb)();
         const _id = toId(id);
-        await this.loadProjectForAccess(db, _id, ctx);
+        const currentProject = await this.loadProjectForAccess(db, _id, ctx);
         const now = new Date();
         const b = body ?? {};
         const $set = { updatedAt: now };
@@ -2347,11 +2713,29 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         if (b.reportData !== undefined) {
             $set.reportData = sanitizeReportData(b.reportData);
         }
+        let nextLocationsForContactMerge = null;
         if (b.locations !== undefined) {
-            $set.locations = sanitizeProjectLocations(b.locations);
+            nextLocationsForContactMerge = sanitizeProjectLocations(b.locations);
         }
+        let nextContactsForLocationMerge = null;
         if (b.contacts !== undefined) {
-            $set.contacts = sanitizeProjectContacts(b.contacts);
+            nextContactsForLocationMerge = mergeProjectContactsWithLocationPhones(b.contacts, nextLocationsForContactMerge ?? []);
+        }
+        else if (nextLocationsForContactMerge?.some((location) => location.primaryPhone || location.secondaryPhone)) {
+            nextContactsForLocationMerge = mergeProjectContactsWithLocationPhones([], nextLocationsForContactMerge);
+        }
+        if (nextLocationsForContactMerge) {
+            $set.locations = nextContactsForLocationMerge
+                ? mergeProjectLocationsWithContacts(nextLocationsForContactMerge, nextContactsForLocationMerge)
+                : nextLocationsForContactMerge;
+        }
+        if (nextContactsForLocationMerge) {
+            $set.contacts = nextContactsForLocationMerge;
+        }
+        if (b.inspectionAssignments !== undefined) {
+            const assignmentLocations = nextLocationsForContactMerge ??
+                sanitizeProjectLocations(currentProject.locations, false);
+            $set.inspectionAssignments = sanitizeInspectionAssignments(b.inspectionAssignments, assignmentLocations, ctx.userId);
         }
         if (b.valuationAccountingWorkspace !== undefined) {
             if (b.valuationAccountingWorkspace === null) {
@@ -2392,6 +2776,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 reportData: sanitizeReportData(updated.reportData),
                 locations: sanitizeProjectLocations(updated.locations, false),
                 contacts: sanitizeProjectContacts(updated.contacts, false),
+                inspectionAssignments: sanitizeInspectionAssignments(updated.inspectionAssignments, sanitizeProjectLocations(updated.locations, false)).map(serializeInspectionAssignment),
                 createdByUserId: (0, object_id_util_1.tryCoerceToObjectId)(updated.userId)?.toString() ??
                     (typeof updated.userId === "string" ? updated.userId : null),
                 createdByName: null,
@@ -2518,6 +2903,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 reportData: sanitizeReportData(project.reportData),
                 locations: sanitizeProjectLocations(project.locations, false),
                 contacts: sanitizeProjectContacts(project.contacts, false),
+                inspectionAssignments: sanitizeInspectionAssignments(project.inspectionAssignments, sanitizeProjectLocations(project.locations, false)).map(serializeInspectionAssignment),
                 sheetCount,
                 subProjectCount: merged.length,
                 createdByUserId: creatorOid?.toString() ??
@@ -2575,7 +2961,39 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             files: files.map(inspector_files_util_1.serializeInspectorFileForClient),
         };
     }
-    async uploadInspectorFile(projectId, file, ctx) {
+    async listProjectInspectors(projectId, ctx) {
+        const db = await (0, mongodb_2.getMongoDb)();
+        const _id = toId(projectId);
+        const project = await this.loadProjectForAccess(db, _id, ctx);
+        const companyObjectId = (0, object_id_util_1.tryCoerceToObjectId)(project.companyId) ??
+            (ctx.companyId ? (0, object_id_util_1.tryParseObjectId)(ctx.companyId) : null);
+        if (!companyObjectId) {
+            return { inspectors: [] };
+        }
+        const { users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+        const memberLinks = await userCompanyMemberships.find({ companyId: companyObjectId }).toArray();
+        const roleByUserId = new Map(memberLinks.map((m) => [m.userId.toString(), m.role]));
+        const memberIds = memberLinks.map((m) => m.userId);
+        if (memberIds.length === 0) {
+            return { inspectors: [] };
+        }
+        const rows = await users
+            .find({ _id: { $in: memberIds } })
+            .sort({ username: 1 })
+            .limit(500)
+            .toArray();
+        return {
+            inspectors: rows
+                .filter((u) => roleByUserId.get(u._id.toString()) === "inspector" || u.role === "inspector")
+                .map((u) => ({
+                id: u._id.toString(),
+                username: String(u.username ?? ""),
+                email: u.email ?? null,
+                phone: u.phone ?? null,
+            })),
+        };
+    }
+    async uploadInspectorFile(projectId, file, ctx, locationIdsRaw) {
         if (!file?.buffer?.length) {
             throw new common_1.BadRequestException("ملف فارغ أو مفقود.");
         }
@@ -2585,7 +3003,8 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const decodedName = sanitizeUploadedFileName((0, sheet_rows_util_1.decodeUploadFilename)(file.originalname || "upload"));
         const db = await (0, mongodb_2.getMongoDb)();
         const _id = toId(projectId);
-        await this.loadProjectForAccess(db, _id, ctx);
+        const project = await this.loadProjectForAccess(db, _id, ctx);
+        const locationIds = sanitizeLocationIdSelection(locationIdsRaw, sanitizeProjectLocations(project.locations, false));
         const logicalType = (0, inspector_files_util_1.inspectorLogicalTypeFromMime)(file.mimetype || "", decodedName);
         const id = (0, node_crypto_1.randomUUID)();
         const now = new Date();
@@ -2618,6 +3037,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             spacesKey: uploaded.key,
             mimeType: file.mimetype || "application/octet-stream",
             sizeBytes: file.buffer.length,
+            ...(locationIds.length > 0 ? { locationIds } : {}),
         };
         await db.collection(collections_2.MV_PROJECTS_COLLECTION).updateOne({ _id }, { $push: { inspectorFiles: row }, $set: { updatedAt: now } });
         const updated = await db.collection(collections_2.MV_PROJECTS_COLLECTION).findOne({ _id });

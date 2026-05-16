@@ -13,11 +13,8 @@ import { DatabaseModule } from "./database/database.module";
 import { ClientsModule } from "./clients/clients.module";
 import { LocationsModule } from "./location/locations.module";
 import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
-<<<<<<< HEAD
 import { AssetsModule } from "./assets/assets.module";
-=======
-import { TransactionsModule } from "./transactions/transactions.module"; // 👈 add this
->>>>>>> 2121466ef76411d7264141305fc6471690b9511c
+import { TransactionsModule } from "./transactions/transactions.module";
 
 @Module({
   imports: [
@@ -25,11 +22,8 @@ import { TransactionsModule } from "./transactions/transactions.module"; // 👈
     ClientsModule,
     LocationsModule,
     MachineValuationModule,
-<<<<<<< HEAD
     AssetsModule,
-=======
     TransactionsModule,
->>>>>>> 2121466ef76411d7264141305fc6471690b9511c
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],

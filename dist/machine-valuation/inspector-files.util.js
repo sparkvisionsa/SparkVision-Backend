@@ -66,6 +66,22 @@ function objectIdishToString(value) {
     const out = String(value).trim();
     return out || undefined;
 }
+function normalizeLocationIds(value) {
+    if (!Array.isArray(value))
+        return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of value) {
+        const id = String(item ?? "").trim().slice(0, 80);
+        if (!id || seen.has(id))
+            continue;
+        seen.add(id);
+        out.push(id);
+        if (out.length >= 20)
+            break;
+    }
+    return out;
+}
 function serializeInspectorFileForClient(row) {
     const r = row;
     const created = r.createdAt;
@@ -83,6 +99,7 @@ function serializeInspectorFileForClient(row) {
         externalUrl: /^https?:\/\//i.test(url) ? url : undefined,
     });
     const sizeBytes = Number(r.sizeBytes);
+    const locationIds = normalizeLocationIds(r.locationIds);
     return {
         id: String(r.id ?? ""),
         name: String(r.name ?? ""),
@@ -95,6 +112,7 @@ function serializeInspectorFileForClient(row) {
         spacesKey,
         gridFsFileId,
         sizeBytes: Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : undefined,
+        locationIds,
     };
 }
 function normalizeInspectorFilesArray(raw) {
@@ -139,6 +157,7 @@ function normalizeInspectorFileFromDb(raw) {
         externalUrl: hasExternalUrl ? url : undefined,
     });
     const sizeBytes = Number(o.sizeBytes);
+    const locationIds = normalizeLocationIds(o.locationIds);
     return {
         id,
         name,
@@ -151,5 +170,6 @@ function normalizeInspectorFileFromDb(raw) {
         gridFsFileId,
         mimeType: typeof o.mimeType === "string" ? o.mimeType : undefined,
         sizeBytes: Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : undefined,
+        locationIds,
     };
 }

@@ -62,13 +62,18 @@ let MachineValuationController = class MachineValuationController {
         (0, context_1.applyContextCookies)(res, context);
         return this.mvService.listInspectorFiles(id, toMvAccess(context));
     }
-    async uploadInspectorFile(req, res, id, file) {
+    async listProjectInspectors(req, res, id) {
+        const context = await (0, context_1.resolveRequestContext)(req);
+        (0, context_1.applyContextCookies)(res, context);
+        return this.mvService.listProjectInspectors(id, toMvAccess(context));
+    }
+    async uploadInspectorFile(req, res, id, file, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
         if (!file?.buffer) {
             throw new common_1.BadRequestException("لم يُرفع أي ملف.");
         }
-        return this.mvService.uploadInspectorFile(id, file, toMvAccess(context));
+        return this.mvService.uploadInspectorFile(id, file, toMvAccess(context), body?.locationIds);
     }
     async deleteInspectorFile(req, res, id, fileId) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -458,6 +463,15 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "listInspectorFiles", null);
 __decorate([
+    (0, common_1.Get)("projects/:id/inspectors"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("id")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String]),
+    __metadata("design:returntype", Promise)
+], MachineValuationController.prototype, "listProjectInspectors", null);
+__decorate([
     (0, common_1.Post)("projects/:id/inspectorFiles"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
         storage: (0, multer_1.memoryStorage)(),
@@ -467,8 +481,9 @@ __decorate([
     __param(1, (0, common_1.Res)({ passthrough: true })),
     __param(2, (0, common_1.Param)("id")),
     __param(3, (0, common_1.UploadedFile)()),
+    __param(4, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object, Object, String, Object]),
+    __metadata("design:paramtypes", [Object, Object, String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "uploadInspectorFile", null);
 __decorate([

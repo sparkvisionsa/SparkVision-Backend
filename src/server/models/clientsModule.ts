@@ -1,3 +1,5 @@
+import type { ObjectId } from "mongodb";
+
 /** MongoDB collection names for Value Tech clients UI */
 export const CLIENT_TYPES_COLLECTION = "client_types";
 export const FORM_TEMPLATES_COLLECTION = "form_templates";
@@ -42,4 +44,18 @@ export interface ClientUpsertFields {
   templateFieldValues: Record<string, string>;
   clientTypeId: string;
   formTemplateId: string | null;
+}
+
+export interface FormTemplateDoc {
+  _id?: ObjectId;
+  name: string;
+  fields: FormFieldDoc[];
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface ClientDoc extends ClientUpsertFields {
+  _id?: ObjectId;
+  createdAt?: Date;
+  updatedAt?: Date;
 }

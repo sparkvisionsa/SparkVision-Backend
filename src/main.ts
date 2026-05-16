@@ -41,9 +41,14 @@ async function bootstrap() {
   app.useBodyParser("json", { limit: "100mb" });
   app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
 
-<<<<<<< HEAD
-  app.use(helmet());
-  /** تعطيل ضغط الاستجابة لبث GridFS/إعادة توجيه الملفات — يتجنب تلف الملفات الثنائية ويعمل مع الوكيل. */
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+      crossOriginOpenerPolicy: { policy: "unsafe-none" },
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const path = String(req.originalUrl || req.url || "")
       .split("?")[0]
@@ -53,16 +58,6 @@ async function bootstrap() {
     }
     next();
   });
-=======
-  app.use(
-    helmet({
-      contentSecurityPolicy: false,
-      crossOriginResourcePolicy: { policy: "cross-origin" },
-      crossOriginOpenerPolicy: { policy: "unsafe-none" },
-      crossOriginEmbedderPolicy: false,
-    }),
-  );
->>>>>>> 2121466ef76411d7264141305fc6471690b9511c
   app.use(compression());
   app.use(cookieParser());
 

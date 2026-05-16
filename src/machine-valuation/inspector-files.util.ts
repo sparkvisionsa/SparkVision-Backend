@@ -69,6 +69,20 @@ function objectIdishToString(value: unknown): string | undefined {
   return out || undefined;
 }
 
+function normalizeLocationIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = String(item ?? "").trim().slice(0, 80);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 export function serializeInspectorFileForClient(
   row: MvInspectorFileDoc | Record<string, unknown>,
 ): {
@@ -83,6 +97,7 @@ export function serializeInspectorFileForClient(
   spacesKey?: string;
   gridFsFileId?: string;
   sizeBytes?: number;
+  locationIds?: string[];
 } {
   const r = row as Record<string, unknown>;
   const created = r.createdAt;
@@ -101,6 +116,7 @@ export function serializeInspectorFileForClient(
     externalUrl: /^https?:\/\//i.test(url) ? url : undefined,
   });
   const sizeBytes = Number(r.sizeBytes);
+  const locationIds = normalizeLocationIds(r.locationIds);
   return {
     id: String(r.id ?? ""),
     name: String(r.name ?? ""),
@@ -113,6 +129,7 @@ export function serializeInspectorFileForClient(
     spacesKey,
     gridFsFileId,
     sizeBytes: Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : undefined,
+    locationIds,
   };
 }
 
@@ -153,6 +170,7 @@ export function normalizeInspectorFileFromDb(raw: unknown): MvInspectorFileDoc |
     externalUrl: hasExternalUrl ? url : undefined,
   });
   const sizeBytes = Number(o.sizeBytes);
+  const locationIds = normalizeLocationIds(o.locationIds);
 
   return {
     id,
@@ -166,5 +184,6 @@ export function normalizeInspectorFileFromDb(raw: unknown): MvInspectorFileDoc |
     gridFsFileId,
     mimeType: typeof o.mimeType === "string" ? o.mimeType : undefined,
     sizeBytes: Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : undefined,
+    locationIds,
   };
 }

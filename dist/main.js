@@ -35,7 +35,12 @@ async function bootstrap() {
     });
     app.useBodyParser("json", { limit: "100mb" });
     app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
-    app.use((0, helmet_1.default)());
+    app.use((0, helmet_1.default)({
+        contentSecurityPolicy: false,
+        crossOriginResourcePolicy: { policy: "cross-origin" },
+        crossOriginOpenerPolicy: { policy: "unsafe-none" },
+        crossOriginEmbedderPolicy: false,
+    }));
     app.use((req, _res, next) => {
         const path = String(req.originalUrl || req.url || "")
             .split("?")[0]
@@ -45,12 +50,6 @@ async function bootstrap() {
         }
         next();
     });
-    app.use((0, helmet_1.default)({
-        contentSecurityPolicy: false,
-        crossOriginResourcePolicy: { policy: "cross-origin" },
-        crossOriginOpenerPolicy: { policy: "unsafe-none" },
-        crossOriginEmbedderPolicy: false,
-    }));
     app.use((0, compression_1.default)());
     app.use((0, cookie_parser_1.default)());
     app.useStaticAssets((0, path_1.join)(process.cwd(), "uploads"), {

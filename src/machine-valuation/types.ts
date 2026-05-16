@@ -40,10 +40,39 @@ export type MvProjectWorkflowStatus = (typeof MV_PROJECT_WORKFLOW_STATUSES)[numb
 export const MV_PROJECT_REPORT_TYPES = ["simple", "advanced"] as const;
 export type MvProjectReportType = (typeof MV_PROJECT_REPORT_TYPES)[number];
 
+export interface MvReportTeamMember {
+  id: string;
+  name: string;
+  title?: string;
+  membershipNo?: string;
+  role?: string;
+}
+
+export interface MvReportEditableSection {
+  id: string;
+  title: string;
+  body: string;
+}
+
+export type MvReportInsertedBlockKind = "heading" | "paragraph" | "image";
+
+export interface MvReportInsertedBlock {
+  id: string;
+  anchorId: string;
+  kind: MvReportInsertedBlockKind;
+  content?: string;
+  imageDataUrl?: string;
+  caption?: string;
+}
+
 export interface MvProjectReportData {
+  reportReference?: string;
+  reportTitle?: string;
   valuationMethod?: string;
   valuationPurpose?: string;
   valuePremise?: string;
+  valuationBasis?: string;
+  valuationBasisDefinition?: string;
   includeAssetImages?: boolean;
   includeValuationAccountImages?: boolean;
   reportIssueDate?: string;
@@ -54,6 +83,33 @@ export interface MvProjectReportData {
   clientName?: string;
   clientEmail?: string;
   clientPhone?: string;
+  clientLegalType?: string;
+  clientActivity?: string;
+  clientRepresentativeName?: string;
+  clientRepresentativeRole?: string;
+  intendedUsers?: string;
+  intendedUse?: string;
+  valuationFirmName?: string;
+  valuationFirmLicense?: string;
+  valuationFirmAddress?: string;
+  leadValuerName?: string;
+  leadValuerTitle?: string;
+  leadValuerMembershipNo?: string;
+  reportTypeLabel?: string;
+  standardsVersion?: string;
+  scopeOfWorkDetails?: string;
+  useRestriction?: string;
+  externalSpecialistUse?: string;
+  esgConsiderations?: string;
+  informationSources?: string;
+  assetSubjectDescription?: string;
+  assetDetailedDescription?: string;
+  inspectionLocation?: string;
+  inspectionMapUrl?: string;
+  currencyLabel?: string;
+  methodologyRationale?: string;
+  costApproachDetails?: string;
+  valuationTeam?: MvReportTeamMember[];
   importantAssumptions?: string;
   specialAssumptions?: string;
   finalValue?: number | null;
@@ -64,14 +120,31 @@ export interface MvProjectReportData {
   receivedClientDocumentsHtml?: string;
   /** HTML — شهادة التسجيل في بوابة «تقييم» */
   sceRegistrationCertificateHtml?: string;
+  /** تعديلات نصية مباشرة داخل صفحة إعداد التقرير، بما يشمل القيم الديناميكية. */
+  reportTextOverrides?: Record<string, string>;
+  /** HTML — نص المقدمة الإضافي داخل صفحة إعداد التقرير. */
+  reportIntroExtraHtml?: string;
+  /** HTML — أقسام التقرير المهنية القابلة للتحرير. */
+  reportNarrativeB1?: string;
+  reportNarrativeB2?: string;
+  reportNarrativeB3?: string;
+  reportNarrativeB4?: string;
+  /** أقسام إضافية يضيفها المستخدم داخل التقرير. */
+  reportEditableSections?: MvReportEditableSection[];
+  /** كتل مضافة من قائمة النقر داخل صفحات التقرير. */
+  reportInsertedBlocks?: MvReportInsertedBlock[];
 }
 
 export interface MvProjectLocation {
+  id?: string;
+  name?: string;
   region: string;
   city: string;
   latitude: number | null;
   longitude: number | null;
   mapUrl?: string;
+  primaryPhone?: string;
+  secondaryPhone?: string;
 }
 
 export type MvProjectContactType = "primary" | "secondary";
@@ -79,6 +152,20 @@ export type MvProjectContactType = "primary" | "secondary";
 export interface MvProjectContact {
   type: MvProjectContactType;
   phone: string;
+  locationId?: string;
+  locationIndex?: number;
+  locationName?: string;
+}
+
+export interface MvInspectionAssignment {
+  id: string;
+  inspectorUserId: string;
+  inspectorName: string;
+  /** Empty/missing means the assignment applies to every inspection location. */
+  locationIds?: string[];
+  assignedBy?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 /** نوع منطقي لملف المعاين (للواجهة والتصفية) */
@@ -108,6 +195,8 @@ export interface MvInspectorFileDoc {
   /** Legacy files only. New inspector uploads go to DigitalOcean Spaces. */
   gridFsFileId?: ObjectId | string;
   mimeType?: string;
+  /** Empty/missing means shared with every inspection location. */
+  locationIds?: string[];
 }
 
 /** حقول مشروع MV في `mv_projects` — بدون `_id`؛ يُولَّد تلقائياً في Atlas عند الإدراج. */
@@ -130,6 +219,7 @@ export interface MvProjectDoc {
   reportData?: MvProjectReportData;
   locations?: MvProjectLocation[];
   contacts?: MvProjectContact[];
+  inspectionAssignments?: MvInspectionAssignment[];
   /** ملفات معاينة المشروع المخزنة على DigitalOcean Spaces مع بيانات وصفية. */
   inspectorFiles?: MvInspectorFileDoc[];
   /**
