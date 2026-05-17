@@ -22,6 +22,7 @@ export interface HarajScrapeDoc {
   tags?: string[];
   commentsCount?: number;
   comments?: Array<Record<string, unknown>>;
+  createdAt?: Date;
   item?: {
     id?: number;
     title?: string;

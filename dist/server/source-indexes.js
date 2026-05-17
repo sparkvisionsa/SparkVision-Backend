@@ -3,7 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.triggerSourceIndexWarmup = triggerSourceIndexWarmup;
 const mongodb_1 = require("mongodb");
 const mongodb_2 = require("./mongodb");
+const mongodb_ind_1 = require("./mongodb-ind");
 const harajScrape_1 = require("./models/harajScrape");
+const mobasherAuctions_1 = require("./models/mobasherAuctions");
 const yallaMotor_1 = require("./models/yallaMotor");
 const syarah_1 = require("./models/syarah");
 const HARJ_INDEXES = [
@@ -146,6 +148,41 @@ const SYARAH_INDEXES = [
         },
     },
 ];
+const MOBASHER_INDEXES = [
+    { name: "scrapedAt_desc", key: { scrapedAt: -1 } },
+    { name: "auctionCode_asc", key: { auctionCode: 1 } },
+    { name: "title_asc", key: { title: 1 } },
+    {
+        name: "smart_search_text",
+        key: {
+            title: "text",
+            auctionTitle: "text",
+            auctionName: "text",
+            auctionCode: "text",
+            address: "text",
+            breadcrumbs: "text",
+            "description.المدينة": "text",
+            "description.التصنيف": "text",
+            "productNotes.notes": "text",
+            "productNotes.warning": "text",
+        },
+        options: {
+            default_language: "none",
+            weights: {
+                title: 12,
+                auctionTitle: 11,
+                auctionName: 10,
+                auctionCode: 8,
+                breadcrumbs: 6,
+                address: 5,
+                "description.المدينة": 5,
+                "description.التصنيف": 4,
+                "productNotes.notes": 3,
+                "productNotes.warning": 2,
+            },
+        },
+    },
+];
 function shouldWarmupIndexes() {
     const value = (process.env.SOURCE_INDEX_WARMUP ?? "true").trim().toLowerCase();
     return value !== "0" && value !== "false";
@@ -184,6 +221,15 @@ async function warmupSourceIndexes() {
         createIndexesSafely(syarahNew, SYARAH_INDEXES),
     ]);
 }
+async function warmupCarsIndSourceIndexes() {
+    const db = await (0, mongodb_ind_1.getMongoIndDb)();
+    const carsHaraj = (0, harajScrape_1.getCarsHarajCollection)(db);
+    const mobasher = (0, mobasherAuctions_1.getMobasherAuctionsCollection)(db);
+    await Promise.all([
+        createIndexesSafely(carsHaraj, HARJ_INDEXES),
+        createIndexesSafely(mobasher, MOBASHER_INDEXES),
+    ]);
+}
 function triggerSourceIndexWarmup() {
     if (!shouldWarmupIndexes()) {
         return;
@@ -191,6 +237,11 @@ function triggerSourceIndexWarmup() {
     if (!global.sparkSourceIndexesWarmup) {
         global.sparkSourceIndexesWarmup = warmupSourceIndexes().catch((error) => {
             console.error("[source-indexes] Warmup failed", error);
+        });
+    }
+    if (!global.sparkCarsIndIndexesWarmup) {
+        global.sparkCarsIndIndexesWarmup = warmupCarsIndSourceIndexes().catch((error) => {
+            console.error("[source-indexes] Cars-ind warmup failed", error);
         });
     }
 }

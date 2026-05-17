@@ -3,8 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.listHarajScrapes = listHarajScrapes;
 exports.getHarajScrapeById = getHarajScrapeById;
 const mongodb_1 = require("../mongodb");
+const mongodb_ind_1 = require("../mongodb-ind");
 const harajScrape_1 = require("../models/harajScrape");
 const vehicle_name_match_1 = require("../../lib/vehicle-name-match");
+const broad_mongo_search_1 = require("../../lib/broad-mongo-search");
 const smart_search_1 = require("../../lib/smart-search");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const DEFAULT_LIMIT = 25;
@@ -257,42 +259,59 @@ function buildFilter(query, searchCandidateIds) {
         });
     }
     if (query.search && shouldApplyRegexSearch) {
-        const termGroups = (0, smart_search_1.buildSmartSearchTermGroups)(query.search, {
-            exact: query.exactSearch === true,
-        });
-        for (const group of termGroups) {
-            const searchRegexes = group.map((term) => toRegex(term, {
-                exact: query.exactSearch === true,
-                fuzzyArabic: query.exactSearch !== true,
-            }));
+        if ((0, smart_search_1.isDocumentContainsMatchQuery)(query)) {
+            const containsRegex = (0, smart_search_1.buildDocumentContainsRegex)(query.search);
             andFilters.push({
-                $or: [
-                    { title: { $in: searchRegexes } },
-                    { "item.title": { $in: searchRegexes } },
-                    { "item.bodyTEXT": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.title": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.bodyTEXT": { $in: searchRegexes } },
-                    { city: { $in: searchRegexes } },
-                    { "item.city": { $in: searchRegexes } },
-                    { "item.geoCity": { $in: searchRegexes } },
-                    { "tags.1": { $in: searchRegexes } },
-                    { "tags.2": { $in: searchRegexes } },
-                    { "item.tags.1": { $in: searchRegexes } },
-                    { "item.tags.2": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.tags.1": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.tags.2": { $in: searchRegexes } },
-                    { phone: { $in: searchRegexes } },
-                    { url: { $in: searchRegexes } },
-                    { "item.URL": { $in: searchRegexes } },
-                    { "item.price.formattedPrice": { $in: searchRegexes } },
-                    { "item.carInfo.model": { $in: searchRegexes } },
-                    { "carInfo.model": { $in: searchRegexes } },
-                    { "item.carInfo.mileage": { $in: searchRegexes } },
-                    { "carInfo.mileage": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.carInfo.model": { $in: searchRegexes } },
-                    { "gql.posts.json.data.posts.items.carInfo.mileage": { $in: searchRegexes } },
-                ],
+                $or: (0, broad_mongo_search_1.buildHarajBroadSearchOr)([containsRegex]),
             });
+        }
+        else {
+            const termGroups = (0, smart_search_1.buildSmartSearchTermGroups)(query.search, {
+                exact: query.exactSearch === true,
+            });
+            for (const group of termGroups) {
+                const searchRegexes = group.map((term) => toRegex(term, {
+                    exact: query.exactSearch === true,
+                    fuzzyArabic: query.exactSearch !== true,
+                }));
+                const searchOr = query.broadSearch
+                    ? (0, broad_mongo_search_1.buildHarajBroadSearchOr)(searchRegexes)
+                    : [
+                        { title: { $in: searchRegexes } },
+                        { "item.title": { $in: searchRegexes } },
+                        { "item.bodyTEXT": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.title": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.bodyTEXT": { $in: searchRegexes } },
+                        { city: { $in: searchRegexes } },
+                        { "item.city": { $in: searchRegexes } },
+                        { "item.geoCity": { $in: searchRegexes } },
+                        { tags: { $in: searchRegexes } },
+                        { "item.tags": { $in: searchRegexes } },
+                        { "tags.0": { $in: searchRegexes } },
+                        { "tags.1": { $in: searchRegexes } },
+                        { "tags.2": { $in: searchRegexes } },
+                        { "tags.3": { $in: searchRegexes } },
+                        { "item.tags.0": { $in: searchRegexes } },
+                        { "item.tags.1": { $in: searchRegexes } },
+                        { "item.tags.2": { $in: searchRegexes } },
+                        { "item.tags.3": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.tags.1": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.tags.2": { $in: searchRegexes } },
+                        { phone: { $in: searchRegexes } },
+                        { url: { $in: searchRegexes } },
+                        { "item.URL": { $in: searchRegexes } },
+                        { "item.price.formattedPrice": { $in: searchRegexes } },
+                        { "item.carInfo.model": { $in: searchRegexes } },
+                        { "carInfo.model": { $in: searchRegexes } },
+                        { "item.carInfo.mileage": { $in: searchRegexes } },
+                        { "carInfo.mileage": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.carInfo.model": { $in: searchRegexes } },
+                        { "gql.posts.json.data.posts.items.carInfo.mileage": { $in: searchRegexes } },
+                    ];
+                andFilters.push({
+                    $or: searchOr,
+                });
+            }
         }
     }
     if (query.city) {
@@ -564,6 +583,7 @@ function buildCountSignature(query) {
         mileageMax: query.mileageMax,
         excludeTag1: query.excludeTag1 ?? "",
         fields: query.fields === "modelYears" ? "modelYears" : "default",
+        broadSearch: query.broadSearch === true,
     };
 }
 function isFilterEmpty(filter) {
@@ -608,6 +628,8 @@ function buildDescendingYearRange(years) {
     return fullRange;
 }
 async function listHarajScrapes(query, options = {}) {
+    const dataSource = options.dataSource ?? "default";
+    const carsIndOnly = dataSource === "cars-ind";
     const maxLimit = options.maxLimit ?? MAX_LIMIT;
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, maxLimit);
     const page = Math.max(query.page ?? 1, 1);
@@ -621,31 +643,56 @@ async function listHarajScrapes(query, options = {}) {
         : query.fields === "options"
             ? OPTIONS_CACHE_STALE_TTL_MS
             : LIST_CACHE_STALE_TTL_MS;
-    const cacheKey = `haraj:list:${JSON.stringify({
+    const cacheKey = `${carsIndOnly ? "cars-ind" : "haraj"}:list:${JSON.stringify({
         query,
         maxLimit,
         page,
         limit,
+        dataSource,
     })}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
-        const db = await (0, mongodb_1.getMongoDb)();
+        const db = carsIndOnly ? await (0, mongodb_ind_1.getMongoIndDb)() : await (0, mongodb_1.getMongoDb)();
         const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
         const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
-        const [primarySearchCandidateIds, carsSearchCandidateIds] = await Promise.all([
-            resolveHarajSearchCandidateIds(primaryCollection, "haraj", query),
-            resolveHarajSearchCandidateIds(carsCollection, "cars-haraj", query),
-        ]);
-        const hasPrimaryNoHits = primarySearchCandidateIds?.supported === true && primarySearchCandidateIds.ids.length === 0;
+        const skipTextCandidates = query.exactSearch === true;
+        const [primarySearchCandidateIds, carsSearchCandidateIds] = carsIndOnly
+            ? [
+                null,
+                skipTextCandidates
+                    ? null
+                    : await resolveHarajSearchCandidateIds(carsCollection, "cars-ind-haraj", query),
+            ]
+            : await Promise.all([
+                skipTextCandidates
+                    ? Promise.resolve(null)
+                    : resolveHarajSearchCandidateIds(primaryCollection, "haraj", query),
+                skipTextCandidates
+                    ? Promise.resolve(null)
+                    : resolveHarajSearchCandidateIds(carsCollection, "cars-haraj", query),
+            ]);
+        const hasPrimaryNoHits = !carsIndOnly &&
+            primarySearchCandidateIds?.supported === true &&
+            primarySearchCandidateIds.ids.length === 0;
         const hasCarsNoHits = carsSearchCandidateIds?.supported === true && carsSearchCandidateIds.ids.length === 0;
-        const shouldFallbackToRegexOnly = Boolean(query.search?.trim()) && hasPrimaryNoHits && hasCarsNoHits;
-        const effectivePrimarySearchCandidateIds = shouldFallbackToRegexOnly
+        const shouldFallbackToRegexOnly = Boolean(query.search?.trim()) &&
+            (carsIndOnly ? hasCarsNoHits : hasPrimaryNoHits && hasCarsNoHits);
+        const effectivePrimarySearchCandidateIds = carsIndOnly
             ? null
-            : primarySearchCandidateIds;
+            : shouldFallbackToRegexOnly
+                ? null
+                : primarySearchCandidateIds;
         const effectiveCarsSearchCandidateIds = shouldFallbackToRegexOnly
             ? null
             : carsSearchCandidateIds;
         const primaryFilter = buildFilter(query, effectivePrimarySearchCandidateIds);
         const carsFilter = buildFilter(query, effectiveCarsSearchCandidateIds);
+        const listCollection = carsIndOnly ? carsCollection : primaryCollection;
+        const runListPipeline = (stagesAfterMatch) => {
+            if (carsIndOnly) {
+                return [{ $match: carsFilter }, ...stagesAfterMatch];
+            }
+            return buildCombinedHarajPipeline(primaryFilter, carsFilter, stagesAfterMatch);
+        };
         if (query.fields === "modelYears") {
             const modelYearPrimaryFilter = buildFilter({
                 ...query,
@@ -659,32 +706,31 @@ async function listHarajScrapes(query, options = {}) {
                 tag2: undefined,
                 carModelYear: undefined,
             }, effectiveCarsSearchCandidateIds);
-            const yearRows = await primaryCollection
-                .aggregate([
-                ...buildCombinedHarajPipeline(modelYearPrimaryFilter, modelYearCarsFilter, [
-                    {
-                        $project: {
-                            carModelYear: {
-                                $convert: {
-                                    input: {
-                                        $ifNull: [
-                                            "$item.carInfo.model",
-                                            {
-                                                $ifNull: [
-                                                    "$carInfo.model",
-                                                    "$gql.posts.json.data.posts.items.0.carInfo.model",
-                                                ],
-                                            },
-                                        ],
+            const modelYearProjectStage = {
+                $project: {
+                    carModelYear: {
+                        $convert: {
+                            input: {
+                                $ifNull: [
+                                    "$item.carInfo.model",
+                                    {
+                                        $ifNull: ["$carInfo.model", "$gql.posts.json.data.posts.items.0.carInfo.model"],
                                     },
-                                    to: "int",
-                                    onError: null,
-                                    onNull: null,
-                                },
+                                ],
                             },
+                            to: "int",
+                            onError: null,
+                            onNull: null,
                         },
                     },
-                ]),
+                },
+            };
+            const modelYearPipeline = carsIndOnly
+                ? [{ $match: modelYearCarsFilter }, modelYearProjectStage]
+                : buildCombinedHarajPipeline(modelYearPrimaryFilter, modelYearCarsFilter, [modelYearProjectStage]);
+            const yearRows = await listCollection
+                .aggregate([
+                ...modelYearPipeline,
                 { $match: { carModelYear: { $ne: null } } },
                 { $group: { _id: "$carModelYear" } },
                 { $sort: { _id: -1 } },
@@ -707,9 +753,9 @@ async function listHarajScrapes(query, options = {}) {
         const projection = buildListProjection(query.fields);
         const skip = (page - 1) * limit;
         const candidateWindow = Math.max(skip + fetchLimit, fetchLimit);
-        const itemsPromise = primaryCollection
+        const itemsPromise = listCollection
             .aggregate([
-            ...buildCombinedHarajPipeline(primaryFilter, carsFilter, [
+            ...runListPipeline([
                 { $sort: sort },
                 { $limit: candidateWindow },
             ]),
@@ -724,7 +770,13 @@ async function listHarajScrapes(query, options = {}) {
         const items = countMode === "none" ? rawItems.slice(0, limit) : rawItems;
         const total = countMode === "none"
             ? -1
-            : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`haraj:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
+            : await (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(`${carsIndOnly ? "cars-ind" : "haraj"}:count:${JSON.stringify(buildCountSignature(query))}`, COUNT_CACHE_TTL_MS, COUNT_CACHE_STALE_TTL_MS, async () => {
+                if (carsIndOnly) {
+                    if (isFilterEmpty(carsFilter)) {
+                        return carsCollection.estimatedDocumentCount();
+                    }
+                    return carsCollection.countDocuments(carsFilter);
+                }
                 if (isFilterEmpty(primaryFilter) && isFilterEmpty(carsFilter)) {
                     const [primaryCount, carsCount] = await Promise.all([
                         primaryCollection.estimatedDocumentCount(),
@@ -743,7 +795,7 @@ async function listHarajScrapes(query, options = {}) {
             const imageCount = doc.item?.imagesList?.length ??
                 doc.imagesList?.length ??
                 0;
-            const hasImages = imageCount > 0;
+            const hasImages = imageCount > 0 || doc.item?.hasImage === true || doc.hasImage === true;
             const carModelYear = doc.item?.carInfo?.model ??
                 doc?.carInfo?.model ??
                 doc?.gql?.posts?.json?.data?.posts?.items?.[0]?.carInfo?.model ??
@@ -752,10 +804,20 @@ async function listHarajScrapes(query, options = {}) {
                 toMileageNumber(doc?.carInfo?.mileage) ??
                 toMileageNumber(doc?.gql?.posts?.json?.data?.posts?.items?.[0]?.carInfo?.mileage) ??
                 null;
-            const commentsCount = doc.commentsCount ?? doc.item?.commentCount ?? 0;
+            const commentsCount = doc.commentsCount ??
+                doc.item?.commentCount ??
+                (Array.isArray(doc.comments) ? doc.comments.length : 0);
             const postDate = toEpochNumber(doc.item?.postDate) ??
                 toEpochNumber(doc.postDate) ??
+                toEpochNumber(doc.lastSeenAt) ??
+                toEpochNumber(doc.createdAt) ??
                 null;
+            const listingUrl = (typeof doc.url === "string" && doc.url.trim()) ||
+                (doc.item?.URL
+                    ? doc.item.URL.startsWith("http")
+                        ? doc.item.URL
+                        : `https://haraj.com.sa/${String(doc.item.URL).replace(/^\/+/, "")}`
+                    : "");
             if (query.fields === "options") {
                 return {
                     id: doc.postId ?? doc._id,
@@ -791,7 +853,7 @@ async function listHarajScrapes(query, options = {}) {
                 carModelYear,
                 mileage,
                 phone: doc.phone ?? "",
-                url: doc.url ?? (doc.item?.URL ? `https://haraj.com.sa/${doc.item.URL}` : ""),
+                url: listingUrl,
                 source: "haraj",
             };
         });
@@ -804,34 +866,56 @@ async function listHarajScrapes(query, options = {}) {
         };
     });
 }
-async function getHarajScrapeById(id) {
-    return (0, runtime_cache_1.getOrSetRuntimeCache)(`haraj:detail:${id}`, DETAIL_CACHE_TTL_MS, async () => {
-        const db = await (0, mongodb_1.getMongoDb)();
+async function getHarajScrapeById(id, dataSource = "default") {
+    const carsIndOnly = dataSource === "cars-ind";
+    return (0, runtime_cache_1.getOrSetRuntimeCache)(`${carsIndOnly ? "cars-ind" : "haraj"}:detail:${id}`, DETAIL_CACHE_TTL_MS, async () => {
+        const db = carsIndOnly ? await (0, mongodb_ind_1.getMongoIndDb)() : await (0, mongodb_1.getMongoDb)();
         const primaryCollection = (0, harajScrape_1.getHarajScrapeCollection)(db);
         const carsCollection = (0, harajScrape_1.getCarsHarajCollection)(db);
-        const [primaryById, carsById] = await Promise.all([
-            primaryCollection.findOne({ _id: id }),
-            carsCollection.findOne({ _id: id }),
-        ]);
-        if (primaryById || carsById) {
-            return primaryById ?? carsById;
-        }
-        const [primaryByPostId, carsByPostId] = await Promise.all([
-            primaryCollection.findOne({ postId: id }),
-            carsCollection.findOne({ postId: id }),
-        ]);
-        if (primaryByPostId || carsByPostId) {
-            return primaryByPostId ?? carsByPostId;
-        }
-        const numericId = Number(id);
-        if (!Number.isNaN(numericId)) {
-            const [primaryByItemId, carsByItemId] = await Promise.all([
-                primaryCollection.findOne({ "item.id": numericId }),
-                carsCollection.findOne({ "item.id": numericId }),
-            ]);
-            if (primaryByItemId || carsByItemId) {
-                return primaryByItemId ?? carsByItemId;
+        if (carsIndOnly) {
+            const carsById = await carsCollection.findOne({ _id: id });
+            if (carsById)
+                return carsById;
+            const carsByPostId = await carsCollection.findOne({ postId: id });
+            if (carsByPostId)
+                return carsByPostId;
+            const numericId = Number(id);
+            if (!Number.isNaN(numericId)) {
+                const carsByItemId = await carsCollection.findOne({
+                    "item.id": numericId,
+                });
+                if (carsByItemId)
+                    return carsByItemId;
             }
+        }
+        else {
+            const [primaryById, carsById] = await Promise.all([
+                primaryCollection.findOne({ _id: id }),
+                carsCollection.findOne({ _id: id }),
+            ]);
+            if (primaryById || carsById) {
+                return primaryById ?? carsById;
+            }
+            const [primaryByPostId, carsByPostId] = await Promise.all([
+                primaryCollection.findOne({ postId: id }),
+                carsCollection.findOne({ postId: id }),
+            ]);
+            if (primaryByPostId || carsByPostId) {
+                return primaryByPostId ?? carsByPostId;
+            }
+            const numericId = Number(id);
+            if (!Number.isNaN(numericId)) {
+                const [primaryByItemId, carsByItemId] = await Promise.all([
+                    primaryCollection.findOne({ "item.id": numericId }),
+                    carsCollection.findOne({ "item.id": numericId }),
+                ]);
+                if (primaryByItemId || carsByItemId) {
+                    return primaryByItemId ?? carsByItemId;
+                }
+            }
+        }
+        if (carsIndOnly) {
+            return carsCollection.findOne({ "item.URL": id });
         }
         const [primaryByUrl, carsByUrl] = await Promise.all([
             primaryCollection.findOne({ "item.URL": id }),

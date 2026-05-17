@@ -12,12 +12,13 @@ const machine_valuation_controller_1 = require("./machine-valuation.controller")
 const machine_valuation_service_1 = require("./machine-valuation.service");
 const file_parser_service_1 = require("./file-parser.service");
 const digitalocean_spaces_service_1 = require("./digitalocean-spaces.service");
+const mv_realtime_service_1 = require("./mv-realtime.service");
 let MachineValuationModule = class MachineValuationModule {
 };
 exports.MachineValuationModule = MachineValuationModule;
 exports.MachineValuationModule = MachineValuationModule = __decorate([
     (0, common_1.Module)({
         controllers: [machine_valuation_controller_1.MachineValuationController],
-        providers: [machine_valuation_service_1.MachineValuationService, file_parser_service_1.FileParserService, digitalocean_spaces_service_1.DigitalOceanSpacesService],
+        providers: [machine_valuation_service_1.MachineValuationService, file_parser_service_1.FileParserService, digitalocean_spaces_service_1.DigitalOceanSpacesService, mv_realtime_service_1.MvRealtimeService],
     })
 ], MachineValuationModule);

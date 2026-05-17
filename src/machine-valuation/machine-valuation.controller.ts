@@ -23,6 +23,7 @@ import { Readable } from "node:stream";
 import type { Request, Response } from "express";
 import { MachineValuationService } from "./machine-valuation.service";
 import { FileParserService } from "./file-parser.service";
+import { MvRealtimeService, type MvRealtimeEventType } from "./mv-realtime.service";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
 import { MV_INSPECTOR_FILE_MAX_BYTES } from "./inspector-files.constants";
 import { decodeUploadFilename } from "./sheet-rows.util";
@@ -57,7 +58,12 @@ export class MachineValuationController {
   constructor(
     private readonly mvService: MachineValuationService,
     private readonly fileParser: FileParserService,
+    private readonly mvRealtime: MvRealtimeService,
   ) {}
+
+  private publishRealtime(projectId: string, type: MvRealtimeEventType, reason: string) {
+    this.mvRealtime.publish(projectId, type, reason);
+  }
 
   /* ───────── Projects ───────── */
 
@@ -254,6 +260,18 @@ export class MachineValuationController {
     return this.mvService.getProject(id, toMvAccess(context), { picAssetMode: mode });
   }
 
+  @Get("projects/:id/events")
+  async streamProjectEvents(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param("id") id: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    await this.mvService.getProject(id, toMvAccess(context), { picAssetMode: "summary" });
+    this.mvRealtime.subscribe(id, res);
+  }
+
   @Post("projects/:id/workflow")
   async setProjectWorkflow(
     @Req() req: Request,
@@ -323,12 +341,14 @@ export class MachineValuationController {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     const parentRaw = body.parent?.trim() || body.parentSubProjectId?.trim() || undefined;
-    return this.mvService.createSubProject(
+    const created = await this.mvService.createSubProject(
       projectId,
       body.name ?? "",
       toMvAccess(context),
       parentRaw,
     );
+    this.publishRealtime(projectId, "asset-folders-changed", "subproject:create");
+    return created;
   }
 
   @Delete("projects/:id/subprojects")
@@ -339,7 +359,10 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    return this.mvService.deleteAllSubProjects(projectId, toMvAccess(context));
+    const result = await this.mvService.deleteAllSubProjects(projectId, toMvAccess(context));
+    this.publishRealtime(projectId, "asset-folders-changed", "subproject:delete-all");
+    this.publishRealtime(projectId, "asset-images-changed", "subproject:delete-all");
+    return result;
   }
 
   @Get("projects/:pid/subprojects/:sid")
@@ -364,7 +387,10 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    return this.mvService.patchSubProject(pid, sid, toMvAccess(context), body);
+    const result = await this.mvService.patchSubProject(pid, sid, toMvAccess(context), body);
+    this.publishRealtime(pid, "asset-images-changed", "subproject:patch");
+    this.publishRealtime(pid, "asset-folders-changed", "subproject:patch");
+    return result;
   }
 
   @Delete("projects/:pid/subprojects/:sid")
@@ -376,7 +402,10 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    return this.mvService.deleteSubProject(pid, sid, toMvAccess(context));
+    const result = await this.mvService.deleteSubProject(pid, sid, toMvAccess(context));
+    this.publishRealtime(pid, "asset-folders-changed", "subproject:delete");
+    this.publishRealtime(pid, "asset-images-changed", "subproject:delete");
+    return result;
   }
 
   @Post("projects/:pid/sheets/:sid/generate-inspection-folders")
@@ -407,11 +436,13 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    return this.mvService.generateInspectionFoldersFromAssetImport(pid, toMvAccess(context), {
+    const result = await this.mvService.generateInspectionFoldersFromAssetImport(pid, toMvAccess(context), {
       columnKey: body?.columnKey ?? "",
       importId: body?.importId ?? "",
       sheetName: body?.sheetName ?? "",
     });
+    this.publishRealtime(pid, "asset-folders-changed", "asset-import-image-folders:generate");
+    return result;
   }
 
   /* ───────── File Upload ───────── */
@@ -451,7 +482,7 @@ export class MachineValuationController {
       : undefined;
     const picAssetFolderId =
       (picAssetFolderIdFromQuery && picAssetFolderIdFromQuery.trim()) || fromBody;
-    return this.mvService.uploadProjectFiles(
+    const result = await this.mvService.uploadProjectFiles(
       projectId,
       files ?? [],
       toMvAccess(context),
@@ -462,6 +493,9 @@ export class MachineValuationController {
         imageOnly: true,
       },
     );
+    this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:upload");
+    this.publishRealtime(projectId, "asset-folders-changed", "asset-image-files:upload");
+    return result;
   }
 
   private async handleReorderProjectAssetImageFiles(
@@ -478,13 +512,15 @@ export class MachineValuationController {
       Array.isArray(rawIds) ?
         rawIds.map((item) => String(item ?? "").trim()).filter((id) => id.length > 0)
       : [];
-    return this.mvService.reorderProjectAssetImageFiles(
+    const result = await this.mvService.reorderProjectAssetImageFiles(
       projectId,
       toMvAccess(context),
       folderPath,
       orderedFileIds,
       body?.picAssetFolderId,
     );
+    this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:reorder");
+    return result;
   }
 
   @Patch("projects/:pid/asset-image-files/place")
@@ -553,12 +589,14 @@ export class MachineValuationController {
       Array.isArray(rawIds) ?
         rawIds.map((item) => String(item ?? "").trim()).filter((id) => id.length > 0)
       : [];
-    return this.mvService.updateProjectAssetImageReportSelection(
+    const result = await this.mvService.updateProjectAssetImageReportSelection(
       projectId,
       toMvAccess(context),
       fileIds,
       body?.includeInReport !== false,
     );
+    this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:report-selection");
+    return result;
   }
 
   private async handlePlaceProjectAssetImageFile(
@@ -575,7 +613,7 @@ export class MachineValuationController {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     const fileId = typeof body?.fileId === "string" ? body.fileId.trim() : "";
-    return this.mvService.placeProjectAssetImageFile(
+    const result = await this.mvService.placeProjectAssetImageFile(
       projectId,
       toMvAccess(context),
       fileId,
@@ -583,6 +621,9 @@ export class MachineValuationController {
       body?.insertBeforeFileId,
       body?.targetPicAssetFolderId,
     );
+    this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:place");
+    this.publishRealtime(projectId, "asset-folders-changed", "asset-image-files:place");
+    return result;
   }
 
   @Get("projects/:pid/files")
@@ -755,7 +796,10 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    return this.mvService.deleteProjectFile(projectId, fileId, toMvAccess(context));
+    const result = await this.mvService.deleteProjectFile(projectId, fileId, toMvAccess(context));
+    this.publishRealtime(projectId, "asset-images-changed", "project-file:delete");
+    this.publishRealtime(projectId, "asset-folders-changed", "project-file:delete");
+    return result;
   }
 
   @Post("upload")

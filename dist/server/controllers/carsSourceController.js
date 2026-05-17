@@ -3,8 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.listCarsSources = listCarsSources;
 exports.listCarsSourceSearchSuggestions = listCarsSourceSearchSuggestions;
 const harajScrapeController_1 = require("./harajScrapeController");
-const yallaMotorController_1 = require("./yallaMotorController");
-const syarahController_1 = require("./syarahController");
+const mobasherAuctionsController_1 = require("./mobasherAuctionsController");
 const runtime_cache_1 = require("../lib/runtime-cache");
 const vehicle_name_match_1 = require("../../lib/vehicle-name-match");
 const DEFAULT_LIMIT = 25;
@@ -24,8 +23,10 @@ const SUGGESTIONS_FALLBACK_SOURCE_FETCH_LIMIT = 120;
 const SUGGESTIONS_CACHE_TTL_MS = 30_000;
 const SUGGESTIONS_CACHE_STALE_TTL_MS = 180_000;
 const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
-const SOURCE_KEYS = ["haraj", "yallamotor", "syarah"];
+const SOURCE_KEYS = ["haraj", "mobasher"];
+const CARS_IND_HARAJ_OPTIONS = { dataSource: "cars-ind" };
 const SUGGESTIONS_MIN_QUERY_LENGTH = 2;
+const MERGED_SEARCH_MAX_PER_SOURCE = 160;
 const SUGGESTIONS_MAX_SEARCH_TERMS = 8;
 const SUGGESTIONS_MAX_RAW_CANDIDATES_MULTIPLIER = 18;
 const SUGGESTION_MAX_FUZZY_DISTANCE = 3;
@@ -363,14 +364,13 @@ function extractSuggestionCandidates(source, item) {
 }
 async function listSourceItemsForSuggestions(source, query, fetchLimit = SUGGESTIONS_SOURCE_FETCH_LIMIT) {
     if (source === "haraj") {
-        const result = await (0, harajScrapeController_1.listHarajScrapes)(query, { maxLimit: fetchLimit });
+        const result = await (0, harajScrapeController_1.listHarajScrapes)(query, {
+            maxLimit: fetchLimit,
+            ...CARS_IND_HARAJ_OPTIONS,
+        });
         return result.items;
     }
-    if (source === "yallamotor") {
-        const result = await (0, yallaMotorController_1.listYallaMotors)(query, { maxLimit: fetchLimit });
-        return result.items;
-    }
-    const result = await (0, syarahController_1.listSyarahs)(query, { maxLimit: fetchLimit });
+    const result = await (0, mobasherAuctionsController_1.listMobasherAuctions)(query, { maxLimit: fetchLimit });
     return result.items;
 }
 function scoreSuggestionCandidate(candidate, profile) {
@@ -558,18 +558,11 @@ function normalizeHarajItems(items) {
         priceCompare: null,
     }));
 }
-function normalizeYallaItems(items) {
+function normalizeMobasherItems(items) {
     return items.map((item) => ({
         ...item,
         postDate: toEpochMillis(item.postDate ?? null),
-        source: "yallamotor",
-    }));
-}
-function normalizeSyarahItems(items) {
-    return items.map((item) => ({
-        ...item,
-        postDate: toEpochMillis(item.postDate ?? null),
-        source: "syarah",
+        source: "mobasher",
         priceCompare: null,
     }));
 }
@@ -689,10 +682,9 @@ async function listCarsSources(query) {
     const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
     const page = Math.max(query.page ?? 1, 1);
     const countMode = query.countMode === "none" ? "none" : "exact";
-    const sources = (query.sources ?? ["haraj", "yallamotor", "syarah"]).map(normalizeSource);
+    const sources = (query.sources ?? ["haraj", "mobasher"]).map(normalizeSource);
     const includeHaraj = sources.includes("haraj");
-    const includeYalla = sources.includes("yallamotor");
-    const includeSyarah = sources.includes("syarah");
+    const includeMobasher = sources.includes("mobasher");
     const cacheTtlMs = query.fields === "modelYears"
         ? MODEL_YEARS_CACHE_TTL_MS
         : query.fields === "options"
@@ -710,7 +702,7 @@ async function listCarsSources(query) {
         sources,
     })}`;
     return (0, runtime_cache_1.getOrSetRuntimeCacheStaleWhileRevalidate)(cacheKey, cacheTtlMs, cacheStaleTtlMs, async () => {
-        if (!includeHaraj && !includeYalla && !includeSyarah) {
+        if (!includeHaraj && !includeMobasher) {
             return {
                 items: [],
                 total: 0,
@@ -725,25 +717,17 @@ async function listCarsSources(query) {
                 tag2: undefined,
                 carModelYear: undefined,
             };
-            const [harajData, yallaData, syarahData] = await Promise.all([
+            const [harajData, mobasherData] = await Promise.all([
                 includeHaraj
                     ? (0, harajScrapeController_1.listHarajScrapes)({
                         ...modelYearsQuery,
                         page: 1,
                         limit: MAX_INTERNAL_LIMIT,
                         fields: "modelYears",
-                    }, { maxLimit: MAX_INTERNAL_LIMIT })
+                    }, { maxLimit: MAX_INTERNAL_LIMIT, ...CARS_IND_HARAJ_OPTIONS })
                     : Promise.resolve({ items: [] }),
-                includeYalla
-                    ? (0, yallaMotorController_1.listYallaMotors)({
-                        ...modelYearsQuery,
-                        page: 1,
-                        limit: MAX_INTERNAL_LIMIT,
-                        fields: "modelYears",
-                    }, { maxLimit: MAX_INTERNAL_LIMIT })
-                    : Promise.resolve({ items: [] }),
-                includeSyarah
-                    ? (0, syarahController_1.listSyarahs)({
+                includeMobasher
+                    ? (0, mobasherAuctionsController_1.listMobasherAuctions)({
                         ...modelYearsQuery,
                         page: 1,
                         limit: MAX_INTERNAL_LIMIT,
@@ -751,7 +735,7 @@ async function listCarsSources(query) {
                     }, { maxLimit: MAX_INTERNAL_LIMIT })
                     : Promise.resolve({ items: [] }),
             ]);
-            const years = [...harajData.items, ...yallaData.items, ...syarahData.items]
+            const years = [...harajData.items, ...mobasherData.items]
                 .map((item) => toNumericYear(item.carModelYear))
                 .filter((value) => value !== null);
             const items = buildYearOnlyItems(buildDescendingYearRange(years));
@@ -762,12 +746,12 @@ async function listCarsSources(query) {
                 limit: items.length || 1,
             };
         }
-        if (includeHaraj && !includeYalla && !includeSyarah) {
+        if (includeHaraj && !includeMobasher) {
             const harajData = await (0, harajScrapeController_1.listHarajScrapes)({
                 ...query,
                 page,
                 limit,
-            }, { maxLimit: MAX_LIMIT });
+            }, { maxLimit: MAX_LIMIT, ...CARS_IND_HARAJ_OPTIONS });
             return {
                 ...harajData,
                 items: normalizeHarajItems(harajData.items),
@@ -775,52 +759,31 @@ async function listCarsSources(query) {
                 limit,
             };
         }
-        if (!includeHaraj && includeYalla && !includeSyarah) {
-            const yallaData = await (0, yallaMotorController_1.listYallaMotors)({
+        if (!includeHaraj && includeMobasher) {
+            const mobasherData = await (0, mobasherAuctionsController_1.listMobasherAuctions)({
                 ...query,
                 page,
                 limit,
             }, { maxLimit: MAX_LIMIT });
             return {
-                ...yallaData,
-                items: normalizeYallaItems(yallaData.items),
-                page,
-                limit,
-            };
-        }
-        if (!includeHaraj && !includeYalla && includeSyarah) {
-            const syarahData = await (0, syarahController_1.listSyarahs)({
-                ...query,
-                page,
-                limit,
-            }, { maxLimit: MAX_LIMIT });
-            return {
-                ...syarahData,
-                items: normalizeSyarahItems(syarahData.items),
+                ...mobasherData,
+                items: normalizeMobasherItems(mobasherData.items),
                 page,
                 limit,
             };
         }
         if (query.fields === "options") {
-            const [harajData, yallaData, syarahData] = await Promise.all([
+            const [harajData, mobasherData] = await Promise.all([
                 includeHaraj
                     ? (0, harajScrapeController_1.listHarajScrapes)({
                         ...query,
                         page,
                         limit,
                         fields: "options",
-                    }, { maxLimit: MAX_LIMIT })
+                    }, { maxLimit: MAX_LIMIT, ...CARS_IND_HARAJ_OPTIONS })
                     : Promise.resolve({ items: [], total: 0 }),
-                includeYalla
-                    ? (0, yallaMotorController_1.listYallaMotors)({
-                        ...query,
-                        page,
-                        limit,
-                        fields: "options",
-                    }, { maxLimit: MAX_LIMIT })
-                    : Promise.resolve({ items: [], total: 0 }),
-                includeSyarah
-                    ? (0, syarahController_1.listSyarahs)({
+                includeMobasher
+                    ? (0, mobasherAuctionsController_1.listMobasherAuctions)({
                         ...query,
                         page,
                         limit,
@@ -829,41 +792,33 @@ async function listCarsSources(query) {
                     : Promise.resolve({ items: [], total: 0 }),
             ]);
             const normalizedHarajItems = normalizeHarajItems(harajData.items);
-            const normalizedYallaItems = normalizeYallaItems(yallaData.items);
-            const normalizedSyarahItems = normalizeSyarahItems(syarahData.items);
-            const mergedOptionItems = mergeSortedItems([normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems], query.sort, limit);
+            const normalizedMobasherItems = normalizeMobasherItems(mobasherData.items);
+            const mergedOptionItems = mergeSortedItems([normalizedHarajItems, normalizedMobasherItems], query.sort, limit);
             return {
                 items: mergedOptionItems,
-                total: countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total,
+                total: countMode === "none" ? -1 : harajData.total + mobasherData.total,
                 page,
                 limit,
                 ...(countMode === "none"
                     ? {
                         hasNext: Boolean(harajData.hasNext) ||
-                            Boolean(yallaData.hasNext) ||
-                            Boolean(syarahData.hasNext),
+                            Boolean(mobasherData.hasNext),
                     }
                     : {}),
             };
         }
-        const perSourceLimit = Math.min(limit * page + (countMode === "none" ? 1 : 0), MAX_INTERNAL_LIMIT);
-        const [harajData, yallaData, syarahData] = await Promise.all([
+        const hasSearch = Boolean(query.search?.trim());
+        const perSourceLimit = Math.min(limit * page + (countMode === "none" ? 1 : 0), hasSearch ? MERGED_SEARCH_MAX_PER_SOURCE : MAX_INTERNAL_LIMIT);
+        const [harajData, mobasherData] = await Promise.all([
             includeHaraj
                 ? (0, harajScrapeController_1.listHarajScrapes)({
                     ...query,
                     page: 1,
                     limit: perSourceLimit,
-                }, { maxLimit: perSourceLimit })
+                }, { maxLimit: perSourceLimit, ...CARS_IND_HARAJ_OPTIONS })
                 : Promise.resolve({ items: [], total: 0 }),
-            includeYalla
-                ? (0, yallaMotorController_1.listYallaMotors)({
-                    ...query,
-                    page: 1,
-                    limit: perSourceLimit,
-                }, { maxLimit: perSourceLimit })
-                : Promise.resolve({ items: [], total: 0 }),
-            includeSyarah
-                ? (0, syarahController_1.listSyarahs)({
+            includeMobasher
+                ? (0, mobasherAuctionsController_1.listMobasherAuctions)({
                     ...query,
                     page: 1,
                     limit: perSourceLimit,
@@ -871,16 +826,15 @@ async function listCarsSources(query) {
                 : Promise.resolve({ items: [], total: 0 }),
         ]);
         const normalizedHarajItems = normalizeHarajItems(harajData.items);
-        const normalizedYallaItems = normalizeYallaItems(yallaData.items);
-        const normalizedSyarahItems = normalizeSyarahItems(syarahData.items);
+        const normalizedMobasherItems = normalizeMobasherItems(mobasherData.items);
         const start = (page - 1) * limit;
         const pageWindowSize = limit + (countMode === "none" ? 1 : 0);
         const takeCount = start + pageWindowSize;
-        const mergedWindow = mergeSortedItems([normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems], query.sort, takeCount);
+        const mergedWindow = mergeSortedItems([normalizedHarajItems, normalizedMobasherItems], query.sort, takeCount);
         const pageWindow = mergedWindow.slice(start, start + pageWindowSize);
         const hasNext = countMode === "none" ? pageWindow.length > limit : undefined;
         const pagedItems = countMode === "none" ? pageWindow.slice(0, limit) : pageWindow;
-        const total = countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total;
+        const total = countMode === "none" ? -1 : harajData.total + mobasherData.total;
         return {
             items: pagedItems,
             total,

@@ -1,6 +1,5 @@
 import { listHarajScrapes, type HarajScrapeListQuery } from "./harajScrapeController";
-import { listYallaMotors } from "./yallaMotorController";
-import { listSyarahs } from "./syarahController";
+import { listMobasherAuctions } from "./mobasherAuctionsController";
 import { getOrSetRuntimeCacheStaleWhileRevalidate } from "../lib/runtime-cache";
 import { buildVehicleAliases, toVehicleCanonicalKey } from "@/lib/vehicle-name-match";
 
@@ -12,7 +11,7 @@ export type CarsSearchSuggestionsQuery = CarsSourcesListQuery & {
   q?: string;
 };
 
-type CarsSourceKey = "haraj" | "yallamotor" | "syarah";
+type CarsSourceKey = "haraj" | "mobasher";
 type SuggestionCandidate = {
   label: string;
   normalized: string;
@@ -49,8 +48,11 @@ const SUGGESTIONS_FALLBACK_SOURCE_FETCH_LIMIT = 120;
 const SUGGESTIONS_CACHE_TTL_MS = 30_000;
 const SUGGESTIONS_CACHE_STALE_TTL_MS = 180_000;
 const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
-const SOURCE_KEYS: CarsSourceKey[] = ["haraj", "yallamotor", "syarah"];
+const SOURCE_KEYS: CarsSourceKey[] = ["haraj", "mobasher"];
+const CARS_IND_HARAJ_OPTIONS = { dataSource: "cars-ind" as const };
 const SUGGESTIONS_MIN_QUERY_LENGTH = 2;
+/** حد أقصى لكل مصدر عند دمج حراج+مباشر مع بحث — يمنع جلب آلاف السجلات وانقطاع الاتصال. */
+const MERGED_SEARCH_MAX_PER_SOURCE = 160;
 const SUGGESTIONS_MAX_SEARCH_TERMS = 8;
 const SUGGESTIONS_MAX_RAW_CANDIDATES_MULTIPLIER = 18;
 const SUGGESTION_MAX_FUZZY_DISTANCE = 3;
@@ -461,14 +463,13 @@ async function listSourceItemsForSuggestions(
   fetchLimit = SUGGESTIONS_SOURCE_FETCH_LIMIT
 ) {
   if (source === "haraj") {
-    const result = await listHarajScrapes(query, { maxLimit: fetchLimit });
+    const result = await listHarajScrapes(query, {
+      maxLimit: fetchLimit,
+      ...CARS_IND_HARAJ_OPTIONS,
+    });
     return result.items as Array<Record<string, any>>;
   }
-  if (source === "yallamotor") {
-    const result = await listYallaMotors(query, { maxLimit: fetchLimit });
-    return result.items as Array<Record<string, any>>;
-  }
-  const result = await listSyarahs(query, { maxLimit: fetchLimit });
+  const result = await listMobasherAuctions(query, { maxLimit: fetchLimit });
   return result.items as Array<Record<string, any>>;
 }
 
@@ -718,19 +719,11 @@ function normalizeHarajItems(items: Array<Record<string, any>>) {
   }));
 }
 
-function normalizeYallaItems(items: Array<Record<string, any>>) {
+function normalizeMobasherItems(items: Array<Record<string, any>>) {
   return items.map((item) => ({
     ...item,
     postDate: toEpochMillis(item.postDate ?? null),
-    source: "yallamotor",
-  }));
-}
-
-function normalizeSyarahItems(items: Array<Record<string, any>>) {
-  return items.map((item) => ({
-    ...item,
-    postDate: toEpochMillis(item.postDate ?? null),
-    source: "syarah",
+    source: "mobasher",
     priceCompare: null,
   }));
 }
@@ -872,10 +865,9 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
   const page = Math.max(query.page ?? 1, 1);
   const countMode = query.countMode === "none" ? "none" : "exact";
 
-  const sources = (query.sources ?? ["haraj", "yallamotor", "syarah"]).map(normalizeSource);
+  const sources = (query.sources ?? ["haraj", "mobasher"]).map(normalizeSource);
   const includeHaraj = sources.includes("haraj");
-  const includeYalla = sources.includes("yallamotor");
-  const includeSyarah = sources.includes("syarah");
+  const includeMobasher = sources.includes("mobasher");
   const cacheTtlMs =
     query.fields === "modelYears"
       ? MODEL_YEARS_CACHE_TTL_MS
@@ -900,7 +892,7 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
     cacheTtlMs,
     cacheStaleTtlMs,
     async () => {
-    if (!includeHaraj && !includeYalla && !includeSyarah) {
+    if (!includeHaraj && !includeMobasher) {
       return {
         items: [],
         total: 0,
@@ -916,7 +908,7 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
         tag2: undefined,
         carModelYear: undefined,
       };
-      const [harajData, yallaData, syarahData] = await Promise.all([
+      const [harajData, mobasherData] = await Promise.all([
         includeHaraj
           ? listHarajScrapes(
               {
@@ -925,22 +917,11 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
                 limit: MAX_INTERNAL_LIMIT,
                 fields: "modelYears",
               },
-              { maxLimit: MAX_INTERNAL_LIMIT }
+              { maxLimit: MAX_INTERNAL_LIMIT, ...CARS_IND_HARAJ_OPTIONS }
             )
           : Promise.resolve({ items: [] as Array<Record<string, any>> }),
-        includeYalla
-          ? listYallaMotors(
-              {
-                ...modelYearsQuery,
-                page: 1,
-                limit: MAX_INTERNAL_LIMIT,
-                fields: "modelYears",
-              },
-              { maxLimit: MAX_INTERNAL_LIMIT }
-            )
-          : Promise.resolve({ items: [] as Array<Record<string, any>> }),
-        includeSyarah
-          ? listSyarahs(
+        includeMobasher
+          ? listMobasherAuctions(
               {
                 ...modelYearsQuery,
                 page: 1,
@@ -952,7 +933,7 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
           : Promise.resolve({ items: [] as Array<Record<string, any>> }),
       ]);
 
-      const years = [...harajData.items, ...yallaData.items, ...syarahData.items]
+      const years = [...harajData.items, ...mobasherData.items]
         .map((item) => toNumericYear((item as Record<string, any>).carModelYear))
         .filter((value): value is number => value !== null);
       const items = buildYearOnlyItems(buildDescendingYearRange(years));
@@ -965,14 +946,14 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
       };
     }
 
-    if (includeHaraj && !includeYalla && !includeSyarah) {
+    if (includeHaraj && !includeMobasher) {
       const harajData = await listHarajScrapes(
         {
           ...query,
           page,
           limit,
         },
-        { maxLimit: MAX_LIMIT }
+        { maxLimit: MAX_LIMIT, ...CARS_IND_HARAJ_OPTIONS }
       );
 
       return {
@@ -983,8 +964,8 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
       };
     }
 
-    if (!includeHaraj && includeYalla && !includeSyarah) {
-      const yallaData = await listYallaMotors(
+    if (!includeHaraj && includeMobasher) {
+      const mobasherData = await listMobasherAuctions(
         {
           ...query,
           page,
@@ -994,33 +975,15 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
       );
 
       return {
-        ...yallaData,
-        items: normalizeYallaItems(yallaData.items as Array<Record<string, any>>),
-        page,
-        limit,
-      };
-    }
-
-    if (!includeHaraj && !includeYalla && includeSyarah) {
-      const syarahData = await listSyarahs(
-        {
-          ...query,
-          page,
-          limit,
-        },
-        { maxLimit: MAX_LIMIT }
-      );
-
-      return {
-        ...syarahData,
-        items: normalizeSyarahItems(syarahData.items as Array<Record<string, any>>),
+        ...mobasherData,
+        items: normalizeMobasherItems(mobasherData.items as Array<Record<string, any>>),
         page,
         limit,
       };
     }
 
     if (query.fields === "options") {
-      const [harajData, yallaData, syarahData] = await Promise.all([
+      const [harajData, mobasherData] = await Promise.all([
         includeHaraj
           ? listHarajScrapes(
               {
@@ -1029,22 +992,11 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
                 limit,
                 fields: "options",
               },
-              { maxLimit: MAX_LIMIT }
+              { maxLimit: MAX_LIMIT, ...CARS_IND_HARAJ_OPTIONS }
             )
           : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
-        includeYalla
-          ? listYallaMotors(
-              {
-                ...query,
-                page,
-                limit,
-                fields: "options",
-              },
-              { maxLimit: MAX_LIMIT }
-            )
-          : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
-        includeSyarah
-          ? listSyarahs(
+        includeMobasher
+          ? listMobasherAuctions(
               {
                 ...query,
                 page,
@@ -1056,35 +1008,36 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
           : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
       ]);
       const normalizedHarajItems = normalizeHarajItems(harajData.items as Array<Record<string, any>>);
-      const normalizedYallaItems = normalizeYallaItems(yallaData.items as Array<Record<string, any>>);
-      const normalizedSyarahItems = normalizeSyarahItems(syarahData.items as Array<Record<string, any>>);
+      const normalizedMobasherItems = normalizeMobasherItems(
+        mobasherData.items as Array<Record<string, any>>
+      );
       const mergedOptionItems = mergeSortedItems(
-        [normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems],
+        [normalizedHarajItems, normalizedMobasherItems],
         query.sort,
         limit
       );
 
       return {
         items: mergedOptionItems,
-        total: countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total,
+        total: countMode === "none" ? -1 : harajData.total + mobasherData.total,
         page,
         limit,
         ...(countMode === "none"
           ? {
               hasNext:
                 Boolean((harajData as { hasNext?: boolean }).hasNext) ||
-                Boolean((yallaData as { hasNext?: boolean }).hasNext) ||
-                Boolean((syarahData as { hasNext?: boolean }).hasNext),
+                Boolean((mobasherData as { hasNext?: boolean }).hasNext),
             }
           : {}),
       };
     }
 
+    const hasSearch = Boolean(query.search?.trim());
     const perSourceLimit = Math.min(
       limit * page + (countMode === "none" ? 1 : 0),
-      MAX_INTERNAL_LIMIT
+      hasSearch ? MERGED_SEARCH_MAX_PER_SOURCE : MAX_INTERNAL_LIMIT
     );
-    const [harajData, yallaData, syarahData] = await Promise.all([
+    const [harajData, mobasherData] = await Promise.all([
       includeHaraj
         ? listHarajScrapes(
             {
@@ -1092,21 +1045,11 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
               page: 1,
               limit: perSourceLimit,
             },
-            { maxLimit: perSourceLimit }
+            { maxLimit: perSourceLimit, ...CARS_IND_HARAJ_OPTIONS }
           )
         : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
-      includeYalla
-        ? listYallaMotors(
-            {
-              ...query,
-              page: 1,
-              limit: perSourceLimit,
-            },
-            { maxLimit: perSourceLimit }
-          )
-        : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
-      includeSyarah
-        ? listSyarahs(
+      includeMobasher
+        ? listMobasherAuctions(
             {
               ...query,
               page: 1,
@@ -1117,20 +1060,21 @@ export async function listCarsSources(query: CarsSourcesListQuery) {
         : Promise.resolve({ items: [] as Array<Record<string, any>>, total: 0 }),
     ]);
     const normalizedHarajItems = normalizeHarajItems(harajData.items as Array<Record<string, any>>);
-    const normalizedYallaItems = normalizeYallaItems(yallaData.items as Array<Record<string, any>>);
-    const normalizedSyarahItems = normalizeSyarahItems(syarahData.items as Array<Record<string, any>>);
+    const normalizedMobasherItems = normalizeMobasherItems(
+      mobasherData.items as Array<Record<string, any>>
+    );
     const start = (page - 1) * limit;
     const pageWindowSize = limit + (countMode === "none" ? 1 : 0);
     const takeCount = start + pageWindowSize;
     const mergedWindow = mergeSortedItems(
-      [normalizedHarajItems, normalizedYallaItems, normalizedSyarahItems],
+      [normalizedHarajItems, normalizedMobasherItems],
       query.sort,
       takeCount
     );
     const pageWindow = mergedWindow.slice(start, start + pageWindowSize);
     const hasNext = countMode === "none" ? pageWindow.length > limit : undefined;
     const pagedItems = countMode === "none" ? pageWindow.slice(0, limit) : pageWindow;
-    const total = countMode === "none" ? -1 : harajData.total + yallaData.total + syarahData.total;
+    const total = countMode === "none" ? -1 : harajData.total + mobasherData.total;
 
     return {
       items: pagedItems,

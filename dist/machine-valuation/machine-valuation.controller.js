@@ -20,6 +20,7 @@ const promises_1 = require("node:stream/promises");
 const node_stream_1 = require("node:stream");
 const machine_valuation_service_1 = require("./machine-valuation.service");
 const file_parser_service_1 = require("./file-parser.service");
+const mv_realtime_service_1 = require("./mv-realtime.service");
 const asset_import_constants_1 = require("../assets/asset-import.constants");
 const inspector_files_constants_1 = require("./inspector-files.constants");
 const sheet_rows_util_1 = require("./sheet-rows.util");
@@ -43,9 +44,13 @@ function bodyStringArray(value) {
     return [];
 }
 let MachineValuationController = class MachineValuationController {
-    constructor(mvService, fileParser) {
+    constructor(mvService, fileParser, mvRealtime) {
         this.mvService = mvService;
         this.fileParser = fileParser;
+        this.mvRealtime = mvRealtime;
+    }
+    publishRealtime(projectId, type, reason) {
+        this.mvRealtime.publish(projectId, type, reason);
     }
     async listProjects(req, res) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -154,6 +159,12 @@ let MachineValuationController = class MachineValuationController {
         const mode = picAssetMode === "summary" ? "summary" : "full";
         return this.mvService.getProject(id, toMvAccess(context), { picAssetMode: mode });
     }
+    async streamProjectEvents(req, res, id) {
+        const context = await (0, context_1.resolveRequestContext)(req);
+        (0, context_1.applyContextCookies)(res, context);
+        await this.mvService.getProject(id, toMvAccess(context), { picAssetMode: "summary" });
+        this.mvRealtime.subscribe(id, res);
+    }
     async setProjectWorkflow(req, res, id, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
@@ -173,12 +184,17 @@ let MachineValuationController = class MachineValuationController {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
         const parentRaw = body.parent?.trim() || body.parentSubProjectId?.trim() || undefined;
-        return this.mvService.createSubProject(projectId, body.name ?? "", toMvAccess(context), parentRaw);
+        const created = await this.mvService.createSubProject(projectId, body.name ?? "", toMvAccess(context), parentRaw);
+        this.publishRealtime(projectId, "asset-folders-changed", "subproject:create");
+        return created;
     }
     async deleteAllSubProjects(req, res, projectId) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        return this.mvService.deleteAllSubProjects(projectId, toMvAccess(context));
+        const result = await this.mvService.deleteAllSubProjects(projectId, toMvAccess(context));
+        this.publishRealtime(projectId, "asset-folders-changed", "subproject:delete-all");
+        this.publishRealtime(projectId, "asset-images-changed", "subproject:delete-all");
+        return result;
     }
     async getSubProject(req, res, pid, sid) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -188,12 +204,18 @@ let MachineValuationController = class MachineValuationController {
     async patchSubProject(req, res, pid, sid, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        return this.mvService.patchSubProject(pid, sid, toMvAccess(context), body);
+        const result = await this.mvService.patchSubProject(pid, sid, toMvAccess(context), body);
+        this.publishRealtime(pid, "asset-images-changed", "subproject:patch");
+        this.publishRealtime(pid, "asset-folders-changed", "subproject:patch");
+        return result;
     }
     async deleteSubProject(req, res, pid, sid) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        return this.mvService.deleteSubProject(pid, sid, toMvAccess(context));
+        const result = await this.mvService.deleteSubProject(pid, sid, toMvAccess(context));
+        this.publishRealtime(pid, "asset-folders-changed", "subproject:delete");
+        this.publishRealtime(pid, "asset-images-changed", "subproject:delete");
+        return result;
     }
     async generateInspectionFolders(req, res, pid, sid, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -203,11 +225,13 @@ let MachineValuationController = class MachineValuationController {
     async generateAssetImportImageFolders(req, res, pid, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        return this.mvService.generateInspectionFoldersFromAssetImport(pid, toMvAccess(context), {
+        const result = await this.mvService.generateInspectionFoldersFromAssetImport(pid, toMvAccess(context), {
             columnKey: body?.columnKey ?? "",
             importId: body?.importId ?? "",
             sheetName: body?.sheetName ?? "",
         });
+        this.publishRealtime(pid, "asset-folders-changed", "asset-import-image-folders:generate");
+        return result;
     }
     async listProjectAssetImageFiles(req, res, projectId) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -223,11 +247,14 @@ let MachineValuationController = class MachineValuationController {
             : Array.isArray(rawBodyPid) && typeof rawBodyPid[0] === "string" ? rawBodyPid[0].trim() || undefined
                 : undefined;
         const picAssetFolderId = (picAssetFolderIdFromQuery && picAssetFolderIdFromQuery.trim()) || fromBody;
-        return this.mvService.uploadProjectFiles(projectId, files ?? [], toMvAccess(context), picAssetFolderId, {
+        const result = await this.mvService.uploadProjectFiles(projectId, files ?? [], toMvAccess(context), picAssetFolderId, {
             scope: "asset-images",
             relativePaths: paths,
             imageOnly: true,
         });
+        this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:upload");
+        this.publishRealtime(projectId, "asset-folders-changed", "asset-image-files:upload");
+        return result;
     }
     async handleReorderProjectAssetImageFiles(req, res, projectId, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -237,7 +264,9 @@ let MachineValuationController = class MachineValuationController {
         const orderedFileIds = Array.isArray(rawIds) ?
             rawIds.map((item) => String(item ?? "").trim()).filter((id) => id.length > 0)
             : [];
-        return this.mvService.reorderProjectAssetImageFiles(projectId, toMvAccess(context), folderPath, orderedFileIds, body?.picAssetFolderId);
+        const result = await this.mvService.reorderProjectAssetImageFiles(projectId, toMvAccess(context), folderPath, orderedFileIds, body?.picAssetFolderId);
+        this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:reorder");
+        return result;
     }
     async patchProjectAssetImageFilePlace(req, res, projectId, body) {
         return this.handlePlaceProjectAssetImageFile(req, res, projectId, body);
@@ -258,13 +287,18 @@ let MachineValuationController = class MachineValuationController {
         const fileIds = Array.isArray(rawIds) ?
             rawIds.map((item) => String(item ?? "").trim()).filter((id) => id.length > 0)
             : [];
-        return this.mvService.updateProjectAssetImageReportSelection(projectId, toMvAccess(context), fileIds, body?.includeInReport !== false);
+        const result = await this.mvService.updateProjectAssetImageReportSelection(projectId, toMvAccess(context), fileIds, body?.includeInReport !== false);
+        this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:report-selection");
+        return result;
     }
     async handlePlaceProjectAssetImageFile(req, res, projectId, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
         const fileId = typeof body?.fileId === "string" ? body.fileId.trim() : "";
-        return this.mvService.placeProjectAssetImageFile(projectId, toMvAccess(context), fileId, body?.targetFolderPath, body?.insertBeforeFileId, body?.targetPicAssetFolderId);
+        const result = await this.mvService.placeProjectAssetImageFile(projectId, toMvAccess(context), fileId, body?.targetFolderPath, body?.insertBeforeFileId, body?.targetPicAssetFolderId);
+        this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:place");
+        this.publishRealtime(projectId, "asset-folders-changed", "asset-image-files:place");
+        return result;
     }
     async listProjectFiles(req, res, projectId, subProjectId) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -341,7 +375,10 @@ let MachineValuationController = class MachineValuationController {
     async deleteProjectFile(req, res, projectId, fileId) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        return this.mvService.deleteProjectFile(projectId, fileId, toMvAccess(context));
+        const result = await this.mvService.deleteProjectFile(projectId, fileId, toMvAccess(context));
+        this.publishRealtime(projectId, "asset-images-changed", "project-file:delete");
+        this.publishRealtime(projectId, "asset-folders-changed", "project-file:delete");
+        return result;
     }
     async uploadFile(req, res, file, projectId, subProjectId, persist, sourceFileNameUtf8) {
         if (!file) {
@@ -528,6 +565,15 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, String, String]),
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "getProject", null);
+__decorate([
+    (0, common_1.Get)("projects/:id/events"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)()),
+    __param(2, (0, common_1.Param)("id")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String]),
+    __metadata("design:returntype", Promise)
+], MachineValuationController.prototype, "streamProjectEvents", null);
 __decorate([
     (0, common_1.Post)("projects/:id/workflow"),
     __param(0, (0, common_1.Req)()),
@@ -880,5 +926,6 @@ __decorate([
 exports.MachineValuationController = MachineValuationController = __decorate([
     (0, common_1.Controller)("mv"),
     __metadata("design:paramtypes", [machine_valuation_service_1.MachineValuationService,
-        file_parser_service_1.FileParserService])
+        file_parser_service_1.FileParserService,
+        mv_realtime_service_1.MvRealtimeService])
 ], MachineValuationController);

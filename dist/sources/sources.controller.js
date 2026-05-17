@@ -17,6 +17,7 @@ const common_1 = require("@nestjs/common");
 const query_utils_1 = require("../common/query-utils");
 const carsSourceController_1 = require("../server/controllers/carsSourceController");
 const harajScrapeController_1 = require("../server/controllers/harajScrapeController");
+const mobasherAuctionsController_1 = require("../server/controllers/mobasherAuctionsController");
 const yallaMotorController_1 = require("../server/controllers/yallaMotorController");
 const syarahController_1 = require("../server/controllers/syarahController");
 const context_1 = require("../server/auth-tracking/context");
@@ -54,6 +55,7 @@ function parseHarajLikeQuery(req) {
         excludeTag1: (0, query_utils_1.readQueryString)(req, "excludeTag1"),
         fields: parseFields((0, query_utils_1.readQueryString)(req, "fields")),
         countMode: parseCountMode((0, query_utils_1.readQueryString)(req, "countMode")),
+        broadSearch: (0, query_utils_1.parseBoolean)((0, query_utils_1.readQueryString)(req, "broadSearch")),
     };
 }
 function parseCarsSourcesQuery(req) {
@@ -111,6 +113,41 @@ let SourcesController = class SourcesController {
         });
         (0, context_1.applyContextCookies)(res, guard.context);
         const doc = await (0, harajScrapeController_1.getHarajScrapeById)(id);
+        if (!doc) {
+            res.status(404);
+            return { error: "Not found" };
+        }
+        return doc;
+    }
+    async getCarsIndHarajScrapeByIdRoute(id, req, res) {
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: false,
+            attemptReason: "cars_ind_haraj_detail",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        const doc = await (0, harajScrapeController_1.getHarajScrapeById)(id, "cars-ind");
+        if (!doc) {
+            res.status(404);
+            return { error: "Not found" };
+        }
+        return doc;
+    }
+    async listMobasherAuctionsRoute(req, res) {
+        const fields = (0, query_utils_1.readQueryString)(req, "fields");
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: fields !== "options" && fields !== "modelYears",
+            attemptReason: "mobasher_query",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        return (0, mobasherAuctionsController_1.listMobasherAuctions)(parseHarajLikeQuery(req));
+    }
+    async getMobasherAuctionByIdRoute(id, req, res) {
+        const guard = await (0, service_1.enforceGuestAccess)(req, {
+            incrementAttempt: false,
+            attemptReason: "mobasher_detail",
+        });
+        (0, context_1.applyContextCookies)(res, guard.context);
+        const doc = await (0, mobasherAuctionsController_1.getMobasherAuctionById)(id);
         if (!doc) {
             res.status(404);
             return { error: "Not found" };
@@ -196,6 +233,32 @@ __decorate([
     __metadata("design:paramtypes", [String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], SourcesController.prototype, "getHarajScrapeByIdRoute", null);
+__decorate([
+    (0, common_1.Get)("cars-ind/haraj-scrape/:id"),
+    __param(0, (0, common_1.Param)("id")),
+    __param(1, (0, common_1.Req)()),
+    __param(2, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "getCarsIndHarajScrapeByIdRoute", null);
+__decorate([
+    (0, common_1.Get)("mobasher-auctions"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "listMobasherAuctionsRoute", null);
+__decorate([
+    (0, common_1.Get)("mobasher-auctions/:id"),
+    __param(0, (0, common_1.Param)("id")),
+    __param(1, (0, common_1.Req)()),
+    __param(2, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object, Object]),
+    __metadata("design:returntype", Promise)
+], SourcesController.prototype, "getMobasherAuctionByIdRoute", null);
 __decorate([
     (0, common_1.Get)("yallamotor-scrape"),
     __param(0, (0, common_1.Req)()),

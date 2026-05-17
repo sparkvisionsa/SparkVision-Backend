@@ -1,6 +1,8 @@
 import { MongoServerError, type Document } from "mongodb";
 import { getMongoDb } from "./mongodb";
+import { getMongoIndDb } from "./mongodb-ind";
 import { getCarsHarajCollection, getHarajScrapeCollection } from "./models/harajScrape";
+import { getMobasherAuctionsCollection } from "./models/mobasherAuctions";
 import {
   getYallaNewCarsCollection,
   getYallaMotorCollection,
@@ -24,6 +26,8 @@ type IndexableCollection = {
 declare global {
   // eslint-disable-next-line no-var
   var sparkSourceIndexesWarmup: Promise<void> | undefined;
+  // eslint-disable-next-line no-var
+  var sparkCarsIndIndexesWarmup: Promise<void> | undefined;
 }
 
 const HARJ_INDEXES: IndexSpec[] = [
@@ -169,6 +173,42 @@ const SYARAH_INDEXES: IndexSpec[] = [
   },
 ];
 
+const MOBASHER_INDEXES: IndexSpec[] = [
+  { name: "scrapedAt_desc", key: { scrapedAt: -1 } },
+  { name: "auctionCode_asc", key: { auctionCode: 1 } },
+  { name: "title_asc", key: { title: 1 } },
+  {
+    name: "smart_search_text",
+    key: {
+      title: "text",
+      auctionTitle: "text",
+      auctionName: "text",
+      auctionCode: "text",
+      address: "text",
+      breadcrumbs: "text",
+      "description.المدينة": "text",
+      "description.التصنيف": "text",
+      "productNotes.notes": "text",
+      "productNotes.warning": "text",
+    },
+    options: {
+      default_language: "none",
+      weights: {
+        title: 12,
+        auctionTitle: 11,
+        auctionName: 10,
+        auctionCode: 8,
+        breadcrumbs: 6,
+        address: 5,
+        "description.المدينة": 5,
+        "description.التصنيف": 4,
+        "productNotes.notes": 3,
+        "productNotes.warning": 2,
+      },
+    },
+  },
+];
+
 function shouldWarmupIndexes() {
   const value = (process.env.SOURCE_INDEX_WARMUP ?? "true").trim().toLowerCase();
   return value !== "0" && value !== "false";
@@ -211,6 +251,17 @@ async function warmupSourceIndexes() {
   ]);
 }
 
+async function warmupCarsIndSourceIndexes() {
+  const db = await getMongoIndDb();
+  const carsHaraj = getCarsHarajCollection(db);
+  const mobasher = getMobasherAuctionsCollection(db);
+
+  await Promise.all([
+    createIndexesSafely(carsHaraj, HARJ_INDEXES),
+    createIndexesSafely(mobasher, MOBASHER_INDEXES),
+  ]);
+}
+
 export function triggerSourceIndexWarmup() {
   if (!shouldWarmupIndexes()) {
     return;
@@ -218,6 +269,11 @@ export function triggerSourceIndexWarmup() {
   if (!global.sparkSourceIndexesWarmup) {
     global.sparkSourceIndexesWarmup = warmupSourceIndexes().catch((error) => {
       console.error("[source-indexes] Warmup failed", error);
+    });
+  }
+  if (!global.sparkCarsIndIndexesWarmup) {
+    global.sparkCarsIndIndexesWarmup = warmupCarsIndSourceIndexes().catch((error) => {
+      console.error("[source-indexes] Cars-ind warmup failed", error);
     });
   }
 }

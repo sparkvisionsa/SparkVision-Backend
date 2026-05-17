@@ -13,6 +13,10 @@ import {
   type HarajScrapeListQuery,
 } from "@/server/controllers/harajScrapeController";
 import {
+  getMobasherAuctionById,
+  listMobasherAuctions,
+} from "@/server/controllers/mobasherAuctionsController";
+import {
   getYallaMotorById,
   listYallaMotors,
   type YallaMotorListQuery,
@@ -61,6 +65,7 @@ function parseHarajLikeQuery(req: Request): HarajScrapeListQuery {
     excludeTag1: readQueryString(req, "excludeTag1"),
     fields: parseFields(readQueryString(req, "fields")),
     countMode: parseCountMode(readQueryString(req, "countMode")),
+    broadSearch: parseBoolean(readQueryString(req, "broadSearch")),
   };
 }
 
@@ -138,6 +143,57 @@ export class SourcesController {
     applyContextCookies(res, guard.context);
 
     const doc = await getHarajScrapeById(id);
+    if (!doc) {
+      res.status(404);
+      return { error: "Not found" };
+    }
+    return doc;
+  }
+
+  @Get("cars-ind/haraj-scrape/:id")
+  async getCarsIndHarajScrapeByIdRoute(
+    @Param("id") id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: false,
+      attemptReason: "cars_ind_haraj_detail",
+    });
+    applyContextCookies(res, guard.context);
+
+    const doc = await getHarajScrapeById(id, "cars-ind");
+    if (!doc) {
+      res.status(404);
+      return { error: "Not found" };
+    }
+    return doc;
+  }
+
+  @Get("mobasher-auctions")
+  async listMobasherAuctionsRoute(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const fields = readQueryString(req, "fields");
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: fields !== "options" && fields !== "modelYears",
+      attemptReason: "mobasher_query",
+    });
+    applyContextCookies(res, guard.context);
+    return listMobasherAuctions(parseHarajLikeQuery(req));
+  }
+
+  @Get("mobasher-auctions/:id")
+  async getMobasherAuctionByIdRoute(
+    @Param("id") id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const guard = await enforceGuestAccess(req, {
+      incrementAttempt: false,
+      attemptReason: "mobasher_detail",
+    });
+    applyContextCookies(res, guard.context);
+
+    const doc = await getMobasherAuctionById(id);
     if (!doc) {
       res.status(404);
       return { error: "Not found" };

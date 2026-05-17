@@ -154,6 +154,22 @@ function buildArabicLoosePattern(value: string) {
   return `(?:${uniquePatterns.join("|")})`;
 }
 
+/** تطابق حرفي: النص المدخل يجب أن يظهر كما هو في أحد الحقول (بدون مرادفات أو تشابه). */
+export function buildDocumentContainsRegex(value: string) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return /.^/i;
+  }
+  return new RegExp(escapeRegex(raw), "iu");
+}
+
+export function isDocumentContainsMatchQuery(query: {
+  exactSearch?: boolean;
+  broadSearch?: boolean;
+}) {
+  return query.exactSearch === true && query.broadSearch === true;
+}
+
 export function buildSearchRegex(
   value: string,
   options?: { exact?: boolean; fuzzyArabic?: boolean }

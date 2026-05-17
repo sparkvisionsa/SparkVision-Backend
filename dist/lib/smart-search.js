@@ -1,5 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildDocumentContainsRegex = buildDocumentContainsRegex;
+exports.isDocumentContainsMatchQuery = isDocumentContainsMatchQuery;
 exports.buildSearchRegex = buildSearchRegex;
 exports.buildSmartSearchTermGroups = buildSmartSearchTermGroups;
 exports.buildSmartTextSearchQuery = buildSmartTextSearchQuery;
@@ -133,6 +135,16 @@ function buildArabicLoosePattern(value) {
         return uniquePatterns[0];
     }
     return `(?:${uniquePatterns.join("|")})`;
+}
+function buildDocumentContainsRegex(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw) {
+        return /.^/i;
+    }
+    return new RegExp(escapeRegex(raw), "iu");
+}
+function isDocumentContainsMatchQuery(query) {
+    return query.exactSearch === true && query.broadSearch === true;
 }
 function buildSearchRegex(value, options) {
     const raw = String(value ?? "").trim();
