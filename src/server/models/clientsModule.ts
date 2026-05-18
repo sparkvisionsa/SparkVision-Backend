@@ -46,20 +46,13 @@ export interface ClientUpsertFields {
   formTemplateId: string | null;
 }
 
-<<<<<<< HEAD
-export interface FormTemplateDoc {
+/** MongoDB document shape */
+export interface ClientMongoDoc extends ClientUpsertFields {
   _id?: ObjectId;
-  name: string;
-  fields: FormFieldDoc[];
   createdAt?: Date;
   updatedAt?: Date;
 }
 
-export interface ClientDoc extends ClientUpsertFields {
-  _id?: ObjectId;
-  createdAt?: Date;
-  updatedAt?: Date;
-=======
 /** Shape of a client document as returned by the API/service layer */
 export interface ClientDoc {
   id: string;
@@ -67,7 +60,7 @@ export interface ClientDoc {
   phone: string;
   email: string;
   active: boolean;
-  typeId: string;
+  clientTypeId: string;
   address: string;
   clientAddress: string;
   formTemplateId: string | null;
@@ -79,6 +72,15 @@ export interface ClientDoc {
   updatedAt: string;
 }
 
+/** MongoDB form template document */
+export interface FormTemplateMongoDoc {
+  _id?: ObjectId;
+  name: string;
+  fields: FormFieldDoc[];
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 /** Shape of a form template document as returned by the API/service layer */
 export interface FormTemplateDoc {
   id: string;
@@ -86,5 +88,4 @@ export interface FormTemplateDoc {
   fields: FormFieldDoc[];
   createdAt: string;
   updatedAt: string;
->>>>>>> 7548135 (pdf worker + valuators)
 }

@@ -42,7 +42,6 @@ async function bootstrap() {
   app.useBodyParser("json", { limit: "100mb" });
   app.useBodyParser("urlencoded", { limit: "100mb", extended: true });
 
-<<<<<<< HEAD
   app.use(
     helmet({
       contentSecurityPolicy: false,
@@ -51,11 +50,6 @@ async function bootstrap() {
       crossOriginEmbedderPolicy: false,
     }),
   );
-=======
-  app.use(helmet());
-
-  /** تعطيل ضغط الاستجابة لبث GridFS/إعادة توجيه الملفات — يتجنب تلف الملفات الثنائية ويعمل مع الوكيل. */
->>>>>>> 7548135 (pdf worker + valuators)
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const path = String(req.originalUrl || req.url || "")
       .split("?")[0]
@@ -65,19 +59,6 @@ async function bootstrap() {
     }
     next();
   });
-<<<<<<< HEAD
-=======
-
-  app.use(
-    helmet({
-      contentSecurityPolicy: false,
-      crossOriginResourcePolicy: { policy: "cross-origin" },
-      crossOriginOpenerPolicy: { policy: "unsafe-none" },
-      crossOriginEmbedderPolicy: false,
-    }),
-  );
-
->>>>>>> 7548135 (pdf worker + valuators)
   app.use(compression());
   app.use(cookieParser());
 
