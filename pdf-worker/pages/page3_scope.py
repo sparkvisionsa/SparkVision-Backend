@@ -1,75 +1,109 @@
+from __future__ import annotations
+
 """
 page3_scope.py — المقيّم المعتمد + نطاق العمل
-
-Components used
----------------
-  .c-page-header                    →  logo header
-  .c-section-heading                →  teal section bar (both sections)
-  .c-table-double                   →  four-col label/value for appraiser licence
-  .c-table-narrative                →  narrow-label / wide-value for scope rows
-  .c-text-tiny                      →  footer meta text
 """
 
 
 def render(data: dict) -> str:
     tx = data.get("tx", {})
     ev = data.get("ev", {})
-    ap = data.get("ap", {})  # appraiser block
+    ap = data.get("ap", {})  # TODO: wire from Users model
+    label_maps = data.get("labelMaps", {})
 
-    # ── Section 1 data ────────────────────────────────────────────
-    appraiser_name = ap.get("name") or "حمد بن عبدالله بن ناصر الحمد"
-    licence_no = ap.get("licenceNo") or "1210000414"
-    licence_date_h = ap.get("licenceDateH") or "24-04-1438 هـ"
-    licence_expiry_h = ap.get("licenceExpiryH") or "29-04-1448 هـ"
-
-    # ── Section 2 data ────────────────────────────────────────────
-    client_name = (
-        ev.get("clientName")
-        or "شركة نجوم السلام للاستثمار والتطوير العقاري (شركة شخص واحد ذ.م.م)"
+    # ── Section 1 — Appraiser licence ─────────────────────────────────────────
+    # TODO: all four fields come from the Users / Appraiser model, not yet integrated
+    appraiser_name = ap.get("name") or "TODO: appraiser name from Users model"
+    licence_no = ap.get("licenceNo") or "TODO: licence number from Users model"
+    licence_date_h = (
+        ap.get("licenceDateH") or "TODO: licence issue date (Hijri) from Users model"
     )
-    authorized_rep = ev.get("authorizedRep") or client_name
+    licence_expiry_h = (
+        ap.get("licenceExpiryH") or "TODO: licence expiry date (Hijri) from Users model"
+    )
+
+    # ── Section 2 — Scope of work ──────────────────────────────────────────────
+
+    # Fully dynamic
+    client_name = ev.get("clientName") or "—"
+    authorized_rep = ev.get("authorizedName") or client_name  # authorizedName in schema
     other_users = ev.get("otherUsers") or client_name
+    eval_date = ev.get("evalDate") or "—"
+    report_date = ev.get("reportDate") or "—"
+
+    # assignmentDate lives on tx, not ev
+    assignment_date = tx.get("assignmentDate") or "—"
+
+    # Resolve valuation purpose label via labelMaps
+    valuation_purpose_id = tx.get("valuationPurpose", "")
+    valuation_purpose = (
+        label_maps.get("valuationPurposes", {}).get(valuation_purpose_id, "—")
+        if valuation_purpose_id
+        else "—"
+    )
+
+    # Resolve valuation basis label + build full definition sentence
+    valuation_basis_id = tx.get("valuationBasis", "")
+    valuation_basis_label = (
+        label_maps.get("valuationBases", {}).get(valuation_basis_id, "")
+        if valuation_basis_id
+        else ""
+    )
+    # The value-basis cell shows the label + a standard IVS definition note
+    if valuation_basis_label:
+        value_basis = (
+            f"{valuation_basis_label} — يُعرّف معيار إعداد التقارير المالية الدولي رقم 13 "
+            f"«{valuation_basis_label}» بأنها السعر الذي يتم الحصول عليه من بيع أصل أو دفعه "
+            f"لنقل التزام في صفقة. المصدر: معايير التقييم الدولية IVS السارية من 31 يناير 2025."
+        )
+    else:
+        value_basis = "—"
+
+    # Resolve valuation hypothesis label
+    hypothesis_id = tx.get("valuationHypothesis", "")
+    value_hypothesis = (
+        label_maps.get("valuationHypotheses", {}).get(hypothesis_id, "—")
+        if hypothesis_id
+        else "—"
+    )
+
+    # intendedUse lives on tx
+    intended_use = tx.get("intendedUse") or "—"
+
+    # standards and scope live on ev (filled by valuation page)
+    standards = ev.get("standards") or "—"
+
+    # ── Static / not-yet-integrated ───────────────────────────────────────────
+    # TODO: inspectionDate — not in current schema, add to EvalData
+    inspection_date = "TODO: inspectionDate not yet in EvalData schema"
+
+    # TODO: appraiserStatus — narrative text set per-report, add to EvalData or Users model
     appraiser_status = (
-        ev.get("appraiserStatus")
-        or "نؤكد أننا قمنا بإجراء التقييم بصفتنا مثمنًا خارجيًا مؤهلاً لأغراض التقييم ولدينا المعرفة والمهارات اللازمة للفهم الكامل."
+        "TODO: appraiserStatus from EvalData — نؤكد أننا قمنا بإجراء التقييم "
+        "بصفتنا مثمنًا خارجيًا مؤهلاً لأغراض التقييم ولدينا المعرفة والمهارات اللازمة."
     )
-    property_desc = ev.get("propertyDesc") or "العقار عبارة عن مجمع تجاري"
-    valuation_purpose = tx.get("valuationPurpose") or "أغراض المحاسبة"
-    value_basis = tx.get("valueBasis") or (
-        "القيمة العادلة — يُعرّف معيار إعداد التقارير المالية الدولي رقم 13 «القيمة العادلة» بأنها "
-        "السعر الذي يتم الحصول عليه من بيع أصل أو دفعه لنقل التزام في صفقة."
-        " المصدر: معايير التقييم الدولية IVS السارية من 31 يناير 2025."
-    )
-    value_hypothesis = tx.get("valueHypothesis") or "الاستخدام الأعلى والأفضل"
-    intended_use = (
-        tx.get("intendedUse") or "يُستخدم التقرير لدعم إعداد التقارير المالية."
-    )
-    eval_date = ev.get("evalDate") or "15-12-2025"
-    inspection_date = ev.get("inspectionDate") or "13-12-2025"
-    report_date = ev.get("reportDate") or "15-12-2025"
-    assignment_date = ev.get("assignmentDate") or "09-12-2025"
-    report_type = (
-        tx.get("reportType")
-        or "تقرير سردي تفصيلي، تم إعداد هذا التقرير بطريقة سردية مع مراعاة جميع التفاصيل المؤثرة في الأصل محل التقييم."
-    )
-    delivery_method = (
-        tx.get("deliveryMethod")
-        or "إخطار بريدي إلكتروني رسمي بالبيانات الموضحة في بيانات التواصل مع العميل."
-    )
+
+    # TODO: reportType — add to EvalData or tx schema
+    report_type = "TODO: reportType — تقرير سردي تفصيلي (add to schema)"
+
+    # TODO: deliveryMethod — add to tx schema
+    delivery_method = "TODO: deliveryMethod — إخطار بريدي إلكتروني (add to schema)"
+
+    # TODO: currency — likely always SAR but add to tx if multi-currency needed
     currency = (
-        tx.get("currency") or "إن التقييم والحسابات كافة تمت بالريال السعودي (د.ي)."
+        "TODO: currency — الريال السعودي (add to schema or hard-code if always SAR)"
     )
-    standards = tx.get("standards") or (
-        "- تم تنفيذ جميع أعمال التقييم وفقًا لنظام الهيئة السعودية للمقيمين المعتمدين ولائحته التنفيذية، وقواعد سلوك مهنة التقييم وآدابها.\n"
-        "- تم الالتزام بمعايير التقييم الدولية IVS التي نشرها مجلس معايير التقييم الدولية، والتي تشمل أحدث نسخة من معايير التقييم الدولية IVS وتعود للعام 2025 يناير 31."
+
+    # TODO: independenceDecl — boilerplate per company, comes from Company model
+    independence_decl = (
+        "TODO: independenceDecl from Company model — "
+        "نُقر بأننا لا يوجد لدينا أي اهتمام خاص بالعقارات ولا يوجد تضارب في المصالح."
     )
-    independence_decl = ev.get("independenceDecl") or (
-        "- نُقر بأننا (شركة تقدير للتقييم) لا يوجد لديها أي اهتمام خاص بالعقارات ولا يوجد تضارب في المصالح المحتملة مع الأطراف وأصحاب العقارات سواء في الوقت الحالي أو المستقبل.\n"
-        "- أن جميع أعضاء فريق التقييم ملتزمون بمعايير النزاهة والمهنية وحفاظ الحفاظ على سرية المعلومات المتعلقة بالتقييم."
-    )
-    external_expert = ev.get("externalExpert") or (
-        "لم يتم الاستعانة بأي أخصائي خارجي أثناء تنفيذ هذه المهمة. جميع إجراءات المعاينة، جمع البيانات، التحليلات واستخلاص القيمة تمت حصرًا بواسطة فريق التقييم "
-        "وفقًا للسياسات والإجراءات المعتمدة، والالتزام بمعايير IVS مع الاعتماد على الداخلي لشركة تقدير للتقييم."
+
+    # TODO: externalExpert — filled per-report, add to EvalData
+    external_expert = (
+        "TODO: externalExpert from EvalData — "
+        "لم يتم الاستعانة بأي أخصائي خارجي أثناء تنفيذ هذه المهمة."
     )
 
     return f"""
@@ -90,7 +124,7 @@ def render(data: dict) -> str:
     </div>
 
     <!-- ── SECTION 1: المقيّم المعتمد ──────────────────────────── -->
-    <div style="margin-bottom: 8mm; position: relative; z-index: 2;">
+    <div style="margin-bottom:8mm;position:relative;z-index:2;">
         <div class="c-section-heading">المقيّم المعتمد</div>
         <table class="c-table-double">
             <tr>
@@ -109,7 +143,7 @@ def render(data: dict) -> str:
     </div>
 
     <!-- ── SECTION 2: نطاق العمل ───────────────────────────────── -->
-    <div style="position: relative; z-index: 2;">
+    <div style="position:relative;z-index:2;">
         <div class="c-section-heading">نطاق العمل</div>
         <table class="c-table-narrative">
             <tr>
@@ -130,7 +164,7 @@ def render(data: dict) -> str:
             </tr>
             <tr>
                 <td class="c-table-narrative__label">العقار محل التقييم</td>
-                <td class="c-table-narrative__value">{property_desc}</td>
+                <td class="c-table-narrative__value">{_property_desc(ev, label_maps)}</td>
             </tr>
             <tr>
                 <td class="c-table-narrative__label">الغرض من التقييم</td>
@@ -205,3 +239,26 @@ def render(data: dict) -> str:
 
 </div>
 """
+
+
+def _property_desc(ev: dict, label_maps: dict) -> str:
+    """Build the property description sentence from available ev fields."""
+    property_type_id = ev.get("propertyTypeId", "")
+    property_type_label = (
+        label_maps.get("propertyTypes", {}).get(property_type_id, "")
+        if property_type_id
+        else ""
+    )
+    city = ev.get("cityName", "")
+    neighborhood = ev.get("neighborhoodName", "")
+
+    parts = [p for p in [neighborhood, city] if p]
+    location = "، ".join(parts)
+
+    if property_type_label and location:
+        return f"العقار عبارة عن {property_type_label} في {location}"
+    elif property_type_label:
+        return f"العقار عبارة عن {property_type_label}"
+    elif location:
+        return f"عقار في {location}"
+    return "—"

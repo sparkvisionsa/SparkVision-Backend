@@ -34,6 +34,8 @@ function toTransactionJson(d: TransactionDoc) {
     assignmentNumber: d.assignmentNumber,
     authorizationNumber: d.authorizationNumber,
     assignmentDate: d.assignmentDate,
+    assignedInspectorIds: d.assignedInspectorIds ?? [],
+
     valuationPurpose: d.valuationPurpose,
     priority: d.priority ?? "normal",
     attachmentsCount: d.attachmentsCount ?? 0,
@@ -281,14 +283,31 @@ async function buildEnrichedFieldValues(
 
 @Injectable()
 export class TransactionsMongoService {
-  async listTransactions() {
+  async listTransactions(companyId?: string | null) {
     const db = await getMongoDb();
+    const filter = companyId ? { companyId } : {};
     const rows = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
-      .find({})
+      .find(filter)
       .sort({ createdAt: -1 })
       .toArray();
     return rows.map(toTransactionJson);
+  }
+
+  async assignInspectors(id: string, inspectorIds: string[]) {
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "المعاملة غير موجودة" });
+    const db = await getMongoDb();
+    const now = new Date();
+    const row = await db
+      .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { assignedInspectorIds: inspectorIds, updatedAt: now } },
+        { returnDocument: "after" },
+      );
+    if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
+    return toTransactionJson(row);
   }
 
   async getTransaction(id: string) {
@@ -305,6 +324,7 @@ export class TransactionsMongoService {
   async createTransaction(
     body: Record<string, string>,
     files: Express.Multer.File[],
+    meta: { createdByUserId?: string | null; companyId?: string | null } = {},
   ) {
     const { rawFieldValues, templateId, ...normalized } =
       normalizeTransactionBody(body);
@@ -333,6 +353,8 @@ export class TransactionsMongoService {
         ...emptyEvalData(),
         opponentStatements: body.opponentStatements?.trim() ?? "",
       },
+      createdByUserId: meta.createdByUserId ?? null,
+      companyId: meta.companyId ?? null,
       createdAt: now,
       priority: (body as any).priority ?? "normal",
       attachmentsCount: 0,

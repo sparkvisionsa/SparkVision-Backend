@@ -13,8 +13,14 @@ import {
   type TemplateFieldType,
 } from "@/server/models/clientsModule";
 import { Client, type ClientDocument } from "./schemas/client.schema";
-import { ClientType, type ClientTypeDocument } from "./schemas/client-type.schema";
-import { FormTemplate, type FormTemplateDocument } from "./schemas/form-template.schema";
+import {
+  ClientType,
+  type ClientTypeDocument,
+} from "./schemas/client-type.schema";
+import {
+  FormTemplate,
+  type FormTemplateDocument,
+} from "./schemas/form-template.schema";
 
 const ALLOWED_FIELD_TYPES: TemplateFieldType[] = [
   "text",
@@ -77,7 +83,9 @@ function assertSelectFieldsHaveOptions(fields: FormFieldDoc[]) {
   }
 }
 
-function normalizeClientBody(body: Record<string, unknown>): ClientUpsertFields | null {
+function normalizeClientBody(
+  body: Record<string, unknown>,
+): ClientUpsertFields | null {
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return null;
 
@@ -170,13 +178,19 @@ function toClientJson(d: ClientDocument) {
 @Injectable()
 export class ClientsMongoService {
   constructor(
-    @InjectModel(ClientType.name) private readonly clientTypeModel: Model<ClientTypeDocument>,
-    @InjectModel(FormTemplate.name) private readonly formTemplateModel: Model<FormTemplateDocument>,
-    @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
+    @InjectModel(ClientType.name)
+    private readonly clientTypeModel: Model<ClientTypeDocument>,
+    @InjectModel(FormTemplate.name)
+    private readonly formTemplateModel: Model<FormTemplateDocument>,
+    @InjectModel(Client.name)
+    private readonly clientModel: Model<ClientDocument>,
   ) {}
 
   async listClientTypes() {
-    const rows = await this.clientTypeModel.find({}).sort({ createdAt: 1 }).exec();
+    const rows = await this.clientTypeModel
+      .find({})
+      .sort({ createdAt: 1 })
+      .exec();
     return rows.map(toTypeJson);
   }
 
@@ -190,24 +204,35 @@ export class ClientsMongoService {
   async updateClientType(id: string, name: string) {
     const n = name.trim();
     if (!n) throw new BadRequestException({ message: "اسم النوع مطلوب" });
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "النوع غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النوع غير موجود" });
     const row = await this.clientTypeModel
-      .findOneAndUpdate({ _id: new Types.ObjectId(id) }, { $set: { name: n } }, { new: true })
+      .findOneAndUpdate(
+        { _id: new Types.ObjectId(id) },
+        { $set: { name: n } },
+        { new: true },
+      )
       .exec();
     if (!row) throw new NotFoundException({ message: "النوع غير موجود" });
     return toTypeJson(row);
   }
 
   async deleteClientType(id: string) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "النوع غير موجود" });
-    const count = await this.clientModel.countDocuments({ clientTypeId: id }).exec();
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النوع غير موجود" });
+    const count = await this.clientModel
+      .countDocuments({ clientTypeId: id })
+      .exec();
     if (count > 0) {
       throw new ConflictException({
         message: "لا يمكن حذف النوع لوجود عملاء مرتبطين به",
       });
     }
-    const del = await this.clientTypeModel.deleteOne({ _id: new Types.ObjectId(id) }).exec();
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "النوع غير موجود" });
+    const del = await this.clientTypeModel
+      .deleteOne({ _id: new Types.ObjectId(id) })
+      .exec();
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "النوع غير موجود" });
     return { ok: true };
   }
 
@@ -222,7 +247,9 @@ export class ClientsMongoService {
     const client = await this.clientModel.findById(clientId).exec();
     if (!client) throw new NotFoundException({ message: "العميل غير موجود" });
 
-    const existing: string[] = Array.isArray(client.templateFieldValues?.[fieldId])
+    const existing: string[] = Array.isArray(
+      client.templateFieldValues?.[fieldId],
+    )
       ? (client.templateFieldValues[fieldId] as unknown as string[])
       : [];
 
@@ -255,7 +282,9 @@ export class ClientsMongoService {
     const client = await this.clientModel.findById(clientId).exec();
     if (!client) throw new NotFoundException({ message: "العميل غير موجود" });
 
-    const existing: string[] = Array.isArray(client.templateFieldValues?.[fieldId])
+    const existing: string[] = Array.isArray(
+      client.templateFieldValues?.[fieldId],
+    )
       ? (client.templateFieldValues[fieldId] as unknown as string[])
       : [];
 
@@ -278,12 +307,16 @@ export class ClientsMongoService {
   }
 
   async listFormTemplates() {
-    const rows = await this.formTemplateModel.find({}).sort({ updatedAt: -1 }).exec();
+    const rows = await this.formTemplateModel
+      .find({})
+      .sort({ updatedAt: -1 })
+      .exec();
     return rows.map(toTemplateJson);
   }
 
   async getFormTemplate(id: string) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     const row = await this.formTemplateModel.findById(id).exec();
     if (!row) throw new NotFoundException({ message: "النموذج غير موجود" });
     return toTemplateJson(row);
@@ -303,8 +336,12 @@ export class ClientsMongoService {
     return toTemplateJson(created);
   }
 
-  async updateFormTemplate(id: string, body: { name?: string; fields?: unknown }) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
+  async updateFormTemplate(
+    id: string,
+    body: { name?: string; fields?: unknown },
+  ) {
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name) throw new BadRequestException({ message: "اسم النموذج مطلوب" });
     const fields = normalizeFields(body.fields);
@@ -327,11 +364,18 @@ export class ClientsMongoService {
   }
 
   async deleteFormTemplate(id: string) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "النموذج غير موجود" });
-    const del = await this.formTemplateModel.deleteOne({ _id: new Types.ObjectId(id) }).exec();
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "النموذج غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "النموذج غير موجود" });
+    const del = await this.formTemplateModel
+      .deleteOne({ _id: new Types.ObjectId(id) })
+      .exec();
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "النموذج غير موجود" });
     await this.clientModel
-      .updateMany({ formTemplateId: id }, { $set: { formTemplateId: null, templateFieldValues: {} } })
+      .updateMany(
+        { formTemplateId: id },
+        { $set: { formTemplateId: null, templateFieldValues: {} } },
+      )
       .exec();
     return { ok: true };
   }
@@ -342,7 +386,8 @@ export class ClientsMongoService {
   }
 
   async getClient(id: string) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
     const row = await this.clientModel.findById(id).exec();
     if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
     return toClientJson(row);
@@ -355,10 +400,15 @@ export class ClientsMongoService {
         message: "اسم العميل ونوع العميل مطلوبان",
       });
     }
-    const typeOk = await this.clientTypeModel.findById(normalized.clientTypeId).exec();
-    if (!typeOk) throw new BadRequestException({ message: "نوع العميل غير صالح" });
+    const typeOk = await this.clientTypeModel
+      .findById(normalized.clientTypeId)
+      .exec();
+    if (!typeOk)
+      throw new BadRequestException({ message: "نوع العميل غير صالح" });
     if (normalized.formTemplateId) {
-      const tpl = await this.formTemplateModel.findById(normalized.formTemplateId).exec();
+      const tpl = await this.formTemplateModel
+        .findById(normalized.formTemplateId)
+        .exec();
       if (!tpl) throw new BadRequestException({ message: "النموذج غير موجود" });
     }
     const created = await this.clientModel.create(normalized);
@@ -366,17 +416,23 @@ export class ClientsMongoService {
   }
 
   async updateClient(id: string, body: Record<string, unknown>) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
     const normalized = normalizeClientBody(body);
     if (!normalized) {
       throw new BadRequestException({
         message: "اسم العميل ونوع العميل مطلوبان",
       });
     }
-    const typeOk = await this.clientTypeModel.findById(normalized.clientTypeId).exec();
-    if (!typeOk) throw new BadRequestException({ message: "نوع العميل غير صالح" });
+    const typeOk = await this.clientTypeModel
+      .findById(normalized.clientTypeId)
+      .exec();
+    if (!typeOk)
+      throw new BadRequestException({ message: "نوع العميل غير صالح" });
     if (normalized.formTemplateId) {
-      const tpl = await this.formTemplateModel.findById(normalized.formTemplateId).exec();
+      const tpl = await this.formTemplateModel
+        .findById(normalized.formTemplateId)
+        .exec();
       if (!tpl) throw new BadRequestException({ message: "النموذج غير موجود" });
     }
     const now = new Date();
@@ -392,9 +448,13 @@ export class ClientsMongoService {
   }
 
   async deleteClient(id: string) {
-    if (!Types.ObjectId.isValid(id)) throw new NotFoundException({ message: "العميل غير موجود" });
-    const del = await this.clientModel.deleteOne({ _id: new Types.ObjectId(id) }).exec();
-    if (del.deletedCount === 0) throw new NotFoundException({ message: "العميل غير موجود" });
+    if (!Types.ObjectId.isValid(id))
+      throw new NotFoundException({ message: "العميل غير موجود" });
+    const del = await this.clientModel
+      .deleteOne({ _id: new Types.ObjectId(id) })
+      .exec();
+    if (del.deletedCount === 0)
+      throw new NotFoundException({ message: "العميل غير موجود" });
     return { ok: true };
   }
 }

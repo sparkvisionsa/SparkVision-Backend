@@ -277,24 +277,30 @@ export class TransactionsPdfService {
 
     // ── Load image data URIs — property images ─────────────────────────────────
     const seenUris = new Set<string>();
+    // ── Load image data URIs — property images ─────────────────────────────────
     const images: { dataUri: string; name: string }[] = [];
 
     for (const img of imageDocs) {
-      const dataUri = fileToDataUri(img.filePath);
-      if (!dataUri) {
+      const abs = resolveFilePath(img.filePath);
+      if (!fs.existsSync(abs)) {
         this.logger.warn(`Image not found: ${img.filePath}`);
         continue;
       }
-      // Deduplicate by first 120 chars of base64 to avoid identical files
-      const key = dataUri.substring(0, 120);
-      if (seenUris.has(key)) {
-        this.logger.warn(
-          `Skipping duplicate image: ${img.name || img.originalName}`,
-        );
-        continue;
-      }
-      seenUris.add(key);
-      images.push({ dataUri, name: img.name || img.originalName });
+      const buf = fs.readFileSync(abs);
+      const ext = path.extname(img.filePath).toLowerCase().replace(".", "");
+      const mimeMap: Record<string, string> = {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        gif: "image/gif",
+        webp: "image/webp",
+        bmp: "image/bmp",
+      };
+      const mime = mimeMap[ext] ?? "image/jpeg";
+      images.push({
+        dataUri: `data:${mime};base64,${buf.toString("base64")}`,
+        name: img.name || img.originalName,
+      });
     }
 
     // ── Load image attachment data URIs ────────────────────────────────────────
@@ -310,15 +316,16 @@ export class TransactionsPdfService {
 
     for (const att of attachmentDocs) {
       if (att.mimeType.startsWith("image/")) {
-        const dataUri = fileToDataUri(att.filePath);
-        if (!dataUri) {
+        const abs = resolveFilePath(att.filePath);
+        if (!fs.existsSync(abs)) {
           this.logger.warn(`Image attachment not found: ${att.filePath}`);
           continue;
         }
-        const key = dataUri.substring(0, 120);
-        if (seenUris.has(key)) continue;
-        seenUris.add(key);
-        imageAttachments.push({ dataUri, name: att.name || att.originalName });
+        const buf = fs.readFileSync(abs);
+        imageAttachments.push({
+          dataUri: `data:${att.mimeType};base64,${buf.toString("base64")}`,
+          name: att.name || att.originalName,
+        });
       } else if (att.mimeType === "application/pdf") {
         const abs = resolveFilePath(att.filePath);
         if (!fs.existsSync(abs)) {

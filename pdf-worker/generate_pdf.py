@@ -29,6 +29,8 @@ from pages.page9_property_details import render as page9_property_details
 from pages.page10_finishing_utilities import render as page10_finishing_utilities
 from pages.page11_placeholder import render as page11_placeholder
 from pages.page12_methodology import render as page12_methodology
+from pages.page13_comparables import render as page13_comparables
+from pages.page14_cost_approach import render as page14_cost_approach
 from weasyprint import CSS, HTML
 
 # ── Stylesheet path ────────────────────────────────────────────────────────────
@@ -39,6 +41,7 @@ _CSS_PATH = os.path.join(_DIR, "styles.css")
 # ── Assemble page HTML fragments ───────────────────────────────────────────────
 def _collect_pages(data: dict) -> str:
     parts = []
+
     parts.append(page1_cover(data))
     parts.append(page2_statement(data))
     parts.append(page3_scope(data))
@@ -51,6 +54,29 @@ def _collect_pages(data: dict) -> str:
     parts.append(page10_finishing_utilities(data))
     parts.append(page11_placeholder(data))
     parts.append(page12_methodology(data))
+    parts.append(page13_comparables(data))
+    parts.append(page14_cost_approach(data))
+
+    # ── Pages 15-17 would go here when you create them ────────────────────────
+    # parts.append(page15_xxx(data))
+    # parts.append(page16_xxx(data))
+    # parts.append(page17_xxx(data))
+
+    # ── Pages 18+ — dynamic image gallery (0 or more pages) ──────────────────
+    from pages.page18_images import render_all as page18_images_all
+    from pages.page19_attachments import render_all as page19_attachments_all
+
+    # start_page=18 keeps footer numbers correct.
+    # If you insert pages 15-17 later, this stays correct automatically
+    # because start_page is just an offset for the footer counter.
+    image_pages = page18_images_all(data, start_page=18)
+    parts.extend(image_pages)  # extend, not append — it's a list
+
+    # Attachment pages start immediately after however many image pages were emitted.
+    attachment_start = 18 + len(image_pages)
+    attachment_pages = page19_attachments_all(data, start_page=attachment_start)
+    parts.extend(attachment_pages)
+
     return "\n".join(parts)
 
 

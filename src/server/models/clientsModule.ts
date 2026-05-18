@@ -46,6 +46,7 @@ export interface ClientUpsertFields {
   formTemplateId: string | null;
 }
 
+<<<<<<< HEAD
 export interface FormTemplateDoc {
   _id?: ObjectId;
   name: string;
@@ -58,4 +59,32 @@ export interface ClientDoc extends ClientUpsertFields {
   _id?: ObjectId;
   createdAt?: Date;
   updatedAt?: Date;
+=======
+/** Shape of a client document as returned by the API/service layer */
+export interface ClientDoc {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  active: boolean;
+  typeId: string;
+  address: string;
+  clientAddress: string;
+  formTemplateId: string | null;
+  templateFieldValues: Record<string, string>;
+  bankName: string;
+  bankAccountAddress: string;
+  bankAccountNumber: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Shape of a form template document as returned by the API/service layer */
+export interface FormTemplateDoc {
+  id: string;
+  name: string;
+  fields: FormFieldDoc[];
+  createdAt: string;
+  updatedAt: string;
+>>>>>>> 7548135 (pdf worker + valuators)
 }

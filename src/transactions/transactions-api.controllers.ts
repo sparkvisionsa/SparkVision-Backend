@@ -15,6 +15,7 @@ import { diskStorage } from "multer";
 import { extname, join } from "path";
 import { Request } from "express";
 import { TransactionsMongoService } from "./transactions-mongo.service";
+import { resolveRequestContext } from "@/server/auth-tracking/context";
 
 const multerStorage = diskStorage({
   destination: join(process.cwd(), "uploads"),
@@ -24,22 +25,42 @@ const multerStorage = diskStorage({
   },
 });
 
+async function resolveSessionMeta(req: Request): Promise<{
+  createdByUserId: string | null;
+  companyId: string | null;
+}> {
+  try {
+    const context = await resolveRequestContext(req);
+    return {
+      createdByUserId: context.user?._id.toString() ?? null,
+      companyId: context.company?._id.toString() ?? null,
+    };
+  } catch {
+    return { createdByUserId: null, companyId: null };
+  }
+}
+
 @Controller("transactions")
 export class TransactionsController {
   constructor(private readonly svc: TransactionsMongoService) {}
 
   @Get()
-  list() {
-    return this.svc.listTransactions();
+  async list(@Req() req: Request) {
+    const { companyId } = await resolveSessionMeta(req);
+    return this.svc.listTransactions(companyId);
   }
 
-  // POST uses multipart/form-data (file uploads from NewTransactionPage)
   @Post()
   @UseInterceptors(AnyFilesInterceptor({ storage: multerStorage }))
-  create(@Req() req: Request, @UploadedFiles() files: Express.Multer.File[]) {
+  async create(
+    @Req() req: Request,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    const meta = await resolveSessionMeta(req);
     return this.svc.createTransaction(
       req.body as Record<string, string>,
       files ?? [],
+      meta,
     );
   }
 
@@ -48,11 +69,17 @@ export class TransactionsController {
     return this.svc.getTransaction(id);
   }
 
-  // PATCH uses application/json (evalData update from TransactionEvaluationPage).
-  // No file uploads on PATCH — the template attachments are set on creation only.
   @Patch(":id")
   update(@Param("id") id: string, @Body() body: Record<string, unknown>) {
     return this.svc.updateTransaction(id, body, []);
+  }
+
+  @Patch(":id/inspectors")
+  assignInspectors(
+    @Param("id") id: string,
+    @Body() body: { inspectorIds?: string[] },
+  ) {
+    return this.svc.assignInspectors(id, body.inspectorIds ?? []);
   }
 
   @Delete(":id")

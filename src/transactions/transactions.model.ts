@@ -298,6 +298,10 @@ export type TransactionDoc = {
   // core assignment fields — set on creation, not touched by the eval page
   assignmentNumber: string;
   authorizationNumber: string;
+  /** IDs of inspector users assigned to this transaction */
+  assignedInspectorIds?: string[];
+  createdByUserId?: string | null; // users._id as hex string
+  companyId?: string | null; //
   assignmentDate: string;
   valuationPurpose: string;
   intendedUse: string;
