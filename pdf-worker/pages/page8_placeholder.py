@@ -1,45 +1,14 @@
-"""
-page8_placeholder.py — placeholder page
-"""
+from __future__ import annotations
+
+from pages._divider_base import render_divider
 
 
 def render(data: dict) -> str:
-    tx = data.get("tx", {})
-    ev = data.get("ev", {})
-
-    return f"""
-<div class="page statement-page">
-
-    <!-- WATERMARK -->
-    <div class="statement-watermark">تقدير</div>
-
-    <!-- COMPONENT 1: PAGE LOGO HEADER -->
-    <div class="c-page-header">
-        <div class="c-page-header__logo">
-            <div class="c-page-header__mark"></div>
-            <div class="c-page-header__text">
-                <div class="c-page-header__ar">تقدير</div>
-                <div class="c-page-header__en">Taqdeer</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- PLACEHOLDER CONTENT -->
-    <div style="position: relative; z-index: 2; text-align: center; margin-top: 40mm;">
-        <p style="font-size: 18pt;">رﺎﻘﻌﻟا ﻞﻴﺻﺎﻔﺗ</p>
-    </div>
-
-    <!-- FOOTER -->
-    <div class="statement-footer">
-        <div class="footer-ribbon">
-            <div class="footer-page">8</div>
-        </div>
-        <div class="footer-content">
-            <span class="c-text-tiny">920000694</span>
-            <span class="c-text-tiny">info@taqdeer.com</span>
-            <span class="c-text-tiny">www.taqdeer.com</span>
-        </div>
-    </div>
-
-</div>
-"""
+    return render_divider(
+        page_number=8,
+        chapter_number="CHAPTER 02",
+        heading_ar="تفاصيل العقار",
+        heading_en="Property Details",
+        subtext="الخصائص والمواصفات التفصيلية للعقار موضع التقييم",
+        wm_number="٢",
+    )

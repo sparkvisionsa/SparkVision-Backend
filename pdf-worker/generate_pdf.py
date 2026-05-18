@@ -31,6 +31,7 @@ from pages.page11_placeholder import render as page11_placeholder
 from pages.page12_methodology import render as page12_methodology
 from pages.page13_comparables import render as page13_comparables
 from pages.page14_cost_approach import render as page14_cost_approach
+from pages.page15_appendices_divider import render as page15_appendices_divider
 from weasyprint import CSS, HTML
 
 # ── Stylesheet path ────────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ def _collect_pages(data: dict) -> str:
     parts.append(page12_methodology(data))
     parts.append(page13_comparables(data))
     parts.append(page14_cost_approach(data))
+    parts.append(page15_appendices_divider(data))
 
     # ── Pages 15-17 would go here when you create them ────────────────────────
     # parts.append(page15_xxx(data))
