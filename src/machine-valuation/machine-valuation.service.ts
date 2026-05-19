@@ -10,7 +10,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tryCoerceToObjectId, tryParseObjectId } from "@/common/object-id.util";
-import { AnyBulkWriteOperation, Filter, GridFSBucket, ObjectId } from "mongodb";
+import { AnyBulkWriteOperation, type Db, Filter, GridFSBucket, ObjectId } from "mongodb";
 import { getMongoDb } from "@/server/mongodb";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
 import {
@@ -142,6 +142,7 @@ function sanitizeProjectLocations(value: unknown, strict = true): MvProjectLocat
         data.secondaryPhone ?? data.secondaryContactPhone ?? data.backupPhone ?? data.alternatePhone,
         60,
       );
+      const notes = sanitizeOptionalText(data.notes ?? data.note, 2000);
 
       if (
         !name &&
@@ -151,7 +152,8 @@ function sanitizeProjectLocations(value: unknown, strict = true): MvProjectLocat
         longitude === null &&
         !mapUrl &&
         !primaryPhone &&
-        !secondaryPhone
+        !secondaryPhone &&
+        !notes
       ) {
         return null;
       }
@@ -166,6 +168,7 @@ function sanitizeProjectLocations(value: unknown, strict = true): MvProjectLocat
         ...(mapUrl ? { mapUrl } : {}),
         ...(primaryPhone ? { primaryPhone } : {}),
         ...(secondaryPhone ? { secondaryPhone } : {}),
+        ...(notes ? { notes } : {}),
       } satisfies MvProjectLocation;
     })
     .filter((item): item is MvProjectLocation => item != null);
@@ -596,6 +599,7 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     costApproachDetails: sanitizeOptionalText(data.costApproachDetails, 6000),
     valuationTeam: sanitizeReportTeamMembers(data.valuationTeam),
     importantAssumptions: sanitizeOptionalText(data.importantAssumptions, 4000),
+    generalAssumptions: sanitizeOptionalText(data.generalAssumptions, 6000),
     specialAssumptions: sanitizeOptionalText(data.specialAssumptions, 4000),
     finalValue: sanitizeFinalValue(data.finalValue),
     finalValueWords: sanitizeOptionalText(data.finalValueWords, 500),
@@ -619,6 +623,17 @@ function jsonDeepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function cloneValuationAccountingWorkspaceObject(raw: Record<string, unknown>): Record<string, unknown> {
+  if (typeof globalThis.structuredClone === "function") {
+    try {
+      return structuredClone(raw) as Record<string, unknown>;
+    } catch {
+      /* Embedded BSON / non-cloneable values fallback */
+    }
+  }
+  return jsonDeepClone(raw);
+}
+
 function sanitizeValuationAccountingWorkspaceForPersist(raw: unknown): Record<string, unknown> {
   if (raw == null) {
     throw new BadRequestException("valuationAccountingWorkspace is required when provided");
@@ -631,7 +646,7 @@ function sanitizeValuationAccountingWorkspaceForPersist(raw: unknown): Record<st
       throw new BadRequestException("valuationAccountingWorkspace must be valid JSON");
     }
   } else if (typeof raw === "object") {
-    obj = jsonDeepClone(raw as Record<string, unknown>);
+    obj = cloneValuationAccountingWorkspaceObject(raw as Record<string, unknown>);
   } else {
     throw new BadRequestException("valuationAccountingWorkspace must be an object");
   }
@@ -696,7 +711,10 @@ function sanitizeValuationAccountingWorkspaceForClient(raw: unknown | undefined 
     if (typeof raw === "string") {
       return JSON.parse(raw);
     }
-    return jsonDeepClone(raw);
+    if (typeof raw === "object" && raw !== null) {
+      return cloneValuationAccountingWorkspaceObject(raw as Record<string, unknown>);
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -2952,6 +2970,102 @@ export class MachineValuationService implements OnModuleInit {
   }
   /* ───────── Projects ───────── */
 
+  /**
+   * Computes display numbers for projects that were created before the
+   * counter was introduced. Within each company, missing values are filled
+   * in ascending `createdAt` order so the visible numbering stays stable.
+   */
+  /**
+   * Lazily persists a `displayNumber` for a single project that was created
+   * before the counter existed (legacy data). Returns the resolved number.
+   */
+  private async ensureDisplayNumberForProject(
+    db: Db,
+    project: { _id: ObjectId; companyId?: ObjectId | string; displayNumber?: number },
+  ): Promise<number | null> {
+    if (typeof project.displayNumber === "number" && Number.isFinite(project.displayNumber)) {
+      return project.displayNumber;
+    }
+    const companyIdRaw = project.companyId;
+    let companyOid: ObjectId | null = null;
+    if (companyIdRaw instanceof ObjectId) {
+      companyOid = companyIdRaw;
+    } else if (typeof companyIdRaw === "string" && companyIdRaw.trim()) {
+      companyOid = tryParseObjectId(companyIdRaw.trim());
+    }
+    if (!companyOid) return null;
+    try {
+      // Count older projects (created before this one) within the same company
+      // to deterministically assign a number compatible with list ordering.
+      const projectDoc = await db
+        .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+        .findOne({ _id: project._id }, { projection: { createdAt: 1 } });
+      const createdAt = projectDoc?.createdAt instanceof Date ? projectDoc.createdAt : new Date(0);
+      const olderCount = await db
+        .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+        .countDocuments({ companyId: companyOid, createdAt: { $lt: createdAt } });
+      const next = olderCount + 1;
+      await db
+        .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+        .updateOne({ _id: project._id }, { $set: { displayNumber: next } });
+      // Sync the company counter if it is behind, so future creations stay monotonic.
+      try {
+        await getAuthCollections(db).companies.updateOne(
+          { _id: companyOid, $or: [{ projectSequenceCounter: { $exists: false } }, { projectSequenceCounter: { $lt: next } }] },
+          { $set: { projectSequenceCounter: next } },
+        );
+      } catch {
+        // counter sync is best-effort
+      }
+      return next;
+    } catch (err) {
+      this.logger.warn(
+        `ensureDisplayNumberForProject failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Computes display numbers for projects that were created before the
+   * counter was introduced. Within each company, missing values are filled
+   * in ascending `createdAt` order so the visible numbering stays stable.
+   */
+  private static fillMissingProjectDisplayNumbers<
+    T extends {
+      _id: string;
+      companyId: string | null;
+      displayNumber: number | null;
+      createdAt: string;
+    },
+  >(rows: T[]): T[] {
+    const byCompany = new Map<string, T[]>();
+    for (const row of rows) {
+      const key = row.companyId ?? "__no_company__";
+      const bucket = byCompany.get(key) ?? [];
+      bucket.push(row);
+      byCompany.set(key, bucket);
+    }
+    for (const bucket of byCompany.values()) {
+      const taken = new Set(
+        bucket
+          .map((r) => r.displayNumber)
+          .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0),
+      );
+      const needsFill = bucket
+        .filter((r) => r.displayNumber == null)
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      let next = 1;
+      for (const r of needsFill) {
+        while (taken.has(next)) next += 1;
+        r.displayNumber = next;
+        taken.add(next);
+        next += 1;
+      }
+    }
+    return rows;
+  }
+
   async listProjects(ctx: MvAccessContext) {
     if (!ctx.isSuperAdmin) {
       if (!ctx.userId) {
@@ -2970,6 +3084,7 @@ export class MachineValuationService implements OnModuleInit {
     const projectListProject = {
       name: 1,
       companyId: 1,
+      displayNumber: 1,
       createdAt: 1,
       updatedAt: 1,
       userId: 1,
@@ -3081,7 +3196,7 @@ export class MachineValuationService implements OnModuleInit {
       }
     }
 
-    return projects
+    const rows = projects
       .map((p) => {
         const idStr = mvProjectIdString(p);
         if (!idStr) {
@@ -3097,6 +3212,10 @@ export class MachineValuationService implements OnModuleInit {
             if (c instanceof ObjectId) return c.toString();
             return String(c).trim() || null;
           })(),
+          displayNumber:
+            typeof p.displayNumber === "number" && Number.isFinite(p.displayNumber)
+              ? p.displayNumber
+              : null,
           createdAt: mvProjectDateToIso(p.createdAt),
           updatedAt: mvProjectDateToIso(p.updatedAt),
           subProjectCount:
@@ -3123,6 +3242,7 @@ export class MachineValuationService implements OnModuleInit {
       .filter(
         (row): row is NonNullable<typeof row> => row != null,
       );
+    return MachineValuationService.fillMissingProjectDisplayNumbers(rows);
   }
 
   async createProject(
@@ -3172,6 +3292,52 @@ export class MachineValuationService implements OnModuleInit {
     let locations = sanitizeProjectLocations(locationsRaw);
     const contacts = mergeProjectContactsWithLocationPhones(contactsRaw, locations);
     locations = mergeProjectLocationsWithContacts(locations, contacts);
+
+    /**
+     * Atomically reserve the next per-company project sequence number so that
+     * `displayNumber` is monotonic, stable, and unaffected by deletions.
+     * Older companies that lack the counter will be backfilled to (existingProjects + 1).
+     */
+    const companiesCollection = getAuthCollections(db).companies;
+    let displayNumber: number | undefined;
+    try {
+      const seqDoc = await companiesCollection.findOneAndUpdate(
+        { _id: resolvedCompanyId },
+        { $inc: { projectSequenceCounter: 1 }, $set: { updatedAt: now } },
+        { returnDocument: "after", projection: { projectSequenceCounter: 1 } },
+      );
+      if (seqDoc) {
+        const counter =
+          typeof seqDoc.projectSequenceCounter === "number" && Number.isFinite(seqDoc.projectSequenceCounter)
+            ? seqDoc.projectSequenceCounter
+            : null;
+        if (typeof counter === "number") {
+          if (counter === 1) {
+            // First sequence — but legacy projects may already exist without
+            // a counter; rebase to existing count + 1 to avoid collisions.
+            const existing = await db
+              .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+              .countDocuments({ companyId: resolvedCompanyId });
+            if (existing > 0) {
+              displayNumber = existing + 1;
+              await companiesCollection.updateOne(
+                { _id: resolvedCompanyId },
+                { $set: { projectSequenceCounter: displayNumber } },
+              );
+            } else {
+              displayNumber = 1;
+            }
+          } else {
+            displayNumber = counter;
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `createProject: project sequence reservation failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const doc: Omit<MvProjectDoc, "_id"> = {
       name: n,
       companyId: resolvedCompanyId,
@@ -3184,6 +3350,7 @@ export class MachineValuationService implements OnModuleInit {
       contacts,
       inspectionAssignments: [],
       inspectorFiles: [],
+      ...(typeof displayNumber === "number" ? { displayNumber } : {}),
       ...(uid ? { userId: uid } : {}),
     };
     const { insertedId } = await db.collection(MV_PROJECTS_COLLECTION).insertOne(doc);
@@ -3196,6 +3363,7 @@ export class MachineValuationService implements OnModuleInit {
       _id: insertedId.toString(),
       name: n,
       companyId: resolvedCompanyId.toString(),
+      displayNumber: displayNumber ?? null,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       workflowStatus: "new" as const,
@@ -3321,6 +3489,7 @@ export class MachineValuationService implements OnModuleInit {
       { returnDocument: "after" },
     );
     if (!updated) throw new NotFoundException("Project not found");
+    const updatedDisplayNumber = await this.ensureDisplayNumberForProject(db, updated);
     return {
       ok: true as const,
       project: {
@@ -3332,6 +3501,7 @@ export class MachineValuationService implements OnModuleInit {
             : updated.companyId != null && String(updated.companyId).trim() !== ""
               ? String(updated.companyId).trim()
               : null,
+        displayNumber: updatedDisplayNumber,
         createdAt: mvProjectDateToIso(updated.createdAt),
         updatedAt: mvProjectDateToIso(updated.updatedAt),
         workflowStatus: projectWorkflowStatus(updated),
@@ -3497,6 +3667,7 @@ export class MachineValuationService implements OnModuleInit {
       merged = merged.filter((row) => allowed.has(row._id));
     }
 
+    const ensuredDisplayNumber = await this.ensureDisplayNumberForProject(db, project);
     return {
       project: {
         _id: project._id.toString(),
@@ -3507,6 +3678,7 @@ export class MachineValuationService implements OnModuleInit {
             : project.companyId != null && String(project.companyId).trim() !== ""
               ? String(project.companyId).trim()
               : null,
+        displayNumber: ensuredDisplayNumber,
         createdAt: mvProjectDateToIso(project.createdAt),
         updatedAt: mvProjectDateToIso(project.updatedAt),
         workflowStatus: projectWorkflowStatus(project),

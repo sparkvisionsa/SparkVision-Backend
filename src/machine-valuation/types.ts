@@ -109,8 +109,12 @@ export interface MvProjectReportData {
   currencyLabel?: string;
   methodologyRationale?: string;
   costApproachDetails?: string;
+  /** @deprecated فريق التقييم لم يعد قسماً منفصلاً — يُستعمل صفوف المقيمين والتوقيعات من لوحة الشركة. */
   valuationTeam?: MvReportTeamMember[];
+  /** @deprecated استخدم `generalAssumptions`. يُبقى للتوافق العكسي. */
   importantAssumptions?: string;
+  /** افتراضات عامة (سابقاً «افتراضات مهمة») — يستلم القيمة من لوحة الشركة افتراضياً. */
+  generalAssumptions?: string;
   specialAssumptions?: string;
   finalValue?: number | null;
   finalValueWords?: string;
@@ -145,6 +149,8 @@ export interface MvProjectLocation {
   mapUrl?: string;
   primaryPhone?: string;
   secondaryPhone?: string;
+  /** Free-form inspection-site notes persisted on the location. */
+  notes?: string;
 }
 
 export type MvProjectContactType = "primary" | "secondary";
@@ -211,6 +217,12 @@ export interface MvProjectDoc {
   userId?: ObjectId | string;
   /** FK إلى `companies._id` — مشروع واحد لشركة واحدة؛ ObjectId أو نص hex نادراً. */
   companyId?: ObjectId | string;
+  /**
+   * رقم تسلسلي للتقرير داخل الشركة (1, 2, 3, ...).
+   * ثابت بعد الإنشاء؛ يُستخدم كمعرّف مرئي للتقرير في القوائم وداخل بيانات أساسية.
+   * المستندات القديمة قد لا تحوي القيمة وتُحسب عند العرض من ترتيب `createdAt`.
+   */
+  displayNumber?: number;
   /** اختياري؛ المستندات القديمة تُعامل كـ `new` */
   workflowStatus?: MvProjectWorkflowStatus;
   /** نوع مسار التقرير: مبسط حالياً، ومتقدم لاحقاً. */

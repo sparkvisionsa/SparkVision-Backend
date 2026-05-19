@@ -33,6 +33,7 @@ import type {
   CompanyDoc,
   CompanyMongoDoc,
   CompanyMembershipRole,
+  CompanyReportDefaults,
   GuestAccessStatus,
   PublicUser,
   PublicUserProfile,
@@ -48,6 +49,7 @@ import type {
   UserRole,
 } from "./types";
 import { COMPANY_MEMBER_ROLES } from "./types";
+import { buildDefaultCompanyReportDefaults } from "./company-report-defaults.constants";
 
 const COMPANY_MEMBERSHIP_ROLE_LABELS_AR: Record<CompanyMembershipRole, string> = {
   company_admin: "مدير الشركة",
@@ -1531,6 +1533,172 @@ function assertCompanyMemberUser(context: {
   }
 }
 
+function sanitizeReportDefaultsText(value: unknown, max: number): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\u0000/g, "").trim().slice(0, max);
+}
+
+function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
+  const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const scopeRaw =
+    data.scope && typeof data.scope === "object" ? (data.scope as Record<string, unknown>) : {};
+  const methodologyRaw =
+    data.methodology && typeof data.methodology === "object"
+      ? (data.methodology as Record<string, unknown>)
+      : {};
+  const assumptionsRaw =
+    data.assumptions && typeof data.assumptions === "object"
+      ? (data.assumptions as Record<string, unknown>)
+      : {};
+  return {
+    scope: {
+      complianceStatement: sanitizeReportDefaultsText(scopeRaw.complianceStatement, 4000),
+      independenceStatement: sanitizeReportDefaultsText(scopeRaw.independenceStatement, 4000),
+      intendedUseStatement: sanitizeReportDefaultsText(scopeRaw.intendedUseStatement, 4000),
+      scopeOfWorkDetails: sanitizeReportDefaultsText(scopeRaw.scopeOfWorkDetails, 6000),
+      valuationBasisDefinition: sanitizeReportDefaultsText(scopeRaw.valuationBasisDefinition, 4000),
+      valuePremiseDefinition: sanitizeReportDefaultsText(scopeRaw.valuePremiseDefinition, 2000),
+      useRestriction: sanitizeReportDefaultsText(scopeRaw.useRestriction, 4000),
+      externalSpecialistUse: sanitizeReportDefaultsText(scopeRaw.externalSpecialistUse, 4000),
+      esgConsiderations: sanitizeReportDefaultsText(scopeRaw.esgConsiderations, 4000),
+      informationSources: sanitizeReportDefaultsText(scopeRaw.informationSources, 6000),
+    },
+    methodology: {
+      assetSubjectDescription: sanitizeReportDefaultsText(methodologyRaw.assetSubjectDescription, 4000),
+      assetDetailedDescription: sanitizeReportDefaultsText(methodologyRaw.assetDetailedDescription, 6000),
+      methodologyRationale: sanitizeReportDefaultsText(methodologyRaw.methodologyRationale, 6000),
+      costApproachDetails: sanitizeReportDefaultsText(methodologyRaw.costApproachDetails, 6000),
+      salvageValueDescription: sanitizeReportDefaultsText(methodologyRaw.salvageValueDescription, 4000),
+      physicalDepreciationDescription: sanitizeReportDefaultsText(methodologyRaw.physicalDepreciationDescription, 6000),
+      functionalObsolescenceDescription: sanitizeReportDefaultsText(methodologyRaw.functionalObsolescenceDescription, 4000),
+      economicObsolescenceDescription: sanitizeReportDefaultsText(methodologyRaw.economicObsolescenceDescription, 4000),
+    },
+    assumptions: {
+      generalAssumptions: sanitizeReportDefaultsText(assumptionsRaw.generalAssumptions, 6000),
+      specialAssumptions: sanitizeReportDefaultsText(assumptionsRaw.specialAssumptions, 4000),
+    },
+  };
+}
+
+/**
+ * Returns the persisted defaults, falling back to seeded templates for any
+ * missing field — guarantees the company panel & report preview always have
+ * a meaningful initial value to render or override.
+ */
+export function resolveCompanyReportDefaults(
+  stored: CompanyReportDefaults | undefined | null,
+): CompanyReportDefaults {
+  const seeds = buildDefaultCompanyReportDefaults();
+  const scopeStored = stored?.scope ?? {};
+  const methodologyStored = stored?.methodology ?? {};
+  const assumptionsStored = stored?.assumptions ?? {};
+  return {
+    scope: {
+      complianceStatement:
+        scopeStored.complianceStatement?.trim() || seeds.scope?.complianceStatement || "",
+      independenceStatement:
+        scopeStored.independenceStatement?.trim() || seeds.scope?.independenceStatement || "",
+      intendedUseStatement:
+        scopeStored.intendedUseStatement?.trim() || seeds.scope?.intendedUseStatement || "",
+      scopeOfWorkDetails:
+        scopeStored.scopeOfWorkDetails?.trim() || seeds.scope?.scopeOfWorkDetails || "",
+      valuationBasisDefinition:
+        scopeStored.valuationBasisDefinition?.trim() || seeds.scope?.valuationBasisDefinition || "",
+      valuePremiseDefinition:
+        scopeStored.valuePremiseDefinition?.trim() || seeds.scope?.valuePremiseDefinition || "",
+      useRestriction: scopeStored.useRestriction?.trim() || seeds.scope?.useRestriction || "",
+      externalSpecialistUse:
+        scopeStored.externalSpecialistUse?.trim() || seeds.scope?.externalSpecialistUse || "",
+      esgConsiderations:
+        scopeStored.esgConsiderations?.trim() || seeds.scope?.esgConsiderations || "",
+      informationSources:
+        scopeStored.informationSources?.trim() || seeds.scope?.informationSources || "",
+    },
+    methodology: {
+      assetSubjectDescription:
+        methodologyStored.assetSubjectDescription?.trim() ||
+        seeds.methodology?.assetSubjectDescription ||
+        "",
+      assetDetailedDescription:
+        methodologyStored.assetDetailedDescription?.trim() ||
+        seeds.methodology?.assetDetailedDescription ||
+        "",
+      methodologyRationale:
+        methodologyStored.methodologyRationale?.trim() ||
+        seeds.methodology?.methodologyRationale ||
+        "",
+      costApproachDetails:
+        methodologyStored.costApproachDetails?.trim() ||
+        seeds.methodology?.costApproachDetails ||
+        "",
+      salvageValueDescription:
+        methodologyStored.salvageValueDescription?.trim() ||
+        seeds.methodology?.salvageValueDescription ||
+        "",
+      physicalDepreciationDescription:
+        methodologyStored.physicalDepreciationDescription?.trim() ||
+        seeds.methodology?.physicalDepreciationDescription ||
+        "",
+      functionalObsolescenceDescription:
+        methodologyStored.functionalObsolescenceDescription?.trim() ||
+        seeds.methodology?.functionalObsolescenceDescription ||
+        "",
+      economicObsolescenceDescription:
+        methodologyStored.economicObsolescenceDescription?.trim() ||
+        seeds.methodology?.economicObsolescenceDescription ||
+        "",
+    },
+    assumptions: {
+      generalAssumptions:
+        assumptionsStored.generalAssumptions?.trim() ||
+        seeds.assumptions?.generalAssumptions ||
+        "",
+      specialAssumptions:
+        assumptionsStored.specialAssumptions?.trim() ||
+        seeds.assumptions?.specialAssumptions ||
+        "",
+    },
+  };
+}
+
+const updateCompanyReportDefaultsSchema = z.object({
+  scope: z
+    .object({
+      complianceStatement: z.string().max(4000).optional(),
+      independenceStatement: z.string().max(4000).optional(),
+      intendedUseStatement: z.string().max(4000).optional(),
+      scopeOfWorkDetails: z.string().max(6000).optional(),
+      valuationBasisDefinition: z.string().max(4000).optional(),
+      valuePremiseDefinition: z.string().max(2000).optional(),
+      useRestriction: z.string().max(4000).optional(),
+      externalSpecialistUse: z.string().max(4000).optional(),
+      esgConsiderations: z.string().max(4000).optional(),
+      informationSources: z.string().max(6000).optional(),
+    })
+    .partial()
+    .optional(),
+  methodology: z
+    .object({
+      assetSubjectDescription: z.string().max(4000).optional(),
+      assetDetailedDescription: z.string().max(6000).optional(),
+      methodologyRationale: z.string().max(6000).optional(),
+      costApproachDetails: z.string().max(6000).optional(),
+      salvageValueDescription: z.string().max(4000).optional(),
+      physicalDepreciationDescription: z.string().max(6000).optional(),
+      functionalObsolescenceDescription: z.string().max(4000).optional(),
+      economicObsolescenceDescription: z.string().max(4000).optional(),
+    })
+    .partial()
+    .optional(),
+  assumptions: z
+    .object({
+      generalAssumptions: z.string().max(6000).optional(),
+      specialAssumptions: z.string().max(4000).optional(),
+    })
+    .partial()
+    .optional(),
+});
+
 const updateCompanyBrandingSchema = z
   .object({
     logoDataUrl: z
@@ -1953,7 +2121,68 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
       companyName: company?.name ?? "",
       logoDataUrl: company?.logoDataUrl ?? null,
       reportSignatoryRows,
+      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
     },
+  };
+}
+
+/**
+ * Returns the persisted (and seed-filled) report defaults for the current
+ * company admin so that the dashboard form is pre-populated and editable.
+ */
+export async function getCompanyReportDefaultsForCompanyAdmin(request: Request) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  return {
+    context,
+    payload: {
+      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
+    },
+  };
+}
+
+/**
+ * Replaces the company-level final-report templates. Only fields included in
+ * the payload are overwritten; missing fields fall back to the seeded values
+ * on read.
+ */
+export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request, body: unknown) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const parsed = updateCompanyReportDefaultsSchema.safeParse(coerceRequestJsonBody(body));
+  if (!parsed.success) {
+    const flat = parsed.error.flatten();
+    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
+      (msgs ?? []).map((m) => `${key}: ${m}`),
+    );
+    const hint =
+      fieldLines.join("; ") ||
+      (flat.formErrors?.length ? flat.formErrors.join("; ") : "") ||
+      "Invalid payload.";
+    throw new HttpError(400, "invalid_payload", hint, {
+      issues: flat,
+    } as Record<string, unknown>);
+  }
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const sanitized = sanitizeCompanyReportDefaults(parsed.data);
+  await companies.updateOne(
+    { _id: companyId },
+    { $set: { reportDefaults: sanitized, updatedAt: new Date() } as Partial<CompanyDoc> },
+  );
+
+  return {
+    context,
+    payload: { ok: true as const, reportDefaults: resolveCompanyReportDefaults(sanitized) },
   };
 }
 

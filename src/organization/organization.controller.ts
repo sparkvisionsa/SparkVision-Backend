@@ -18,12 +18,14 @@ import {
   deleteCompanyMemberBySuperAdmin,
   deleteCompanyUserByCompanyAdmin,
   getCompanyDetailForSuperAdmin,
+  getCompanyReportDefaultsForCompanyAdmin,
   getCompanyReportDefaultsForMember,
   listCompaniesForSuperAdmin,
   listCompanyUsersForCompanyAdmin,
   updateCompanyBrandingByCompanyAdmin,
   updateCompanyBySuperAdmin,
   updateCompanyMemberReportSignatureByCompanyAdmin,
+  updateCompanyReportDefaultsByCompanyAdmin,
   updateCompanyUserByCompanyAdmin,
 } from "@/server/auth-tracking/service";
 
@@ -114,6 +116,27 @@ export class OrganizationController {
     @Body() body: unknown
   ) {
     const result = await updateCompanyBrandingByCompanyAdmin(req, body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Get("company/admin/report-defaults")
+  async companyAdminReportDefaults(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await getCompanyReportDefaultsForCompanyAdmin(req);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/admin/report-defaults")
+  async patchCompanyReportDefaults(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown
+  ) {
+    const result = await updateCompanyReportDefaultsByCompanyAdmin(req, body);
     applyContextCookies(res, result.context);
     return result.payload;
   }

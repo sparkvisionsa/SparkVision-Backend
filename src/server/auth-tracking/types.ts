@@ -27,6 +27,77 @@ export interface CompanyReportSignatoryRow {
 }
 
 /**
+ * قسم نطاق العمل والقيود ضمن قوالب التقرير الافتراضية للشركة.
+ * تُستخدم هذه القيم كنصوص افتراضية في صفحات إعداد التقرير عند عدم وجود إدخال خاص بالمشروع.
+ */
+export interface CompanyReportScopeDefaults {
+  /** تفاصيل نطاق العمل الافتراضية (نص متعدد الأسطر). */
+  scopeOfWorkDetails?: string;
+  /** تعريف/توضيح أساس القيمة. */
+  valuationBasisDefinition?: string;
+  /** تعريف/توضيح فرضية القيمة (12.0). */
+  valuePremiseDefinition?: string;
+  /** قيود الاستخدام/التوزيع/النشر. */
+  useRestriction?: string;
+  /** الاستعانة بأخصائيين خارجيين. */
+  externalSpecialistUse?: string;
+  /** اعتبارات ESG. */
+  esgConsiderations?: string;
+  /** مصادر المعلومات والمدخلات الرئيسية. */
+  informationSources?: string;
+  /**
+   * بيان الامتثال لمعايير التقييم الدولية (قسم 3.0). نص ثابت غالباً عبر مشاريع
+   * الشركة، يمكن تخصيصه ليعكس الاتفاقيات الموقعة.
+   */
+  complianceStatement?: string;
+  /**
+   * إقرار الاستقلالية وعدم تضارب المصالح (قسم 4.0). يحتوي على اسم الشركة
+   * تلقائياً عبر استبدال `{companyName}` في وقت العرض.
+   */
+  independenceStatement?: string;
+  /** نص افتراضي للاستخدام المقصود (قسم 10.0). */
+  intendedUseStatement?: string;
+}
+
+/**
+ * قسم الأصل والمنهجية ضمن قوالب التقرير الافتراضية للشركة.
+ * (موقع المعاينة ورابطها يبقيان ضمن بيانات المشروع وليس قوالب الشركة.)
+ */
+export interface CompanyReportMethodologyDefaults {
+  /** الوصف العام للأصل محل التقييم (نص افتراضي). */
+  assetSubjectDescription?: string;
+  /** الوصف التفصيلي للأصول. */
+  assetDetailedDescription?: string;
+  /** مبررات اختيار المنهجية (قسم 21.0). */
+  methodologyRationale?: string;
+  /** تفاصيل تطبيق أسلوب التكلفة (قسم 22.0). */
+  costApproachDetails?: string;
+  /** القيمة المتبقية / التخريدية (قسم 22.1). */
+  salvageValueDescription?: string;
+  /** الإهلاك المادي وطرق احتسابه (قسم 22.2). */
+  physicalDepreciationDescription?: string;
+  /** التقادم الوظيفي (قسم 22.3). */
+  functionalObsolescenceDescription?: string;
+  /** التقادم الاقتصادي (قسم 22.4). */
+  economicObsolescenceDescription?: string;
+}
+
+/** قسم الافتراضات (عامة وخاصة) ضمن قوالب التقرير الافتراضية للشركة. */
+export interface CompanyReportAssumptionsDefaults {
+  /** افتراضات عامة (سابقاً «افتراضات مهمة»). */
+  generalAssumptions?: string;
+  /** افتراضات خاصة. */
+  specialAssumptions?: string;
+}
+
+/** قوالب التقرير النهائي الافتراضية على مستوى الشركة. */
+export interface CompanyReportDefaults {
+  scope?: CompanyReportScopeDefaults;
+  methodology?: CompanyReportMethodologyDefaults;
+  assumptions?: CompanyReportAssumptionsDefaults;
+}
+
+/**
  * حقول شركة في `companies` — لا تُعرّف `_id` هنا؛ Atlas/MongoDB يُنشئانه تلقائياً عند الإدراج.
  * للقراءة استخدم `WithId<CompanyDoc>` أو `CompanyMongoDoc`.
  */
@@ -39,6 +110,13 @@ export interface CompanyDoc {
   logoDataUrl?: string | null;
   /** المقيمون والتوقيعات الافتراضية لمشاريع التقييم. */
   reportSignatoryRows?: CompanyReportSignatoryRow[];
+  /** قوالب أقسام التقرير النهائي الافتراضية (نطاق العمل، المنهجية، الافتراضات). */
+  reportDefaults?: CompanyReportDefaults;
+  /**
+   * عدّاد ترقيم تسلسلي للمشاريع داخل الشركة (1, 2, 3, ...).
+   * يُستخدم في الزيادة الذرية عند إنشاء مشروع لإنتاج `displayNumber`.
+   */
+  projectSequenceCounter?: number;
   createdAt: Date;
   updatedAt: Date;
   createdByUserId: ObjectId;
