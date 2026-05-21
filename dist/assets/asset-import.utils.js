@@ -283,7 +283,7 @@ function emptyMvPhotoFieldsForImportedAssetRow(opts) {
         manufactureYear: null,
         kilometersDriven: null,
         isPresent: null,
-        isDone: true,
+        isDone: false,
         createdBy: opts?.createdBy ?? null,
         images: [],
         voiceNotes: [],

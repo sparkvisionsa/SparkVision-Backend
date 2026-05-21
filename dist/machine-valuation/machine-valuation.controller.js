@@ -184,7 +184,7 @@ let MachineValuationController = class MachineValuationController {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
         const parentRaw = body.parent?.trim() || body.parentSubProjectId?.trim() || undefined;
-        const created = await this.mvService.createSubProject(projectId, body.name ?? "", toMvAccess(context), parentRaw);
+        const created = await this.mvService.createSubProject(projectId, body.name ?? "", toMvAccess(context), parentRaw, { kind: body?.folderKind === "folder" ? "folder" : "asset" });
         this.publishRealtime(projectId, "asset-folders-changed", "subproject:create");
         return created;
     }
@@ -771,7 +771,7 @@ __decorate([
     (0, common_1.Post)("projects/:pid/valuation-excel-files"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FilesInterceptor)("files", 20, {
         storage: (0, multer_1.memoryStorage)(),
-        limits: { fileSize: asset_import_constants_1.ASSET_IMPORT_MAX_FILE_BYTES },
+        limits: { fileSize: asset_import_constants_1.VALUATION_EXCEL_MAX_FILE_BYTES },
     })),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Res)({ passthrough: true })),
@@ -840,7 +840,7 @@ __decorate([
 __decorate([
     (0, common_1.Post)("upload"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
-        limits: { fileSize: asset_import_constants_1.ASSET_IMPORT_MAX_FILE_BYTES },
+        limits: { fileSize: asset_import_constants_1.VALUATION_EXCEL_MAX_FILE_BYTES },
     })),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Res)({ passthrough: true })),

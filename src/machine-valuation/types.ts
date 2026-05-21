@@ -52,6 +52,7 @@ export interface MvReportEditableSection {
   id: string;
   title: string;
   body: string;
+  insertAfterAnchorId?: string;
 }
 
 export type MvReportInsertedBlockKind = "heading" | "paragraph" | "image";
@@ -63,7 +64,12 @@ export interface MvReportInsertedBlock {
   content?: string;
   imageDataUrl?: string;
   caption?: string;
+  position?: "before" | "after";
+  align?: "start" | "center" | "end";
+  widthPercent?: number;
 }
+
+export type MvReportPageOrientationPreference = "portrait" | "landscape";
 
 export interface MvProjectReportData {
   reportReference?: string;
@@ -137,6 +143,10 @@ export interface MvProjectReportData {
   reportEditableSections?: MvReportEditableSection[];
   /** كتل مضافة من قائمة النقر داخل صفحات التقرير. */
   reportInsertedBlocks?: MvReportInsertedBlock[];
+  /** مرتكزات الأقسام المخفية من التقرير. */
+  reportHiddenAnchorIds?: string[];
+  /** اتجاهات صفحات التقرير اليدوية، مفاتيحها anchor الصفحة أو معرف الصورة. */
+  reportPageOrientations?: Record<string, MvReportPageOrientationPreference>;
 }
 
 export interface MvProjectLocation {

@@ -433,6 +433,9 @@ function sanitizeReportEditableSections(value) {
             id: sanitizeOptionalText(data.id, 120) || `section-${index + 1}`,
             title: title || "قسم جديد",
             body,
+            ...(sanitizeOptionalText(data.insertAfterAnchorId, 180)
+                ? { insertAfterAnchorId: sanitizeOptionalText(data.insertAfterAnchorId, 180) }
+                : {}),
         };
     })
         .filter((item) => item != null);
@@ -453,6 +456,13 @@ function sanitizeReportInsertedBlocks(value) {
         const content = sanitizeOptionalText(data.content, 50_000);
         const imageDataUrl = sanitizeOptionalText(data.imageDataUrl, 10_000_000);
         const caption = sanitizeOptionalText(data.caption, 2000);
+        const position = data.position === "before" ? "before" : data.position === "after" ? "after" : undefined;
+        const align = data.align === "start" || data.align === "center" || data.align === "end"
+            ? data.align
+            : undefined;
+        const widthPercent = typeof data.widthPercent === "number" && Number.isFinite(data.widthPercent)
+            ? Math.min(100, Math.max(20, Math.round(data.widthPercent)))
+            : undefined;
         if (kind === "image" && !imageDataUrl)
             return null;
         return {
@@ -462,9 +472,36 @@ function sanitizeReportInsertedBlocks(value) {
             ...(content ? { content } : {}),
             ...(imageDataUrl ? { imageDataUrl } : {}),
             ...(caption ? { caption } : {}),
+            ...(position ? { position } : {}),
+            ...(align ? { align } : {}),
+            ...(widthPercent != null ? { widthPercent } : {}),
         };
     })
         .filter((item) => item != null);
+}
+function sanitizeReportAnchorIds(value) {
+    if (!Array.isArray(value))
+        return [];
+    const out = [];
+    for (const raw of value.slice(0, 180)) {
+        const id = sanitizeOptionalText(raw, 180);
+        if (id && !out.includes(id))
+            out.push(id);
+    }
+    return out;
+}
+function sanitizeReportPageOrientations(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return {};
+    const out = {};
+    for (const [rawKey, rawValue] of Object.entries(value).slice(0, 220)) {
+        const key = sanitizeOptionalText(rawKey, 180);
+        if (!key)
+            continue;
+        if (rawValue === "portrait" || rawValue === "landscape")
+            out[key] = rawValue;
+    }
+    return out;
 }
 function sanitizeReportData(raw) {
     const data = raw && typeof raw === "object" ? raw : {};
@@ -528,6 +565,8 @@ function sanitizeReportData(raw) {
         reportNarrativeB4: sanitizeOptionalText(data.reportNarrativeB4, 50_000),
         reportEditableSections: sanitizeReportEditableSections(data.reportEditableSections),
         reportInsertedBlocks: sanitizeReportInsertedBlocks(data.reportInsertedBlocks),
+        reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
+        reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
     };
 }
 const MV_VALUATION_WORKSPACE_MAX_JSON_CHARS = 9_500_000;
@@ -825,7 +864,7 @@ function buildPicAssetDocument(projectId, parentFolderId, name, now, createdBy) 
         createdBy,
         images: [],
         voiceNotes: [],
-        isDone: true,
+        isDone: false,
         createdAt: now,
     };
 }
@@ -1800,6 +1839,173 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             this.logger.warn(`Legacy storage cleanup: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
+    photosTreeParentKey(projectId, parentId) {
+        return `${projectId.toString()}\u001f${parentId.toString()}`;
+    }
+    photosTreeLocationKey(projectId, parentId, name) {
+        return `${projectId.toString()}\u001f${parentId?.toString() ?? "__root__"}\u001f${normalizeSubProjectName(name)}`;
+    }
+    async redirectPhotosFolderReferences(db, projectId, fromId, toId) {
+        if (fromId.equals(toId))
+            return;
+        const now = new Date();
+        await db
+            .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
+            .updateMany({ projectId, parent: fromId }, { $set: { parent: toId, updatedAt: now } });
+        await db
+            .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
+            .updateMany({ projectId, parentSubProjectId: fromId }, { $set: { parent: toId, updatedAt: now }, $unset: { parentSubProjectId: "" } });
+        await db
+            .collection(collections_2.MV_ITEMS_COLLECTION)
+            .updateMany({ projectId, parent: fromId }, { $set: { parent: toId, updatedAt: now } });
+        await db
+            .collection(collections_2.MV_ITEMS_COLLECTION)
+            .updateMany({ projectId, parentSubProjectId: fromId }, { $set: { parent: toId, updatedAt: now }, $unset: { parentSubProjectId: "" } });
+        await db
+            .collection(collections_3.ASSETS_COLLECTION)
+            .updateMany({ projectId, parent: fromId }, { $set: { parent: toId, updatedAt: now } });
+        await db.collection(collections_2.MV_FILES_FILES_COLLECTION).updateMany({ "metadata.projectId": projectId, "metadata.subProjectId": fromId }, { $set: { "metadata.subProjectId": toId, "metadata.updatedAt": now } });
+        await db.collection(collections_2.MV_FILES_FILES_COLLECTION).updateMany({ "metadata.projectId": projectId, "metadata.picAssetId": fromId }, { $set: { "metadata.picAssetId": toId, "metadata.updatedAt": now } });
+    }
+    async retargetLegacyAssetMirrorFiles(db, projectId, legacySubProjectId, picAssetId) {
+        if (legacySubProjectId.equals(picAssetId))
+            return;
+        const now = new Date();
+        await db.collection(collections_2.MV_FILES_FILES_COLLECTION).updateMany({
+            "metadata.projectId": projectId,
+            "metadata.scope": "asset-images",
+            "metadata.subProjectId": legacySubProjectId,
+        }, {
+            $set: { "metadata.picAssetId": picAssetId, "metadata.updatedAt": now },
+            $unset: { "metadata.subProjectId": "" },
+        });
+        await db.collection(collections_2.MV_FILES_FILES_COLLECTION).updateMany({
+            "metadata.projectId": projectId,
+            "metadata.scope": "asset-images",
+            "metadata.picAssetId": legacySubProjectId,
+        }, { $set: { "metadata.picAssetId": picAssetId, "metadata.updatedAt": now } });
+    }
+    async migratePhotosTreeSubProjectsToItems(db) {
+        const subProjects = db.collection(collections_2.MV_SUBPROJECTS_COLLECTION);
+        const items = db.collection(collections_2.MV_ITEMS_COLLECTION);
+        const photoAssets = db.collection(collections_3.ASSETS_COLLECTION);
+        const roots = (await items
+            .find({
+            name: DEFAULT_PHOTOS_SUBFOLDER_NAME,
+            $or: [
+                { parent: null },
+                {
+                    $and: [
+                        { parent: { $exists: false } },
+                        { parentSubProjectId: { $exists: false } },
+                    ],
+                },
+            ],
+        })
+            .toArray());
+        if (roots.length === 0)
+            return;
+        const projectIds = Array.from(new Map(roots.map((root) => [root.projectId.toString(), root.projectId])).values());
+        const legacyRows = (await subProjects
+            .find({ projectId: { $in: projectIds } })
+            .toArray());
+        if (legacyRows.length === 0)
+            return;
+        const legacyChildrenByParent = new Map();
+        for (const row of legacyRows) {
+            const parent = getParentIdFromDoc(row);
+            if (parent == null)
+                continue;
+            const key = this.photosTreeParentKey(row.projectId, parent);
+            const bucket = legacyChildrenByParent.get(key);
+            if (bucket)
+                bucket.push(row);
+            else
+                legacyChildrenByParent.set(key, [row]);
+        }
+        const orderedLegacyPhotosRows = [];
+        const visited = new Set();
+        const queue = roots.map((root) => ({
+            projectId: root.projectId,
+            folderId: root._id,
+        }));
+        while (queue.length > 0) {
+            const current = queue.shift();
+            const children = legacyChildrenByParent.get(this.photosTreeParentKey(current.projectId, current.folderId)) ??
+                [];
+            for (const child of children) {
+                const idKey = child._id.toString();
+                if (visited.has(idKey))
+                    continue;
+                visited.add(idKey);
+                orderedLegacyPhotosRows.push(child);
+                queue.push({ projectId: child.projectId, folderId: child._id });
+            }
+        }
+        if (orderedLegacyPhotosRows.length === 0)
+            return;
+        const existingItems = (await items
+            .find({ projectId: { $in: projectIds } })
+            .toArray());
+        const itemIdByLocation = new Map();
+        for (const item of existingItems) {
+            itemIdByLocation.set(this.photosTreeLocationKey(item.projectId, getParentIdFromDoc(item) ?? null, item.name), item._id);
+        }
+        const parentRedirects = new Map();
+        let movedFolders = 0;
+        let mergedFolders = 0;
+        let removedAssetMirrors = 0;
+        for (const legacy of orderedLegacyPhotosRows) {
+            const originalParent = getParentIdFromDoc(legacy) ?? null;
+            const redirectedParent = originalParent != null
+                ? parentRedirects.get(originalParent.toString()) ?? originalParent
+                : null;
+            const locationKey = this.photosTreeLocationKey(legacy.projectId, redirectedParent, legacy.name);
+            const existingItemId = itemIdByLocation.get(locationKey);
+            if (existingItemId && !existingItemId.equals(legacy._id)) {
+                await this.redirectPhotosFolderReferences(db, legacy.projectId, legacy._id, existingItemId);
+                await subProjects.deleteOne({ _id: legacy._id, projectId: legacy.projectId });
+                parentRedirects.set(legacy._id.toString(), existingItemId);
+                mergedFolders += 1;
+                continue;
+            }
+            const legacyHasChildren = legacyChildrenByParent.get(this.photosTreeParentKey(legacy.projectId, legacy._id))?.length ??
+                0;
+            const matchingPicAsset = redirectedParent != null
+                ? await photoAssets.findOne({
+                    projectId: legacy.projectId,
+                    parent: redirectedParent,
+                    name: legacy.name,
+                    ...MV_PHOTO_FOLDER_FILTER,
+                })
+                : null;
+            if (matchingPicAsset && legacyHasChildren === 0) {
+                await this.retargetLegacyAssetMirrorFiles(db, legacy.projectId, legacy._id, matchingPicAsset._id);
+                await subProjects.deleteOne({ _id: legacy._id, projectId: legacy.projectId });
+                removedAssetMirrors += 1;
+                continue;
+            }
+            const now = new Date();
+            await items.updateOne({ _id: legacy._id, projectId: legacy.projectId }, {
+                $setOnInsert: {
+                    _id: legacy._id,
+                    projectId: legacy.projectId,
+                    createdAt: legacy.createdAt ?? now,
+                },
+                $set: {
+                    parent: redirectedParent,
+                    name: legacy.name,
+                    updatedAt: legacy.updatedAt ?? now,
+                },
+            }, { upsert: true });
+            await subProjects.deleteOne({ _id: legacy._id, projectId: legacy.projectId });
+            itemIdByLocation.set(locationKey, legacy._id);
+            movedFolders += 1;
+        }
+        if (movedFolders > 0 || mergedFolders > 0 || removedAssetMirrors > 0) {
+            this.logger.log(`Migrated asset-images tree from mv_subprojects: moved=${movedFolders}, merged=${mergedFolders}, removedAssetMirrors=${removedAssetMirrors}`);
+        }
+    }
     async onModuleInit() {
         const db = await (0, mongodb_2.getMongoDb)();
         await this.dropAbandonedLegacyPhotoStorageCollection(db);
@@ -1975,7 +2181,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 createdBy: (0, object_id_util_1.tryCoerceToObjectId)(d.createdBy) ?? null,
                 images: d.images ?? [],
                 voiceNotes: d.voiceNotes ?? [],
-                isDone: true,
+                isDone: d.isDone === true,
             };
             const shell = buildPicAssetDocument(pad.projectId, pad.parent, pad.name, nowM, pad.createdBy);
             await photoAssets.insertOne({
@@ -1991,7 +2197,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 isPresent: pad.isPresent,
                 images: pad.images,
                 voiceNotes: pad.voiceNotes,
-                isDone: true,
+                isDone: pad.isDone,
                 createdAt: pad.createdAt,
                 importedAt: pad.createdAt,
                 updatedAt: pad.updatedAt,
@@ -2015,6 +2221,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 },
             });
         }
+        await this.migratePhotosTreeSubProjectsToItems(db);
     }
     buildProjectsVisibleToCompanyFilter(companyIdStr) {
         const coId = (0, object_id_util_1.tryParseObjectId)(companyIdStr);
@@ -2187,14 +2394,92 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         }
         return { created, existing };
     }
+    async upsertItemsFolders(db, projectId, names, parentId, newDocExtras) {
+        const uniqueNames = Array.from(new Set(names.map((name) => normalizeSubProjectName(name)).filter(Boolean)));
+        if (uniqueNames.length === 0) {
+            return { created: [], existing: [] };
+        }
+        const filter = {
+            projectId,
+            name: { $in: uniqueNames },
+        };
+        if (parentId) {
+            filter.$or = [
+                { parent: parentId },
+                { parentSubProjectId: parentId },
+            ];
+        }
+        else {
+            filter.$or = [
+                { parent: null },
+                {
+                    $and: [
+                        { parent: { $exists: false } },
+                        { parentSubProjectId: { $exists: false } },
+                    ],
+                },
+            ];
+        }
+        const items = db.collection(collections_2.MV_ITEMS_COLLECTION);
+        const subProjects = db.collection(collections_2.MV_SUBPROJECTS_COLLECTION);
+        const existingItems = (await items.find(filter).toArray());
+        const existingNames = new Set(existingItems.map((doc) => normalizeSubProjectName(doc.name)));
+        const legacySubProjects = (await subProjects.find(filter).toArray());
+        const movedLegacy = [];
+        for (const legacy of legacySubProjects) {
+            const normalized = normalizeSubProjectName(legacy.name);
+            if (!normalized || existingNames.has(normalized))
+                continue;
+            const parent = getParentIdFromDoc(legacy);
+            const docForItems = {
+                _id: legacy._id,
+                projectId: legacy.projectId,
+                parent: parent ?? null,
+                name: legacy.name,
+                createdAt: legacy.createdAt,
+                updatedAt: legacy.updatedAt,
+                ...(newDocExtras ?? {}),
+            };
+            await items.updateOne({ _id: legacy._id, projectId }, { $setOnInsert: docForItems }, { upsert: true });
+            await subProjects.deleteOne({ _id: legacy._id, projectId });
+            movedLegacy.push(docForItems);
+            existingNames.add(normalized);
+        }
+        const toCreate = uniqueNames.filter((name) => !existingNames.has(name));
+        const now = new Date();
+        const extras = newDocExtras ?? {};
+        const docs = toCreate.map((name) => ({
+            ...extras,
+            projectId,
+            parent: parentId === undefined ? null : parentId,
+            name,
+            createdAt: now,
+            updatedAt: now,
+        }));
+        const created = [];
+        if (toCreate.length > 0) {
+            const result = await items.insertMany(docs);
+            toCreate.forEach((_, index) => {
+                const doc = docs[index];
+                const _id = result.insertedIds[index];
+                created.push({ _id, ...doc });
+            });
+        }
+        return { created, existing: [...existingItems, ...movedLegacy] };
+    }
     async collectDescendantSubProjectIds(db, projectId, rootId) {
         const subs = await db
             .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
             .find({ projectId })
             .project({ _id: 1, parent: 1, parentSubProjectId: 1 })
             .toArray();
+        const items = await db
+            .collection(collections_2.MV_ITEMS_COLLECTION)
+            .find({ projectId })
+            .project({ _id: 1, parent: 1, parentSubProjectId: 1 })
+            .toArray();
         const childrenByParent = new Map();
-        for (const sub of subs) {
+        for (const sub of [...subs, ...items]) {
             const par = getParentIdFromDoc(sub);
             if (par == null)
                 continue;
@@ -2337,6 +2622,29 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             return false;
         }
         return false;
+    }
+    async assertPicAssetFolderCanReceiveImages(db, projectId, photosRootId, picFolder) {
+        const parent = picFolder.parent;
+        if (!parent) {
+            throw new common_1.BadRequestException("مجلد الأصل يجب أن يكون داخل صور المعاينة.");
+        }
+        if (parent.equals(photosRootId))
+            return;
+        const parentIsNormalFolder = (await db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({
+            _id: parent,
+            projectId,
+        })) ??
+            (await db.collection(collections_2.MV_ITEMS_COLLECTION).findOne({
+                _id: parent,
+                projectId,
+            }));
+        if (!parentIsNormalFolder) {
+            throw new common_1.BadRequestException("مجلد الأصل يجب أن يكون تحت الجذر أو تحت مجلد عادي.");
+        }
+        const parentUnderPhotos = await this.isInPhotosHoldingSubtree(db, projectId, photosRootId, parent);
+        if (!parentUnderPhotos) {
+            throw new common_1.BadRequestException("مجلد الأصل يجب أن يكون داخل صور المعاينة.");
+        }
     }
     async ensureInspectionPhotosItemInItems(db, projectId) {
         const it = db.collection(collections_2.MV_ITEMS_COLLECTION);
@@ -3329,7 +3637,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             throw new common_1.NotFoundException("Project not found");
         return { ok: true };
     }
-    async createSubProject(projectId, name, ctx, parentSubProjectId) {
+    async createSubProject(projectId, name, ctx, parentSubProjectId, options) {
         const n = normalizeSubProjectName(name);
         if (!n)
             throw new common_1.BadRequestException("Sub-project name is required");
@@ -3347,6 +3655,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         }
         const photosRoot = await this.ensurePhotosRootFolder(db, pid);
         let isPicUnderPhotos = false;
+        let parentIsPicAsset = false;
         if (parentId) {
             const inMv = await db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({
                 _id: parentId,
@@ -3362,11 +3671,50 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                         .findOne({ _id: parentId, projectId: pid, ...MV_PHOTO_FOLDER_FILTER });
                     if (!inPic)
                         throw new common_1.NotFoundException("Parent sub-project not found");
+                    parentIsPicAsset = true;
                 }
             }
             isPicUnderPhotos = await this.isInPhotosHoldingSubtree(db, pid, photosRoot._id, parentId);
         }
-        if (isPicUnderPhotos && parentId) {
+        if (parentIsPicAsset) {
+            throw new common_1.BadRequestException("لا يمكن إنشاء مجلدات أو أصول داخل أصل. الأصل يحتوي صوراً فقط.");
+        }
+        if (isPicUnderPhotos && parentId && options?.kind === "folder") {
+            const duplicateAsset = await db.collection(collections_3.ASSETS_COLLECTION).findOne({
+                projectId: pid,
+                parent: parentId,
+                name: n,
+                ...MV_PHOTO_FOLDER_FILTER,
+            });
+            if (duplicateAsset) {
+                throw new common_1.BadRequestException("يوجد أصل بنفس الاسم داخل هذا المكان.");
+            }
+            const { created, existing } = await this.upsertItemsFolders(db, pid, [n], parentId, undefined);
+            const target = created[0] ?? existing[0];
+            if (!target)
+                throw new common_1.BadRequestException("تعذر إنشاء المجلد.");
+            return {
+                ...serializeMvSubProject(target, {
+                    _id: target._id,
+                    projectId: pid,
+                }),
+                picAsset: null,
+            };
+        }
+        if (isPicUnderPhotos && parentId && options?.kind !== "folder") {
+            const duplicateFolder = (await db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({
+                projectId: pid,
+                name: n,
+                $or: [{ parent: parentId }, { parentSubProjectId: parentId }],
+            })) ??
+                (await db.collection(collections_2.MV_ITEMS_COLLECTION).findOne({
+                    projectId: pid,
+                    name: n,
+                    $or: [{ parent: parentId }, { parentSubProjectId: parentId }],
+                }));
+            if (duplicateFolder) {
+                throw new common_1.BadRequestException("يوجد مجلد بنفس الاسم داخل هذا المكان.");
+            }
             const createdBy = (0, object_id_util_1.tryParseObjectId)(ctx.userId ?? undefined) ?? null;
             const { created, existing } = await this.upsertPicAssetFoldersOnly(db, pid, parentId, [n], createdBy);
             const target = created[0] ?? existing[0];
@@ -3803,6 +4151,13 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const photosRoot = await this.ensurePhotosRootFolder(db, pid);
         const createdBy = (0, object_id_util_1.tryParseObjectId)(ctx.userId ?? undefined) ?? null;
         const now = new Date();
+        const sheetFolderName = normalizeSubProjectName(sheetName) || "Sheet";
+        const { created: createdSheetFolders, existing: existingSheetFolders } = await this.upsertItemsFolders(db, pid, [sheetFolderName], photosRoot._id, undefined);
+        const sheetFolder = createdSheetFolders[0] ?? existingSheetFolders[0];
+        if (!sheetFolder) {
+            throw new common_1.BadRequestException("تعذر إنشاء مجلد رئيسي للشيت.");
+        }
+        const sheetFolderId = sheetFolder._id;
         const folderNames = new Set();
         const bulkOps = [];
         const BATCH = 500;
@@ -3824,15 +4179,17 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             folderNames.add(folder);
             const normDocName = normalizeSubProjectName(doc.name ?? "");
             const normFolder = normalizeSubProjectName(folder);
-            if (doc.isAssetFolder === true && normDocName === normFolder && doc.parent?.equals(photosRoot._id)) {
-                if (doc.isDone === true) {
+            const currentParentIsSheet = doc.parent?.equals(sheetFolderId) === true;
+            const currentParentIsLegacyRoot = doc.parent?.equals(photosRoot._id) === true;
+            if (doc.isAssetFolder === true && normDocName === normFolder && (currentParentIsSheet || currentParentIsLegacyRoot)) {
+                if (currentParentIsSheet) {
                     unchangedRows += 1;
                     continue;
                 }
                 bulkOps.push({
                     updateOne: {
                         filter: { _id: doc._id, projectId: pid },
-                        update: { $set: { isDone: true, updatedAt: now } },
+                        update: { $set: { parent: sheetFolderId, updatedAt: now } },
                     },
                 });
                 if (bulkOps.length >= BATCH)
@@ -3846,10 +4203,10 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                         $set: {
                             name: folder,
                             isAssetFolder: true,
-                            parent: photosRoot._id,
+                            parent: sheetFolderId,
                             updatedAt: now,
                             isPresent: true,
-                            isDone: true,
+                            isDone: false,
                             createdBy: doc.createdBy ?? createdBy,
                             createdAt: doc.createdAt ?? now,
                             images: doc.images ?? [],
@@ -3870,7 +4227,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         if (queryNames.length > 0) {
             await coll.deleteMany({
                 projectId: pid,
-                parent: photosRoot._id,
+                $or: [{ parent: photosRoot._id }, { parent: sheetFolderId }],
                 ...MV_PHOTO_FOLDER_FILTER,
                 importId: { $exists: false },
                 name: { $in: queryNames },
@@ -3882,14 +4239,15 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             projectId: pid,
             importId: importOid,
             sheetName,
-            parent: photosRoot._id,
+            parent: sheetFolderId,
             name: { $in: queryNames },
             ...MV_PHOTO_FOLDER_FILTER,
         })
             .toArray();
         return {
             photosFolderId: photosRoot._id.toString(),
-            parentFolderName: photosRoot.name,
+            parentFolderId: sheetFolderId.toString(),
+            parentFolderName: sheetFolder.name,
             columnKey,
             totalValues: folderNames.size,
             createdCount: modifiedRows,
@@ -4125,9 +4483,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 throw new common_1.BadRequestException("Target asset folder not found.");
             }
             const photosRoot = await this.ensurePhotosRootFolder(db, pid);
-            if (!picFolder.parent?.equals(photosRoot._id)) {
-                throw new common_1.BadRequestException("Target asset folder must be under the photos root.");
-            }
+            await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picFolder);
         }
         let insertBeforeOid = null;
         if (insertBeforeTrim) {
@@ -4198,9 +4554,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                     throw new common_1.BadRequestException("مجلد الأصل المستهدف غير موجود أو غير صالح.");
                 }
                 const photosRoot = await this.ensurePhotosRootFolder(db, pid);
-                if (!picFolder.parent?.equals(photosRoot._id)) {
-                    throw new common_1.BadRequestException("يجب أن يكون المجلد المستهدف تحت صور المعاينة.");
-                }
+                await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picFolder);
             }
             const setMeta = {
                 "metadata.relativePath": uniq.relativePath,
@@ -4360,10 +4714,19 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             ? toId(subProjectId)
             : undefined;
         await this.assertSubProjectContext(db, pid, sid, ctx);
-        const folderIsPicAsset = !!sid &&
-            (await db
+        const picAssetFolder = sid
+            ? (await db
                 .collection(collections_3.ASSETS_COLLECTION)
-                .findOne({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER })) != null;
+                .findOne({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }))
+            : null;
+        const folderIsPicAsset = picAssetFolder != null;
+        if (picAssetFolder) {
+            if (options.scope !== "asset-images" || options.imageOnly !== true) {
+                throw new common_1.BadRequestException("الأصل يقبل صور الأصول فقط.");
+            }
+            const photosRoot = await this.ensurePhotosRootFolder(db, pid);
+            await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picAssetFolder);
+        }
         const bucket = this.getFilesBucket(db);
         const displayOrderByFileIndex = options.scope === "asset-images"
             ? await this.buildDisplayOrdersForIncomingAssetImages(db, pid, files, options)

@@ -339,8 +339,8 @@ export function emptyMvPhotoFieldsForImportedAssetRow(opts?: {
     manufactureYear: null,
     kilometersDriven: null,
     isPresent: null,
-    /** صفوف الاستيراد/الجدول: مكتمل افتراضياً؛ مجلدات المعاينة تُعيَّن لاحقاً عبر ‎MV‎ */
-    isDone: true,
+    /** صفوف الاستيراد/الجدول ومجلدات المعاينة تبدأ غير مكتملة حتى يراجعها المستخدم. */
+    isDone: false,
     createdBy: opts?.createdBy ?? null,
     images: [],
     voiceNotes: [],

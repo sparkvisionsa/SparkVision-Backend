@@ -24,7 +24,10 @@ import type { Request, Response } from "express";
 import { MachineValuationService } from "./machine-valuation.service";
 import { FileParserService } from "./file-parser.service";
 import { MvRealtimeService, type MvRealtimeEventType } from "./mv-realtime.service";
-import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
+import {
+  ASSET_IMPORT_MAX_FILE_BYTES,
+  VALUATION_EXCEL_MAX_FILE_BYTES,
+} from "@/assets/asset-import.constants";
 import { MV_INSPECTOR_FILE_MAX_BYTES } from "./inspector-files.constants";
 import { decodeUploadFilename } from "./sheet-rows.util";
 import type { MvAccessContext, MvSpreadsheetMeta, PicAssetPatch } from "./types";
@@ -336,7 +339,7 @@ export class MachineValuationController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Param("id") projectId: string,
-    @Body() body: { name?: string; parent?: string; parentSubProjectId?: string },
+    @Body() body: { name?: string; parent?: string; parentSubProjectId?: string; folderKind?: "folder" | "asset" },
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
@@ -346,6 +349,7 @@ export class MachineValuationController {
       body.name ?? "",
       toMvAccess(context),
       parentRaw,
+      { kind: body?.folderKind === "folder" ? "folder" : "asset" },
     );
     this.publishRealtime(projectId, "asset-folders-changed", "subproject:create");
     return created;
@@ -658,7 +662,7 @@ export class MachineValuationController {
   @UseInterceptors(
     FilesInterceptor("files", 20, {
       storage: memoryStorage(),
-      limits: { fileSize: ASSET_IMPORT_MAX_FILE_BYTES },
+      limits: { fileSize: VALUATION_EXCEL_MAX_FILE_BYTES },
     }),
   )
   async uploadValuationExcelFiles(
@@ -805,7 +809,7 @@ export class MachineValuationController {
   @Post("upload")
   @UseInterceptors(
     FileInterceptor("file", {
-      limits: { fileSize: ASSET_IMPORT_MAX_FILE_BYTES },
+      limits: { fileSize: VALUATION_EXCEL_MAX_FILE_BYTES },
     }),
   )
   async uploadFile(
