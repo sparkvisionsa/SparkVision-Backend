@@ -1,4 +1,6 @@
-import "./register-path-aliases";
+const moduleAlias = require("module-alias") as typeof import("module-alias");
+moduleAlias.addAlias("@", __dirname);
+
 import compression from "compression";
 import cookieParser from "cookie-parser";
 import type { NextFunction, Request, Response } from "express";
