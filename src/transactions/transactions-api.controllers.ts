@@ -65,8 +65,15 @@ export class TransactionsController {
   }
 
   @Get(":id")
-  getOne(@Param("id") id: string) {
-    return this.svc.getTransaction(id);
+  async getOne(@Param("id") id: string, @Req() req: Request) {
+    const { createdByUserId, companyId } = await resolveSessionMeta(req);
+    // Resolve role from request context
+    let userRole: string | null = null;
+    try {
+      const context = await resolveRequestContext(req);
+      userRole = context.user?.role ?? null;
+    } catch {}
+    return this.svc.getTransaction(id, userRole === "inspector");
   }
 
   @Patch(":id")

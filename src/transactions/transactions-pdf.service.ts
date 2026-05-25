@@ -281,28 +281,49 @@ export class TransactionsPdfService {
     const images: { dataUri: string; name: string }[] = [];
 
     for (const img of imageDocs) {
-      const abs = resolveFilePath(img.filePath);
-      if (!fs.existsSync(abs)) {
-        this.logger.warn(`Image not found: ${img.filePath}`);
+      let dataUri: string | null = null;
+
+      if (img.url) {
+        // Cloudinary-backed: fetch from URL
+        try {
+          const response = await fetch(img.url);
+          const arrayBuffer = await response.arrayBuffer();
+          const buf = Buffer.from(arrayBuffer);
+          const mime = img.mimeType || "image/jpeg";
+          dataUri = `data:${mime};base64,${buf.toString("base64")}`;
+        } catch {
+          this.logger.warn(`Failed to fetch remote image: ${img.url}`);
+          continue;
+        }
+      } else if (img.filePath) {
+        // Local file
+        const abs = resolveFilePath(img.filePath);
+        if (!fs.existsSync(abs)) {
+          this.logger.warn(`Image not found: ${img.filePath}`);
+          continue;
+        }
+        const buf = fs.readFileSync(abs);
+        const ext = path.extname(img.filePath).toLowerCase().replace(".", "");
+        const mimeMap: Record<string, string> = {
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          png: "image/png",
+          gif: "image/gif",
+          webp: "image/webp",
+          bmp: "image/bmp",
+        };
+        const mime = mimeMap[ext] ?? "image/jpeg";
+        dataUri = `data:${mime};base64,${buf.toString("base64")}`;
+      } else {
+        this.logger.warn(`Image doc ${img._id} has neither filePath nor url`);
         continue;
       }
-      const buf = fs.readFileSync(abs);
-      const ext = path.extname(img.filePath).toLowerCase().replace(".", "");
-      const mimeMap: Record<string, string> = {
-        jpg: "image/jpeg",
-        jpeg: "image/jpeg",
-        png: "image/png",
-        gif: "image/gif",
-        webp: "image/webp",
-        bmp: "image/bmp",
-      };
-      const mime = mimeMap[ext] ?? "image/jpeg";
+
       images.push({
-        dataUri: `data:${mime};base64,${buf.toString("base64")}`,
+        dataUri,
         name: img.name || img.originalName,
       });
     }
-
     // ── Load image attachment data URIs ────────────────────────────────────────
     const imageAttachments: { dataUri: string; name: string }[] = [];
     const pdfAttachments: {

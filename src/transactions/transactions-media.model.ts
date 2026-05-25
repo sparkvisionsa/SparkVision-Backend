@@ -36,24 +36,37 @@ export function toAttachmentJson(d: AttachmentDoc) {
 
 export type ImageDoc = {
   _id: ObjectId;
-  transactionId: string;
-  name: string; // user-editable display name
+  transactionId: string | ObjectId; // ← either, depending on age of doc
+  name: string;
   originalName: string;
   mimeType: string;
-  filePath: string;
+  // Old shape
+  filePath?: string;
+  // New shape
+  url?: string;
+  publicId?: string;
+  mediaType?: "image" | "video";
+  thumbnailUrl?: string;
+  duration?: number | null;
+  width?: number | null;
+  height?: number | null;
   size: number;
-  sortIndex: number; // 1-based display order, unique per transaction
+  sortIndex: number;
   uploadedAt: Date;
+  updatedAt?: Date;
 };
 
 export function toImageJson(d: ImageDoc) {
+  // New Cloudinary-backed docs use `url`; old docs use `filePath`
+  const resolvedPath = d.url ?? d.filePath ?? "";
+
   return {
     id: d._id.toString(),
-    transactionId: d.transactionId,
+    transactionId: d.transactionId.toString(),
     name: d.name,
     originalName: d.originalName,
     mimeType: d.mimeType,
-    filePath: d.filePath,
+    filePath: resolvedPath, // frontend filePreviewUrl() handles https:// already
     size: d.size,
     sortIndex: d.sortIndex,
     uploadedAt: d.uploadedAt.toISOString(),

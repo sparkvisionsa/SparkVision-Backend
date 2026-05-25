@@ -11,8 +11,11 @@ import {
   type TransactionDoc,
   type SavedFieldEntry,
   type EvalData,
+  type AvailableServices,
   emptyEvalData,
+  emptyAvailableServices,
 } from "./transactions.model";
+
 import {
   CLIENTS_COLLECTION,
   FORM_TEMPLATES_COLLECTION,
@@ -23,8 +26,6 @@ import {
 // ─── serialiser ───────────────────────────────────────────────────────────────
 
 function toTransactionJson(d: TransactionDoc) {
-  // Merge emptyEvalData with whatever is stored so the client always gets
-  // a complete object even for legacy docs that pre-date evalData.
   const evalData: EvalData = { ...emptyEvalData(), ...(d.evalData ?? {}) };
 
   return {
@@ -48,17 +49,18 @@ function toTransactionJson(d: TransactionDoc) {
     branch: d.branch,
     templateId: d.templateId,
 
-    // dynamic template fields — untouched
     templateFieldValues: d.templateFieldValues ?? {},
-
-    // all eval-page data in one block
     evalData,
+
+    // ── add these two ──────────────────────────────────────────────────────
+    isOpened: d.isOpened ?? false,
+    isCompleted: d.isCompleted ?? false,
+    // ──────────────────────────────────────────────────────────────────────
 
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
 }
-
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function normalizeTransactionBody(body: Record<string, unknown>) {
@@ -106,6 +108,7 @@ function normalizeTransactionBody(body: Record<string, unknown>) {
 // arrive already parsed — no FormData / JSON.parse juggling needed.
 function extractEvalData(body: Record<string, unknown>): EvalData {
   const empty = emptyEvalData();
+  const raw = (body.evalData as any) ?? {};
   const str = (k: keyof EvalData): string => {
     const v = (body.evalData as any)?.[k];
     return typeof v === "string" ? v.trim() : (empty[k] as string);
@@ -113,6 +116,35 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
   const arr = <T>(k: keyof EvalData): T[] => {
     const v = (body.evalData as any)?.[k];
     return Array.isArray(v) ? v : (empty[k] as T[]);
+  };
+
+  const extractAvailableServices = (): AvailableServices => {
+    const src = raw["availableServices"];
+    if (src && typeof src === "object" && !Array.isArray(src)) {
+      const boolOrNull = (k: keyof AvailableServices): boolean | null => {
+        const v = src[k];
+        if (v === true || v === false) return v;
+        return null;
+      };
+      const numOrNull = (k: keyof AvailableServices): number | null => {
+        const v = src[k];
+        if (typeof v === "number") return v;
+        if (typeof v === "string" && v.trim() !== "") {
+          const n = Number(v);
+          return isNaN(n) ? null : n;
+        }
+        return null;
+      };
+      return {
+        electricity: boolOrNull("electricity"),
+        electricityUnits: numOrNull("electricityUnits"),
+        sanitaryDrainage: boolOrNull("sanitaryDrainage"),
+        telephoneLine: boolOrNull("telephoneLine"),
+        waterMetersCount: numOrNull("waterMetersCount"),
+        electricityMetersCount: numOrNull("electricityMetersCount"),
+      };
+    }
+    return emptyAvailableServices();
   };
 
   return {
@@ -147,12 +179,32 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     eastLength: str("eastLength"),
     westBoundary: str("westBoundary"),
     westLength: str("westLength"),
-    buildingState: str("buildingState"),
+    buildingCondition: (() => {
+      const src = raw["buildingCondition"];
+      if (src && typeof src === "object" && !Array.isArray(src)) {
+        return {
+          status: typeof src.status === "string" ? src.status.trim() : "",
+          completionPct:
+            typeof src.completionPct === "number"
+              ? src.completionPct
+              : src.completionPct !== null &&
+                  src.completionPct !== undefined &&
+                  src.completionPct !== ""
+                ? parseFloat(src.completionPct)
+                : null,
+          otherText:
+            typeof src.otherText === "string" ? src.otherText.trim() : "",
+        };
+      }
+      return { status: "", completionPct: null, otherText: "" };
+    })(),
     floorsCount: str("floorsCount"),
     propertyAge: str("propertyAge"),
     finishLevel: str("finishLevel"),
     buildQuality: str("buildQuality"),
     street: str("street"),
+    availableServices: extractAvailableServices(),
+    surroundingEnvironment: arr<string>("surroundingEnvironment"),
     coords: str("coords"),
     lat: str("lat"),
     lng: str("lng"),
@@ -169,8 +221,8 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     marketWeightPct: str("marketWeightPct"),
     marketMethodTotal: str("marketMethodTotal"),
     marketReason: str("marketReason"),
-    landTitle: str("landTitle"), // ← ADD
-    landSpace: str("landSpace"), // ← ADD
+    landTitle: str("landTitle"),
+    landSpace: str("landSpace"),
     propertyAreaMethod: str("propertyAreaMethod"),
     costNetBuildings: str("costNetBuildings"),
     costNetLandPrice: str("costNetLandPrice"),
@@ -191,7 +243,7 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     author4Id: str("author4Id"),
     author4Title: str("author4Title"),
     comparisonRows: arr("comparisonRows"),
-    section1Rows: arr("section1Rows"), // ← ADD THIS LINE
+    section1Rows: arr("section1Rows"),
     settlementRows: arr("settlementRows"),
     settlementBases: arr("settlementBases"),
     settlementWeights: arr<string>("settlementWeights"),
@@ -215,7 +267,6 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     maintenanceDesc: str("maintenanceDesc"),
     finishesDesc: str("finishesDesc"),
     replacementNotes: str("replacementNotes"),
-
     previousDeedNumber: str("previousDeedNumber"),
     previousDeedDate: str("previousDeedDate"),
     operationType: str("operationType"),
@@ -310,10 +361,20 @@ export class TransactionsMongoService {
     return toTransactionJson(row);
   }
 
-  async getTransaction(id: string) {
+  async getTransaction(id: string, markOpened = false) {
     if (!ObjectId.isValid(id))
       throw new NotFoundException({ message: "المعاملة غير موجودة" });
     const db = await getMongoDb();
+
+    if (markOpened) {
+      await db
+        .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
+        .updateOne(
+          { _id: new ObjectId(id), isOpened: { $ne: true } },
+          { $set: { isOpened: true, updatedAt: new Date() } },
+        );
+    }
+
     const row = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOne({ _id: new ObjectId(id) });

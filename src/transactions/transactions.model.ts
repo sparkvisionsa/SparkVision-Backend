@@ -7,6 +7,28 @@ export type SavedFieldEntry = {
   value: string; // what the user typed/selected
 };
 
+// ─── Available Services sub-document ─────────────────────────────────────────
+
+export type AvailableServices = {
+  electricity: boolean | null;
+  electricityUnits: number | null;
+  sanitaryDrainage: boolean | null;
+  telephoneLine: boolean | null;
+  waterMetersCount: number | null;
+  electricityMetersCount: number | null;
+};
+
+export function emptyAvailableServices(): AvailableServices {
+  return {
+    electricity: null,
+    electricityUnits: null,
+    sanitaryDrainage: null,
+    telephoneLine: null,
+    waterMetersCount: null,
+    electricityMetersCount: null,
+  };
+}
+
 // All fields that the valuation page can fill in after the transaction is created.
 // Kept in a dedicated sub-document so templateFieldValues is never mutated.
 export type EvalData = {
@@ -28,8 +50,8 @@ export type EvalData = {
   contactNo: string;
   reviewer: string;
 
-  landTitle: string; // ← ADD (near meterPriceLand)
-  landSpace: string; //
+  landTitle: string;
+  landSpace: string;
 
   // basic property data
   propertyCode: string;
@@ -52,14 +74,20 @@ export type EvalData = {
   westLength: string;
 
   // finishing
-  buildingState: string;
+  buildingCondition: {
+    status: string;
+    completionPct: number | null;
+    otherText: string;
+  };
   floorsCount: string;
   propertyAge: string;
   finishLevel: string;
   buildQuality: string;
 
-  // services
-  street: string;
+  // services — replaces flat `street` field
+  street: string; // kept for legacy reads; new UI uses availableServices
+  availableServices: AvailableServices;
+  surroundingEnvironment: string[];
 
   // map
   coords: string;
@@ -113,7 +141,7 @@ export type EvalData = {
 
   // comparison & settlement tables
   comparisonRows: any[];
-  section1Rows: any[]; // ← ADD THIS LINE
+  section1Rows: any[];
   settlementRows: any[];
   settlementBases: string[];
   settlementWeights: string[];
@@ -138,7 +166,7 @@ export type EvalData = {
   maintenanceDesc: string;
   finishesDesc: string;
   replacementNotes: string;
-  // ADD these fields
+
   subDivisionRecordNumber: string;
   otherUsers: string;
   deedSource: string;
@@ -184,8 +212,8 @@ export function emptyEvalData(): EvalData {
     inspector: "",
     contactNo: "",
     reviewer: "",
-    landTitle: "", // ← ADD
-    landSpace: "", // ← ADD
+    landTitle: "",
+    landSpace: "",
     ownerName: "",
     propertyType: "",
     landUse: "",
@@ -199,12 +227,18 @@ export function emptyEvalData(): EvalData {
     eastLength: "",
     westBoundary: "",
     westLength: "",
-    buildingState: "",
+    buildingCondition: {
+      status: "",
+      completionPct: null,
+      otherText: "",
+    },
     floorsCount: "",
     propertyAge: "",
     finishLevel: "",
     buildQuality: "",
     street: "",
+    availableServices: emptyAvailableServices(),
+    surroundingEnvironment: [],
     coords: "",
     lat: "",
     lng: "",
@@ -242,7 +276,7 @@ export function emptyEvalData(): EvalData {
     author4Id: "",
     author4Title: "",
     comparisonRows: [],
-    section1Rows: [], // ← ADD THIS LINE
+    section1Rows: [],
     settlementRows: [],
     settlementBases: [],
     settlementWeights: [],
@@ -266,8 +300,6 @@ export function emptyEvalData(): EvalData {
     finishesDesc: "",
     replacementNotes: "",
     completionPct: "",
-
-    previousDeedNumber: "",
     subDivisionRecordNumber: "",
     otherUsers: "",
     deedSource: "",
@@ -275,6 +307,7 @@ export function emptyEvalData(): EvalData {
     buildingLicenseDate: "",
     elevation: "",
     inspectionBoundaries: "",
+    previousDeedNumber: "",
     previousDeedDate: "",
     operationType: "",
     propertyStatus: "",
@@ -300,15 +333,15 @@ export type TransactionDoc = {
   authorizationNumber: string;
   /** IDs of inspector users assigned to this transaction */
   assignedInspectorIds?: string[];
-  createdByUserId?: string | null; // users._id as hex string
-  companyId?: string | null; //
+  createdByUserId?: string | null;
+  companyId?: string | null;
   assignmentDate: string;
   valuationPurpose: string;
   intendedUse: string;
   valuationBasis: string;
   priority: string; // "normal" | "urgent"  (default "normal")
   attachmentsCount: number; // default 0
-  imagesCount: number; // default
+  imagesCount: number; // default 0
   ownershipType: string;
   valuationHypothesis: string;
   clientId: string;
@@ -323,4 +356,7 @@ export type TransactionDoc = {
 
   createdAt: Date;
   updatedAt: Date;
+
+  isOpened?: boolean;
+  isCompleted?: boolean;
 };
