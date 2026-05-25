@@ -125,6 +125,17 @@ export class MachineValuationController {
     return this.mvService.listProjectInspectors(id, toMvAccess(context));
   }
 
+  @Get("projects/:id/system-inspectors")
+  async listSystemInspectors(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.listSystemInspectors(id, toMvAccess(context));
+  }
+
   @Post("projects/:id/inspectorFiles")
   @UseInterceptors(
     FileInterceptor("file", {

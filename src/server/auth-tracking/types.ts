@@ -90,11 +90,40 @@ export interface CompanyReportAssumptionsDefaults {
   specialAssumptions?: string;
 }
 
+export interface CompanyReportCustomSection {
+  id: string;
+  groupId?: string;
+  groupTitle?: string;
+  sectionNumber?: string;
+  title: string;
+  body: string;
+}
+
+export interface CompanyReportCustomGroup {
+  id: string;
+  title: string;
+}
+
+export interface CompanyReportLetterheadTemplate {
+  enabled?: boolean;
+  templateId?: string | null;
+  outputFormat?: "pdf" | "pptx" | null;
+  coverImageDataUrl?: string | null;
+  pageImageDataUrl?: string | null;
+  landscapePageImageDataUrl?: string | null;
+  logoDataUrl?: string | null;
+  footerImageDataUrl?: string | null;
+  signatureStampDataUrl?: string | null;
+}
+
 /** قوالب التقرير النهائي الافتراضية على مستوى الشركة. */
 export interface CompanyReportDefaults {
   scope?: CompanyReportScopeDefaults;
   methodology?: CompanyReportMethodologyDefaults;
   assumptions?: CompanyReportAssumptionsDefaults;
+  customGroups?: CompanyReportCustomGroup[];
+  customSections?: CompanyReportCustomSection[];
+  letterhead?: CompanyReportLetterheadTemplate;
 }
 
 /**

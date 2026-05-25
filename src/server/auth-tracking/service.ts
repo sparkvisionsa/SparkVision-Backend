@@ -1,5 +1,7 @@
 import type { Db, Filter } from "mongodb";
 import type { Request } from "express";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import { getMongoDb } from "@/server/mongodb";
 import {
@@ -31,9 +33,12 @@ import type {
   ActivityDoc,
   AdminConfigDoc,
   CompanyDoc,
+  CompanyReportCustomGroup,
+  CompanyReportCustomSection,
   CompanyMongoDoc,
   CompanyMembershipRole,
   CompanyReportDefaults,
+  CompanyReportLetterheadTemplate,
   GuestAccessStatus,
   PublicUser,
   PublicUserProfile,
@@ -77,10 +82,90 @@ export class HttpError extends Error {
   }
 }
 
+type UsersCollection = ReturnType<typeof getAuthCollections>["users"];
+
+function normalizePhoneIdentifier(value?: string | null): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const raw = value.replace(/\u0000/g, "").trim();
+  if (!raw) return undefined;
+
+  const explicitInternationalPrefix = raw.startsWith("+") || raw.startsWith("00");
+  let digits = raw.replace(/\D/g, "");
+  if (raw.startsWith("00") && digits.startsWith("00")) {
+    digits = digits.slice(2);
+  }
+
+  if (!explicitInternationalPrefix || digits.length < 6 || digits.length > 15 || digits.startsWith("0")) {
+    return undefined;
+  }
+  return `+${digits}`;
+}
+
+function isValidPhoneIdentifier(value: string) {
+  return Boolean(normalizePhoneIdentifier(value));
+}
+
+function requirePhoneIdentifier(value: string, message = "Phone number must include country code.") {
+  const phone = normalizePhoneIdentifier(value);
+  if (!phone) {
+    throw new HttpError(400, "invalid_phone", message);
+  }
+  return phone;
+}
+
+function phoneIdentifierVariants(phone: string, raw?: string) {
+  const phoneDigits = phone.slice(1);
+  const variants = new Set([phone, phoneDigits]);
+  if (raw) variants.add(raw.trim());
+  if (phoneDigits.startsWith("966")) {
+    variants.add(`0${phoneDigits.slice(3)}`);
+  }
+  return [...variants].filter(Boolean);
+}
+
+async function assertPhoneIdentifierAvailable(
+  users: UsersCollection,
+  phone: string,
+  excludeUserId?: UserMongoDoc["_id"]
+) {
+  const existing = await users.findOne({
+    $or: [
+      { usernameLower: phone.toLowerCase() },
+      { phone: { $in: phoneIdentifierVariants(phone) } },
+    ],
+  });
+  if (existing && (!excludeUserId || !existing._id.equals(excludeUserId))) {
+    throw new HttpError(409, "phone_exists", "Phone number is already in use.");
+  }
+}
+
+async function findUserByLoginIdentifier(users: UsersCollection, value: string) {
+  const raw = value.trim();
+  const phone = normalizePhoneIdentifier(raw);
+  if (phone) {
+    return users.findOne({
+      $or: [
+        { usernameLower: phone.toLowerCase() },
+        { phone: { $in: phoneIdentifierVariants(phone, raw) } },
+      ],
+    });
+  }
+  return users.findOne({ usernameLower: raw.toLowerCase() });
+}
+
 const loginSchema = z.object({
-  username: z.string().trim().min(3).max(32),
+  username: z.string().trim().min(3).max(64).optional(),
+  phone: z.string().trim().min(3).max(64).optional(),
   password: z.string().min(1).max(128),
   rememberMe: z.boolean().optional(),
+}).superRefine((data, ctx) => {
+  if (!data.username?.trim() && !data.phone?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["phone"],
+      message: "Phone number is required.",
+    });
+  }
 });
 
 const profileSchema = z.object({
@@ -1202,10 +1287,10 @@ export async function loginUser(
   const { users, userProfiles, sessions, companies, userCompanyMemberships } =
     getAuthCollections(db);
 
-  const usernameLower = payload.username.toLowerCase();
-  const user = await users.findOne({ usernameLower });
+  const loginIdentifier = (payload.phone ?? payload.username ?? "").trim();
+  const user = await findUserByLoginIdentifier(users, loginIdentifier);
   if (!user) {
-    throw new HttpError(401, "invalid_credentials", "Invalid username or password.");
+    throw new HttpError(401, "invalid_credentials", "Invalid phone number or password.");
   }
   if (user.isBlocked) {
     throw new HttpError(403, "user_blocked", "User account is blocked.");
@@ -1213,7 +1298,7 @@ export async function loginUser(
 
   const validPassword = await verifyPassword(payload.password, user.passwordHash);
   if (!validPassword) {
-    throw new HttpError(401, "invalid_credentials", "Invalid username or password.");
+    throw new HttpError(401, "invalid_credentials", "Invalid phone number or password.");
   }
 
   const now = new Date();
@@ -1538,6 +1623,168 @@ function sanitizeReportDefaultsText(value: unknown, max: number): string {
   return value.replace(/\u0000/g, "").trim().slice(0, max);
 }
 
+const REPORT_DEFAULTS_IMAGE_DATA_URL_MAX_CHARS = 12_000_000;
+const REPORT_DEFAULTS_IMAGE_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
+const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
+const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
+  "coverImageDataUrl",
+  "pageImageDataUrl",
+  "landscapePageImageDataUrl",
+  "logoDataUrl",
+  "footerImageDataUrl",
+  "signatureStampDataUrl",
+] as const;
+
+type ReportDefaultsLetterheadImageField = (typeof REPORT_DEFAULTS_LETTERHEAD_FIELDS)[number];
+
+function isReportDefaultsImageReference(value: string): boolean {
+  return (
+    value === "" ||
+    value.startsWith("data:image/") ||
+    value.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)
+  );
+}
+
+function sanitizeReportDefaultsImageReference(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\u0000/g, "").trim();
+  if (!normalized) return null;
+  if (normalized.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)) {
+    return normalized.slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS);
+  }
+  if (normalized.startsWith("data:image/")) {
+    return normalized.slice(0, REPORT_DEFAULTS_IMAGE_DATA_URL_MAX_CHARS);
+  }
+  return null;
+}
+
+function parseReportDefaultsImageDataUrl(value: string): { buffer: Buffer; ext: string } | null {
+  const match = value.match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) return null;
+  const mime = match[1].toLowerCase();
+  const base64 = match[2].replace(/\s/g, "");
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.byteLength <= 0 || buffer.byteLength > REPORT_DEFAULTS_IMAGE_FILE_MAX_BYTES) {
+    return null;
+  }
+  const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+  return { buffer, ext };
+}
+
+async function persistCompanyReportLetterheadImage(
+  companyId: string,
+  field: ReportDefaultsLetterheadImageField,
+  value: unknown,
+): Promise<string | null> {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\u0000/g, "").trim();
+  if (!normalized) return null;
+  if (normalized.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)) {
+    return normalized.slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS);
+  }
+  if (!normalized.startsWith("data:image/")) return null;
+
+  const parsed = parseReportDefaultsImageDataUrl(normalized);
+  if (!parsed) {
+    throw new HttpError(
+      400,
+      "invalid_payload",
+      "Report letterhead image must be PNG, JPG, or WEBP and no larger than 8MB after compression.",
+    );
+  }
+
+  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const dir = join(process.cwd(), "uploads", "company-report-templates", safeCompanyId);
+  await mkdir(dir, { recursive: true });
+  const filename = `${field}-${Date.now()}-${randomId()}.${parsed.ext}`;
+  await writeFile(join(dir, filename), parsed.buffer);
+  return `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
+}
+
+async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: string): Promise<Record<string, unknown>> {
+  const data = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? { ...(raw as Record<string, unknown>) }
+    : {};
+  const letterheadRaw =
+    data.letterhead && typeof data.letterhead === "object" && !Array.isArray(data.letterhead)
+      ? { ...(data.letterhead as Record<string, unknown>) }
+      : null;
+  if (!letterheadRaw) return data;
+
+  const letterhead: Record<string, unknown> = { ...letterheadRaw };
+  for (const field of REPORT_DEFAULTS_LETTERHEAD_FIELDS) {
+    letterhead[field] = await persistCompanyReportLetterheadImage(companyId, field, letterheadRaw[field]);
+  }
+  data.letterhead = letterhead;
+  return data;
+}
+
+function sanitizeCompanyReportCustomGroups(value: unknown): CompanyReportCustomGroup[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 30)
+    .map((item, index) => {
+      const data =
+        item && typeof item === "object" && !Array.isArray(item)
+          ? (item as Record<string, unknown>)
+          : {};
+      const title = sanitizeReportDefaultsText(data.title, 220);
+      if (!title) return null;
+      return {
+        id: sanitizeReportDefaultsText(data.id, 120) || `company-group-${index + 1}`,
+        title,
+      } satisfies CompanyReportCustomGroup;
+    })
+    .filter((item): item is CompanyReportCustomGroup => item != null);
+}
+
+function sanitizeCompanyReportCustomSections(value: unknown): CompanyReportCustomSection[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 40)
+    .map((item, index) => {
+      const data =
+        item && typeof item === "object" && !Array.isArray(item)
+          ? (item as Record<string, unknown>)
+          : {};
+      const groupId = sanitizeReportDefaultsText(data.groupId, 120);
+      const groupTitle = sanitizeReportDefaultsText(data.groupTitle, 220);
+      const sectionNumber = sanitizeReportDefaultsText(data.sectionNumber, 40);
+      const title = sanitizeReportDefaultsText(data.title, 220);
+      const body = sanitizeReportDefaultsText(data.body, 50_000);
+      if (!title && !body) return null;
+      return {
+        id: sanitizeReportDefaultsText(data.id, 120) || `company-section-${index + 1}`,
+        ...(groupId ? { groupId } : {}),
+        ...(groupTitle ? { groupTitle } : {}),
+        ...(sectionNumber ? { sectionNumber } : {}),
+        title: title || "قسم جديد",
+        body,
+      } satisfies CompanyReportCustomSection;
+    })
+    .filter((item): item is CompanyReportCustomSection => item != null);
+}
+
+function sanitizeCompanyReportLetterheadTemplate(value: unknown): CompanyReportLetterheadTemplate {
+  const data = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  const templateId = sanitizeReportDefaultsText(data.templateId, 80);
+  const outputFormat = data.outputFormat === "pptx" ? "pptx" : "pdf";
+  return {
+    enabled: data.enabled === true,
+    templateId: templateId || "classic-letterhead",
+    outputFormat,
+    coverImageDataUrl: sanitizeReportDefaultsImageReference(data.coverImageDataUrl),
+    pageImageDataUrl: sanitizeReportDefaultsImageReference(data.pageImageDataUrl),
+    landscapePageImageDataUrl: sanitizeReportDefaultsImageReference(data.landscapePageImageDataUrl),
+    logoDataUrl: sanitizeReportDefaultsImageReference(data.logoDataUrl),
+    footerImageDataUrl: sanitizeReportDefaultsImageReference(data.footerImageDataUrl),
+    signatureStampDataUrl: sanitizeReportDefaultsImageReference(data.signatureStampDataUrl),
+  };
+}
+
 function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const scopeRaw =
@@ -1577,6 +1824,9 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
       generalAssumptions: sanitizeReportDefaultsText(assumptionsRaw.generalAssumptions, 6000),
       specialAssumptions: sanitizeReportDefaultsText(assumptionsRaw.specialAssumptions, 4000),
     },
+    customGroups: sanitizeCompanyReportCustomGroups(data.customGroups),
+    customSections: sanitizeCompanyReportCustomSections(data.customSections),
+    letterhead: sanitizeCompanyReportLetterheadTemplate(data.letterhead),
   };
 }
 
@@ -1592,6 +1842,9 @@ export function resolveCompanyReportDefaults(
   const scopeStored = stored?.scope ?? {};
   const methodologyStored = stored?.methodology ?? {};
   const assumptionsStored = stored?.assumptions ?? {};
+  const customGroupsStored = sanitizeCompanyReportCustomGroups(stored?.customGroups);
+  const customSectionsStored = sanitizeCompanyReportCustomSections(stored?.customSections);
+  const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
   return {
     scope: {
       complianceStatement:
@@ -1658,8 +1911,20 @@ export function resolveCompanyReportDefaults(
         seeds.assumptions?.specialAssumptions ||
         "",
     },
+    customGroups: customGroupsStored,
+    customSections: customSectionsStored,
+    letterhead: letterheadStored,
   };
 }
+
+const reportDefaultsImageDataUrlSchema = z
+  .union([
+    z.string().max(REPORT_DEFAULTS_IMAGE_DATA_URL_MAX_CHARS).refine(isReportDefaultsImageReference, {
+      message: "image must be a data URL or a persisted report template upload URL",
+    }),
+    z.null(),
+  ])
+  .optional();
 
 const updateCompanyReportDefaultsSchema = z.object({
   scope: z
@@ -1694,6 +1959,42 @@ const updateCompanyReportDefaultsSchema = z.object({
     .object({
       generalAssumptions: z.string().max(6000).optional(),
       specialAssumptions: z.string().max(4000).optional(),
+    })
+    .partial()
+    .optional(),
+  customGroups: z
+    .array(
+      z.object({
+        id: z.string().max(120).optional(),
+        title: z.string().max(220).optional(),
+      }),
+    )
+    .max(30)
+    .optional(),
+  customSections: z
+    .array(
+      z.object({
+        id: z.string().max(120).optional(),
+        groupId: z.string().max(120).optional(),
+        groupTitle: z.string().max(220).optional(),
+        sectionNumber: z.string().max(40).optional(),
+        title: z.string().max(220).optional(),
+        body: z.string().max(50_000).optional(),
+      }),
+    )
+    .max(40)
+    .optional(),
+  letterhead: z
+    .object({
+      enabled: z.boolean().optional(),
+      templateId: z.string().max(80).optional().nullable(),
+      outputFormat: z.enum(["pdf", "pptx"]).optional().nullable(),
+      coverImageDataUrl: reportDefaultsImageDataUrlSchema,
+      pageImageDataUrl: reportDefaultsImageDataUrlSchema,
+      landscapePageImageDataUrl: reportDefaultsImageDataUrlSchema,
+      logoDataUrl: reportDefaultsImageDataUrlSchema,
+      footerImageDataUrl: reportDefaultsImageDataUrlSchema,
+      signatureStampDataUrl: reportDefaultsImageDataUrlSchema,
     })
     .partial()
     .optional(),
@@ -1737,10 +2038,12 @@ const valueTechProductIdSchema = z.enum([
 
 const createCompanySchema = z.object({
   companyName: z.string().trim().min(2).max(120),
-  username: z.string().trim().min(3).max(32).regex(/^[A-Za-z0-9_.-]+$/),
+  username: z.string().trim().min(3).max(64).optional().or(z.literal("")),
   password: z.string().min(8).max(128),
   email: z.string().email().optional().or(z.literal("")),
-  phone: z.string().trim().max(32).optional().or(z.literal("")),
+  phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
+    message: "Phone number must include country code.",
+  }),
   valueTechProductIds: z.array(valueTechProductIdSchema).default([]),
 });
 
@@ -1783,18 +2086,22 @@ function asTrimmedString(v: unknown): string {
 }
 
 const createCompanyUserSchema = z.object({
-  username: z.preprocess(asTrimmedString, z.string().trim().min(3).max(32).regex(/^[A-Za-z0-9_.-]+$/)),
+  username: z.preprocess(asTrimmedString, z.string().trim().min(3).max(64)).optional(),
   password: z.preprocess(asTrimmedString, z.string().min(8).max(128)),
   role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
   email: z.union([z.string().email(), z.literal("")]).optional(),
-  phone: z.union([z.string().trim().max(32), z.literal("")]).optional(),
+  phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
+    message: "Phone number must include country code.",
+  }),
 });
 
 const updateCompanyUserByCompanyAdminBodySchema = z
   .object({
     role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
     email: z.union([z.string().email(), z.literal("")]).optional(),
-    phone: z.union([z.string().trim().max(32), z.literal("")]).optional(),
+    phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
+      message: "Phone number must include country code.",
+    }).optional(),
     newPassword: z.string().min(8).max(128).optional(),
   })
   .superRefine((data, ctx) => {
@@ -1834,14 +2141,11 @@ export async function createCompanyBySuperAdmin(request: Request, body: unknown)
   const { users, companies, userProfiles, userCompanyMemberships } = getAuthCollections(db);
 
   const payload = parsed.data;
-  const username = payload.username.trim();
+  const phone = requirePhoneIdentifier(payload.phone);
+  const username = phone;
   const usernameLower = username.toLowerCase();
   const email = normalizeOptionalText(payload.email);
-  const phone = normalizeOptionalText(payload.phone);
-  const existing = await users.findOne({ usernameLower });
-  if (existing) {
-    throw new HttpError(409, "username_exists", "Username is already in use.");
-  }
+  await assertPhoneIdentifierAvailable(users, phone);
 
   const now = new Date();
   const passwordHash = await hashPassword(payload.password);
@@ -1891,7 +2195,7 @@ export async function createCompanyBySuperAdmin(request: Request, body: unknown)
   } catch (insertError) {
     await companies.deleteOne({ _id: companyId });
     if (isDuplicateKeyError(insertError)) {
-      throw new HttpError(409, "registration_conflict", "Username or email conflict.");
+      throw new HttpError(409, "registration_conflict", "Phone number or email conflict.");
     }
     throw insertError;
   }
@@ -1974,10 +2278,12 @@ export async function listCompaniesForSuperAdmin(request: Request) {
       adminUserIds.length > 0
         ? await users
             .find({ _id: { $in: adminUserIds } })
-            .project({ _id: 1, username: 1 })
+            .project({ _id: 1, username: 1, phone: 1 })
             .toArray()
         : [];
-    const nameById = new Map(adminDocs.map((u) => [u._id.toString(), u.username]));
+    const nameById = new Map(
+      adminDocs.map((u) => [u._id.toString(), u.phone ?? u.username])
+    );
     for (const m of adminMems) {
       const cid = m.companyId.toString();
       if (!adminByCompany.has(cid)) {
@@ -2174,7 +2480,8 @@ export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request
   const db = await getMongoDb();
   const { companies } = getAuthCollections(db);
   const companyId = context.company!._id;
-  const sanitized = sanitizeCompanyReportDefaults(parsed.data);
+  const defaultsWithStoredAssets = await persistCompanyReportDefaultsAssets(parsed.data, companyId.toString());
+  const sanitized = sanitizeCompanyReportDefaults(defaultsWithStoredAssets);
   await companies.updateOne(
     { _id: companyId },
     { $set: { reportDefaults: sanitized, updatedAt: new Date() } as Partial<CompanyDoc> },
@@ -2301,14 +2608,11 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
   const { users, userProfiles, companies, userCompanyMemberships } = getAuthCollections(db);
 
   const payload = parsed.data;
-  const username = payload.username.trim();
+  const phone = requirePhoneIdentifier(payload.phone);
+  const username = phone;
   const usernameLower = username.toLowerCase();
   const email = normalizeOptionalText(payload.email);
-  const phone = normalizeOptionalText(payload.phone);
-  const existing = await users.findOne({ usernameLower });
-  if (existing) {
-    throw new HttpError(409, "username_exists", "Username is already in use.");
-  }
+  await assertPhoneIdentifierAvailable(users, phone);
 
   const now = new Date();
   const passwordHash = await hashPassword(payload.password);
@@ -2343,7 +2647,7 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
       (await userCompanyMemberships.findOne({ _id: memIns.insertedId })) ?? null;
   } catch (insertError) {
     if (isDuplicateKeyError(insertError)) {
-      throw new HttpError(409, "registration_conflict", "Username or email conflict.");
+      throw new HttpError(409, "registration_conflict", "Phone number or email conflict.");
     }
     throw insertError;
   }
@@ -2460,9 +2764,12 @@ export async function updateCompanyUserByCompanyAdmin(
   }
 
   if (parsed.data.phone !== undefined) {
-    const ph = normalizeOptionalText(parsed.data.phone === "" ? undefined : parsed.data.phone);
-    userSet.phone = ph ?? null;
-    profileSet.phone = ph ?? null;
+    const ph = requirePhoneIdentifier(parsed.data.phone);
+    await assertPhoneIdentifierAvailable(users, ph, targetOid);
+    userSet.username = ph;
+    userSet.usernameLower = ph.toLowerCase();
+    userSet.phone = ph;
+    profileSet.phone = ph;
   }
 
   if (parsed.data.role !== undefined) {
@@ -2478,9 +2785,16 @@ export async function updateCompanyUserByCompanyAdmin(
   }
 
   if (Object.keys(userSet).length > 1 || userSet.passwordHash) {
-    const res = await users.updateOne({ _id: targetOid }, { $set: userSet });
-    if (res.matchedCount === 0) {
-      throw new HttpError(404, "not_found", "User not found.");
+    try {
+      const res = await users.updateOne({ _id: targetOid }, { $set: userSet });
+      if (res.matchedCount === 0) {
+        throw new HttpError(404, "not_found", "User not found.");
+      }
+    } catch (updateError) {
+      if (isDuplicateKeyError(updateError)) {
+        throw new HttpError(409, "registration_conflict", "Phone number or email conflict.");
+      }
+      throw updateError;
     }
   }
 
@@ -2628,7 +2942,9 @@ const updateCompanyBySuperAdminSchema = z.object({
   companyName: z.string().trim().min(2).max(120).optional(),
   valueTechProductIds: z.array(valueTechProductIdSchema).optional(),
   adminEmail: z.union([z.string().email(), z.literal("")]).optional(),
-  adminPhone: z.union([z.string().trim().max(32), z.literal("")]).optional(),
+  adminPhone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
+    message: "Phone number must include country code.",
+  }).optional(),
   adminNewPassword: z.string().min(8).max(128).optional(),
 });
 
@@ -2803,12 +3119,15 @@ export async function updateCompanyBySuperAdmin(
       );
     }
     if (updates.adminPhone !== undefined) {
-      const p = normalizeOptionalText(updates.adminPhone);
+      const p = requirePhoneIdentifier(updates.adminPhone);
+      await assertPhoneIdentifierAvailable(users, p, adminId);
       await users.updateOne(
         { _id: adminId },
         {
           $set: {
-            phone: p ?? null,
+            username: p,
+            usernameLower: p.toLowerCase(),
+            phone: p,
             updatedAt: now,
           },
         }

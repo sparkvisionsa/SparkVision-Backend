@@ -13,6 +13,7 @@ import { tryCoerceToObjectId, tryParseObjectId } from "@/common/object-id.util";
 import { AnyBulkWriteOperation, type Db, Filter, GridFSBucket, ObjectId } from "mongodb";
 import { getMongoDb } from "@/server/mongodb";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
+import type { UserDoc, UserProfileDoc } from "@/server/auth-tracking/types";
 import {
   MV_FILES_BUCKET,
   MV_FILES_FILES_COLLECTION,
@@ -100,6 +101,25 @@ function projectReportType(doc: MvProjectDoc): MvProjectReportType {
 function sanitizeOptionalText(value: unknown, maxLength = 1000): string {
   if (value == null) return "";
   return String(value).trim().slice(0, maxLength);
+}
+
+function normalizeRoleName(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function optionalProfileText(
+  profile: Pick<UserProfileDoc, "additionalInfo"> | null | undefined,
+  keys: string[],
+  maxLength = 120,
+): string | null {
+  const info = profile?.additionalInfo;
+  if (!info || typeof info !== "object") return null;
+  for (const key of keys) {
+    const value = (info as Record<string, unknown>)[key];
+    const text = sanitizeOptionalText(value, maxLength);
+    if (text) return text;
+  }
+  return null;
 }
 
 function sanitizeCoordinate(value: unknown, kind: "lat" | "lng"): number | null {
@@ -512,14 +532,18 @@ function sanitizeReportEditableSections(value: unknown): MvReportEditableSection
           : {};
       const title = sanitizeOptionalText(data.title, 220);
       const body = sanitizeOptionalText(data.body, 50_000);
+      const sectionNumber = sanitizeOptionalText(data.sectionNumber, 40);
+      const companyDefaultSectionId = sanitizeOptionalText(data.companyDefaultSectionId, 120);
       if (!title && !body) return null;
       return {
         id: sanitizeOptionalText(data.id, 120) || `section-${index + 1}`,
+        ...(sectionNumber ? { sectionNumber } : {}),
         title: title || "قسم جديد",
         body,
         ...(sanitizeOptionalText(data.insertAfterAnchorId, 180)
           ? { insertAfterAnchorId: sanitizeOptionalText(data.insertAfterAnchorId, 180) }
           : {}),
+        ...(companyDefaultSectionId ? { companyDefaultSectionId } : {}),
       } satisfies MvReportEditableSection;
     })
     .filter((item): item is MvReportEditableSection => item != null);
@@ -639,6 +663,7 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     specialAssumptions: sanitizeOptionalText(data.specialAssumptions, 4000),
     finalValue: sanitizeFinalValue(data.finalValue),
     finalValueWords: sanitizeOptionalText(data.finalValueWords, 500),
+    reportTemplateId: sanitizeOptionalText(data.reportTemplateId, 120),
     reportPresentationDraft: data.reportPresentationDraft !== false,
     receivedClientDocumentsHtml: sanitizeOptionalText(data.receivedClientDocumentsHtml, 50_000),
     sceRegistrationCertificateHtml: sanitizeOptionalText(data.sceRegistrationCertificateHtml, 50_000),
@@ -4199,13 +4224,91 @@ export class MachineValuationService implements OnModuleInit {
 
     return {
       inspectors: rows
-        .filter((u) => roleByUserId.get(u._id.toString()) === "inspector" || u.role === "inspector")
+        .filter(
+          (u) =>
+            normalizeRoleName(roleByUserId.get(u._id.toString())) === "inspector" ||
+            normalizeRoleName(u.role) === "inspector",
+        )
         .map((u) => ({
           id: u._id.toString(),
           username: String(u.username ?? ""),
           email: u.email ?? null,
           phone: u.phone ?? null,
         })),
+    };
+  }
+
+  async listSystemInspectors(projectId: string, ctx: MvAccessContext) {
+    const db = await getMongoDb();
+    const _id = toId(projectId);
+    await this.loadProjectForAccess(db, _id, ctx);
+
+    const { users, userProfiles } = getAuthCollections(db);
+    const inspectorFilter = {
+      $and: [
+        { role: { $in: ["inspector", "Inspector"] } },
+        {
+          $or: [
+            { company: null },
+            { company: "" },
+            { company: { $exists: false } },
+          ],
+        },
+        { isBlocked: { $ne: true } },
+      ],
+    } as unknown as Filter<UserDoc>;
+
+    const rows = await users
+      .find(inspectorFilter)
+      .project({
+        _id: 1,
+        username: 1,
+        email: 1,
+        phone: 1,
+        role: 1,
+        company: 1,
+        isBlocked: 1,
+        isPhoneVerified: 1,
+        lastLoginAt: 1,
+        createdAt: 1,
+      } as Record<string, 0 | 1>)
+      .sort({ lastLoginAt: -1, createdAt: -1, username: 1 })
+      .limit(500)
+      .toArray();
+
+    const userIds = rows.map((u) => u._id);
+    const profiles =
+      userIds.length > 0
+        ? await userProfiles
+            .find({ userId: { $in: userIds } })
+            .project({ userId: 1, email: 1, phone: 1, additionalInfo: 1 } as Record<string, 0 | 1>)
+            .toArray()
+        : [];
+    const profileByUserId = new Map(profiles.map((profile) => [profile.userId.toString(), profile]));
+
+    return {
+      inspectors: rows.map((u) => {
+        const profile = profileByUserId.get(u._id.toString()) ?? null;
+        const rawUser = u as UserDoc & {
+          isPhoneVerified?: boolean;
+          lastLoginAt?: Date | null;
+        };
+        return {
+          id: u._id.toString(),
+          username: String(u.username ?? ""),
+          displayName:
+            optionalProfileText(profile, ["displayName", "fullName", "name", "inspectorName"], 160) ?? null,
+          email: u.email ?? profile?.email ?? null,
+          phone: u.phone ?? profile?.phone ?? null,
+          city: optionalProfileText(profile, ["city", "cityName"], 120),
+          region: optionalProfileText(profile, ["region", "regionName"], 120),
+          lastLoginAt:
+            rawUser.lastLoginAt instanceof Date && !Number.isNaN(rawUser.lastLoginAt.getTime())
+              ? rawUser.lastLoginAt.toISOString()
+              : null,
+          isPhoneVerified: rawUser.isPhoneVerified === true,
+        };
+      }),
     };
   }
 

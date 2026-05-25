@@ -50,9 +50,11 @@ export interface MvReportTeamMember {
 
 export interface MvReportEditableSection {
   id: string;
+  sectionNumber?: string;
   title: string;
   body: string;
   insertAfterAnchorId?: string;
+  companyDefaultSectionId?: string;
 }
 
 export type MvReportInsertedBlockKind = "heading" | "paragraph" | "image";
@@ -124,6 +126,8 @@ export interface MvProjectReportData {
   specialAssumptions?: string;
   finalValue?: number | null;
   finalValueWords?: string;
+  /** قالب إخراج التقرير المختار داخل خطوات المشروع البسيط. */
+  reportTemplateId?: string;
   /** مسودة: علامة مائية وإخفاء صور التوقيع في رأي القيمة */
   reportPresentationDraft?: boolean;
   /** HTML — مستندات مستلمة من العميل */
