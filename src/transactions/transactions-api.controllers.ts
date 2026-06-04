@@ -47,7 +47,19 @@ export class TransactionsController {
   @Get()
   async list(@Req() req: Request) {
     const { companyId } = await resolveSessionMeta(req);
-    return this.svc.listTransactions(companyId);
+
+    let userId: string | null = null;
+    let userRole: string | null = null;
+    try {
+      const context = await resolveRequestContext(req);
+      userId = context.user?._id.toString() ?? null;
+      userRole = context.user?.role ?? null;
+    } catch {}
+
+    return this.svc.listTransactions(
+      companyId,
+      userRole === "inspector" ? userId : null,
+    );
   }
 
   @Post()
@@ -62,6 +74,19 @@ export class TransactionsController {
       files ?? [],
       meta,
     );
+  }
+
+  @Patch(":id/completed")
+  setCompleted(
+    @Param("id") id: string,
+    @Body() body: { isCompleted: boolean },
+  ) {
+    return this.svc.setCompleted(id, body.isCompleted ?? false);
+  }
+
+  @Get("freelance-inspectors")
+  listFreelanceInspectors() {
+    return this.svc.listFreelanceInspectors();
   }
 
   @Get(":id")

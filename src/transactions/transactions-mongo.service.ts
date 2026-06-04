@@ -334,15 +334,66 @@ async function buildEnrichedFieldValues(
 
 @Injectable()
 export class TransactionsMongoService {
-  async listTransactions(companyId?: string | null) {
+  async listTransactions(
+    companyId?: string | null,
+    inspectorId?: string | null,
+  ) {
     const db = await getMongoDb();
-    const filter = companyId ? { companyId } : {};
+
+    const filter: Record<string, unknown> = {};
+    if (companyId) filter.companyId = companyId;
+    if (inspectorId) filter.assignedInspectorIds = inspectorId;
+    // ↑ MongoDB's $elemMatch isn't needed for a simple string array —
+    //   { assignedInspectorIds: "someId" } already matches docs where
+    //   the array contains that value.
+
     const rows = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .find(filter)
       .sort({ createdAt: -1 })
       .toArray();
+
     return rows.map(toTransactionJson);
+  }
+
+  async listFreelanceInspectors() {
+    const db = await getMongoDb();
+    // Import your users collection name — adjust if different
+    const users = await db
+      .collection("users")
+      .find({ role: "Freelance Inspector", isBlocked: { $ne: true } })
+      .project({
+        _id: 1,
+        name: 1,
+        phone: 1,
+        serviceCities: 1,
+        isPhoneVerified: 1,
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return users.map((u) => ({
+      id: u._id.toString(),
+      name: u.name ?? "",
+      phone: u.phone ?? "",
+      serviceCities: Array.isArray(u.serviceCities) ? u.serviceCities : [],
+      isPhoneVerified: u.isPhoneVerified ?? false,
+    }));
+  }
+
+  async setCompleted(id: string, isCompleted: boolean) {
+    if (!ObjectId.isValid(id))
+      throw new NotFoundException({ message: "المعاملة غير موجودة" });
+    const db = await getMongoDb();
+    const row = await db
+      .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
+      .findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        { $set: { isCompleted, updatedAt: new Date() } },
+        { returnDocument: "after" },
+      );
+    if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
+    return toTransactionJson(row);
   }
 
   async assignInspectors(id: string, inspectorIds: string[]) {
