@@ -26,6 +26,13 @@ export const MIME_TYPES_BY_EXTENSION: Record<string, Set<string>> = {
     /** ملفات xlsx هي أرشيف ZIP */
     "application/zip",
   ]),
+  xlsm: new Set([
+    "application/vnd.ms-excel.sheet.macroenabled.12",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    /** ملفات xlsm هي أرشيف ZIP مثل xlsx */
+    "application/zip",
+  ]),
   xls: new Set(["application/vnd.ms-excel"]),
   csv: new Set([
     "text/csv",

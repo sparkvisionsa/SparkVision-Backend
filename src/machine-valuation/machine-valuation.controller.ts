@@ -473,6 +473,37 @@ export class MachineValuationController {
     return this.mvService.listProjectAssetImageFiles(projectId, toMvAccess(context));
   }
 
+  @Get("projects/:pid/asset-image-files/download")
+  async downloadProjectAssetImageFiles(
+    @Req() req: Request,
+    @Param("pid") projectId: string,
+    @Res() res: Response,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const download = await this.mvService.getProjectAssetImagesZip(projectId, toMvAccess(context));
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(download.fileName)}`,
+    );
+    res.setHeader("Cache-Control", "no-store");
+
+    return new Promise<void>((resolve, reject) => {
+      download.stream.on("error", (error) => {
+        if (!res.headersSent) {
+          res.status(500);
+        }
+        if (!res.writableEnded) {
+          res.end();
+        }
+        reject(error);
+      });
+      res.on("finish", resolve);
+      download.stream.pipe(res);
+    });
+  }
+
   @Post("projects/:pid/asset-image-files")
   @UseInterceptors(
     FilesInterceptor("files", 500, {

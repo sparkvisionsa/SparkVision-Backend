@@ -95,7 +95,7 @@ export class FileParserService {
     const ext = originalName.split(".").pop()?.toLowerCase() ?? "";
 
     if (
-      ["xlsx", "xls"].includes(ext) ||
+      ["xlsx", "xlsm", "xls"].includes(ext) ||
       mimeType.includes("spreadsheet") ||
       mimeType.includes("excel")
     ) {

@@ -94,7 +94,7 @@ export class AssetImportService {
 
     if (!isSupportedAssetImportFile(sanitizedFileName, sanitizedMimeType)) {
       throw new BadRequestException(
-        "نوع الملف غير مدعوم. الأنواع المقبولة: XLSX و XLS و CSV.",
+        "نوع الملف غير مدعوم. الأنواع المقبولة: XLSX و XLSM و XLS و CSV.",
       );
     }
 
@@ -315,16 +315,16 @@ export class AssetImportService {
       }
 
       throw new BadRequestException(
-        `تعذر قراءة ملف الاستيراد. تحقق أن الملف ليس تالفاً وأنه محفوظ كـ XLSX حقيقي (وليس «صفحة ويب» بامتداد xlsx).${hint}`,
+        `تعذر قراءة ملف الاستيراد. تحقق أن الملف ليس تالفاً وأنه محفوظ كـ XLSX أو XLSM حقيقي (وليس «صفحة ويب» بامتداد Excel).${hint}`,
       );
     }
   }
 
   private assertBufferMatchesExtension(buffer: Buffer, extension: string) {
-    if (extension === "xlsx") {
+    if (extension === "xlsx" || extension === "xlsm") {
       if (!isLikelyXlsxZipBuffer(buffer)) {
         throw new BadRequestException(
-          "الملف بامتداد .xlsx لكن المحتوى لا يطابق تنسيق Excel (ملف مضغوط). أعد الحفظ من Excel بصيغة «مصنف Excel (*.xlsx)» أو تأكد أن المرفوع ليس ملفاً آخر بامتداد خاطئ.",
+          `الملف بامتداد .${extension} لكن المحتوى لا يطابق تنسيق Excel الحديث (ملف Zip). أعد الحفظ من Excel بصيغة XLSX أو XLSM صحيحة.`,
         );
       }
     }

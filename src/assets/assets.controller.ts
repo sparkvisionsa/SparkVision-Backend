@@ -64,7 +64,7 @@ export class AssetsController {
         if (!isAssetImportMultipartAllowed(file.mimetype, file.originalname || "")) {
           callback(
             new BadRequestException(
-              "نوع الملف أو الامتداد غير مدعوم. استخدم XLSX أو XLS أو CSV. إذا كان الامتداد صحيحاً وما زال يرفض، جرّب متصفحاً آخر أو أعد تسمية الملف بالإنجليزية.",
+              "نوع الملف أو الامتداد غير مدعوم. استخدم XLSX أو XLSM أو XLS أو CSV. إذا كان الامتداد صحيحاً وما زال يرفض، جرّب متصفحاً آخر أو أعد تسمية الملف بالإنجليزية.",
             ) as Error,
             false,
           );

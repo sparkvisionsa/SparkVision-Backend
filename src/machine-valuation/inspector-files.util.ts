@@ -11,6 +11,7 @@ const OFFICE_WORD = new Set([
 const OFFICE_SHEET = new Set([
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel.sheet.macroenabled.12",
   "text/csv",
   "application/csv",
 ]);
@@ -26,7 +27,7 @@ export function inspectorLogicalTypeFromMime(
   if (m.startsWith("image/")) return "image";
   if (m.startsWith("video/")) return "video";
   if (m.startsWith("audio/")) return "audio";
-  if (OFFICE_SHEET.has(m) || ["xlsx", "xls", "csv"].includes(ext)) return "excel";
+  if (OFFICE_SHEET.has(m) || ["xlsx", "xlsm", "xls", "csv"].includes(ext)) return "excel";
   if (OFFICE_WORD.has(m) || ["doc", "docx"].includes(ext)) return "word";
   if (
     m === "application/octet-stream" &&

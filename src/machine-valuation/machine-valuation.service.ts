@@ -9,6 +9,8 @@ import {
 } from "@nestjs/common";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { PassThrough } from "node:stream";
+import { once } from "node:events";
 import { tryCoerceToObjectId, tryParseObjectId } from "@/common/object-id.util";
 import { AnyBulkWriteOperation, type Db, Filter, GridFSBucket, ObjectId } from "mongodb";
 import { getMongoDb } from "@/server/mongodb";
@@ -105,6 +107,28 @@ function sanitizeOptionalText(value: unknown, maxLength = 1000): string {
 
 function normalizeRoleName(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function sanitizeStringList(value: unknown, maxItems = 80, maxLength = 120): string[] {
+  const rawItems =
+    Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,،]/) : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawItems) {
+    const text = sanitizeOptionalText(item, maxLength);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function isFreelanceInspectorRole(value: unknown): boolean {
+  const normalized = normalizeRoleName(value).replace(/[\s_-]+/g, " ");
+  return normalized === "inspector" || normalized === "freelance inspector";
 }
 
 function optionalProfileText(
@@ -1679,6 +1703,246 @@ function extractFileExtension(fileName: string): string | undefined {
 function isLikelyImageUpload(fileName: string, mimeType: string | undefined): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
   return /\.(jpe?g|png|gif|webp|bmp|heic|heif|svg|tif|tiff)$/i.test(fileName);
+}
+
+function sanitizeZipPathPart(raw: unknown, fallback = "مجلد"): string {
+  const cleaned = String(raw ?? "")
+    .trim()
+    .replace(/[\u0000-\u001f<>:"\\|?*]+/g, "-")
+    .replace(/\//g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+$/, "")
+    .trim();
+  return (cleaned || fallback).slice(0, 160);
+}
+
+function sanitizeZipFileName(raw: unknown, fallback = "file"): string {
+  const cleaned = sanitizeUploadedFileName(raw).replace(/^\.+$/, "").trim();
+  return (cleaned || fallback).slice(0, 180);
+}
+
+function uniqueZipChildName(baseName: string, usedNames: Set<string>) {
+  const base = baseName.trim() || "مجلد";
+  if (!usedNames.has(base)) {
+    usedNames.add(base);
+    return base;
+  }
+  for (let index = 1; index < 10_000; index += 1) {
+    const candidate = `${base} (${index})`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+  }
+  const fallback = `${base}-${randomUUID()}`;
+  usedNames.add(fallback);
+  return fallback;
+}
+
+function joinZipPath(parts: string[]) {
+  return parts
+    .map((part) => String(part ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
+}
+
+function uniqueZipPath(path: string, used: Set<string>) {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!used.has(normalized)) {
+    used.add(normalized);
+    return normalized;
+  }
+
+  const slash = normalized.lastIndexOf("/");
+  const folder = slash >= 0 ? normalized.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? normalized.slice(slash + 1) : normalized;
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `${folder}${stem} (${index})${ext}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+  const fallback = `${folder}${stem}-${randomUUID()}${ext}`;
+  used.add(fallback);
+  return fallback;
+}
+
+function buildCrc32Table() {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+}
+
+const ZIP_CRC32_TABLE = buildCrc32Table();
+const ZIP_UTF8_DATA_DESCRIPTOR_FLAG = 0x0808;
+const ZIP_STORE_METHOD = 0;
+const ZIP_MAX_UINT32 = 0xffffffff;
+
+function updateZipCrc32(crc: number, chunk: Buffer) {
+  let next = crc >>> 0;
+  for (let index = 0; index < chunk.length; index += 1) {
+    next = ZIP_CRC32_TABLE[(next ^ chunk[index]!) & 0xff]! ^ (next >>> 8);
+  }
+  return next >>> 0;
+}
+
+function zipDosDateTime(value?: Date) {
+  const d = value instanceof Date && Number.isFinite(value.getTime()) ? value : new Date();
+  const year = Math.max(1980, Math.min(2107, d.getFullYear()));
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  const hours = d.getHours();
+  const minutes = d.getMinutes();
+  const seconds = Math.floor(d.getSeconds() / 2);
+  return {
+    time: ((hours << 11) | (minutes << 5) | seconds) & 0xffff,
+    date: (((year - 1980) << 9) | (month << 5) | day) & 0xffff,
+  };
+}
+
+async function writeZipBuffer(stream: PassThrough, buffer: Buffer) {
+  if (buffer.length === 0) return;
+  if (!stream.write(buffer)) {
+    await once(stream, "drain");
+  }
+}
+
+type ZipCentralDirectoryEntry = {
+  pathBuffer: Buffer;
+  crc32: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+  time: number;
+  date: number;
+  externalAttributes: number;
+};
+
+async function writeStoredZipEntry(
+  out: PassThrough,
+  centralDirectory: ZipCentralDirectoryEntry[],
+  state: { offset: number },
+  params: {
+    zipPath: string;
+    modifiedAt?: Date;
+    directory?: boolean;
+    source?: NodeJS.ReadableStream;
+  },
+) {
+  const normalizedPath = params.directory
+    ? `${params.zipPath.replace(/\/+$/, "")}/`
+    : params.zipPath.replace(/\/+$/, "");
+  const pathBuffer = Buffer.from(normalizedPath, "utf8");
+  if (pathBuffer.length === 0 || pathBuffer.length > 0xffff) return;
+
+  const { time, date } = zipDosDateTime(params.modifiedAt);
+  const localHeaderOffset = state.offset;
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(ZIP_UTF8_DATA_DESCRIPTOR_FLAG, 6);
+  local.writeUInt16LE(ZIP_STORE_METHOD, 8);
+  local.writeUInt16LE(time, 10);
+  local.writeUInt16LE(date, 12);
+  local.writeUInt32LE(0, 14);
+  local.writeUInt32LE(0, 18);
+  local.writeUInt32LE(0, 22);
+  local.writeUInt16LE(pathBuffer.length, 26);
+  local.writeUInt16LE(0, 28);
+  await writeZipBuffer(out, local);
+  await writeZipBuffer(out, pathBuffer);
+  state.offset += local.length + pathBuffer.length;
+
+  let crc = 0xffffffff;
+  let size = 0;
+  if (!params.directory && params.source) {
+    for await (const rawChunk of params.source as AsyncIterable<Buffer | Uint8Array>) {
+      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (chunk.length === 0) continue;
+      crc = updateZipCrc32(crc, chunk);
+      size += chunk.length;
+      if (size > ZIP_MAX_UINT32) {
+        throw new BadRequestException("حجم ملف داخل الأرشيف يتجاوز الحد المدعوم.");
+      }
+      await writeZipBuffer(out, chunk);
+      state.offset += chunk.length;
+    }
+  }
+
+  const finalCrc = (crc ^ 0xffffffff) >>> 0;
+  const descriptor = Buffer.alloc(16);
+  descriptor.writeUInt32LE(0x08074b50, 0);
+  descriptor.writeUInt32LE(finalCrc, 4);
+  descriptor.writeUInt32LE(size >>> 0, 8);
+  descriptor.writeUInt32LE(size >>> 0, 12);
+  await writeZipBuffer(out, descriptor);
+  state.offset += descriptor.length;
+
+  centralDirectory.push({
+    pathBuffer,
+    crc32: finalCrc,
+    compressedSize: size,
+    uncompressedSize: size,
+    localHeaderOffset,
+    time,
+    date,
+    externalAttributes: params.directory ? 0x10 : 0,
+  });
+}
+
+async function finishZip(
+  out: PassThrough,
+  centralDirectory: ZipCentralDirectoryEntry[],
+  state: { offset: number },
+) {
+  const centralStart = state.offset;
+  for (const entry of centralDirectory) {
+    const header = Buffer.alloc(46);
+    header.writeUInt32LE(0x02014b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(20, 6);
+    header.writeUInt16LE(ZIP_UTF8_DATA_DESCRIPTOR_FLAG, 8);
+    header.writeUInt16LE(ZIP_STORE_METHOD, 10);
+    header.writeUInt16LE(entry.time, 12);
+    header.writeUInt16LE(entry.date, 14);
+    header.writeUInt32LE(entry.crc32 >>> 0, 16);
+    header.writeUInt32LE(entry.compressedSize >>> 0, 20);
+    header.writeUInt32LE(entry.uncompressedSize >>> 0, 24);
+    header.writeUInt16LE(entry.pathBuffer.length, 28);
+    header.writeUInt16LE(0, 30);
+    header.writeUInt16LE(0, 32);
+    header.writeUInt16LE(0, 34);
+    header.writeUInt16LE(0, 36);
+    header.writeUInt32LE(entry.externalAttributes >>> 0, 38);
+    header.writeUInt32LE(entry.localHeaderOffset >>> 0, 42);
+    await writeZipBuffer(out, header);
+    await writeZipBuffer(out, entry.pathBuffer);
+    state.offset += header.length + entry.pathBuffer.length;
+  }
+
+  const centralSize = state.offset - centralStart;
+  const end = Buffer.alloc(22);
+  const entryCount = Math.min(centralDirectory.length, 0xffff);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entryCount, 8);
+  end.writeUInt16LE(entryCount, 10);
+  end.writeUInt32LE(centralSize >>> 0, 12);
+  end.writeUInt32LE(centralStart >>> 0, 16);
+  end.writeUInt16LE(0, 20);
+  await writeZipBuffer(out, end);
+  state.offset += end.length;
 }
 
 function imageExtensionFromMimeType(mimeType: string): string | undefined {
@@ -4246,7 +4510,12 @@ export class MachineValuationService implements OnModuleInit {
     const { users, userProfiles } = getAuthCollections(db);
     const inspectorFilter = {
       $and: [
-        { role: { $in: ["inspector", "Inspector"] } },
+        {
+          $or: [
+            { role: { $in: ["inspector", "Inspector", "Freelance Inspector", "freelance inspector", "freelance_inspector", "freelance-inspector"] } },
+            { role: { $regex: "^freelance[\\s_-]*inspector$", $options: "i" } },
+          ],
+        },
         {
           $or: [
             { company: null },
@@ -4263,10 +4532,12 @@ export class MachineValuationService implements OnModuleInit {
       .project({
         _id: 1,
         username: 1,
+        name: 1,
         email: 1,
         phone: 1,
         role: 1,
         company: 1,
+        serviceCities: 1,
         isBlocked: 1,
         isPhoneVerified: 1,
         lastLoginAt: 1,
@@ -4287,21 +4558,28 @@ export class MachineValuationService implements OnModuleInit {
     const profileByUserId = new Map(profiles.map((profile) => [profile.userId.toString(), profile]));
 
     return {
-      inspectors: rows.map((u) => {
+      inspectors: rows.filter((u) => isFreelanceInspectorRole(u.role)).map((u) => {
         const profile = profileByUserId.get(u._id.toString()) ?? null;
         const rawUser = u as UserDoc & {
+          name?: unknown;
+          serviceCities?: unknown;
           isPhoneVerified?: boolean;
           lastLoginAt?: Date | null;
         };
+        const serviceCities = sanitizeStringList(rawUser.serviceCities, 80, 120);
+        const profileCity = optionalProfileText(profile, ["city", "cityName"], 120);
+        const displayName =
+          sanitizeOptionalText(rawUser.name, 160) ||
+          optionalProfileText(profile, ["displayName", "fullName", "name", "inspectorName"], 160);
         return {
           id: u._id.toString(),
           username: String(u.username ?? ""),
-          displayName:
-            optionalProfileText(profile, ["displayName", "fullName", "name", "inspectorName"], 160) ?? null,
+          displayName: displayName || null,
           email: u.email ?? profile?.email ?? null,
           phone: u.phone ?? profile?.phone ?? null,
-          city: optionalProfileText(profile, ["city", "cityName"], 120),
+          city: profileCity ?? serviceCities[0] ?? null,
           region: optionalProfileText(profile, ["region", "regionName"], 120),
+          serviceCities,
           lastLoginAt:
             rawUser.lastLoginAt instanceof Date && !Number.isNaN(rawUser.lastLoginAt.getTime())
               ? rawUser.lastLoginAt.toISOString()
@@ -5470,6 +5748,211 @@ export class MachineValuationService implements OnModuleInit {
     return files.map((file) => mapStoredFileDoc(file));
   }
 
+  async getProjectAssetImagesZip(projectId: string, ctx: MvAccessContext) {
+    const db = await getMongoDb();
+    const pid = toId(projectId);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
+    await backfillPicAssetGridFsImagesAsAssetFiles(db, pid);
+
+    const photosRoot = await this.ensurePhotosRootFolder(db, pid);
+    const [itemFolders, picFolders, assetFiles] = await Promise.all([
+      db
+        .collection<MvItemDoc>(MV_ITEMS_COLLECTION)
+        .find({ projectId: pid })
+        .toArray(),
+      db
+        .collection<AssetDoc>(ASSETS_COLLECTION)
+        .find({ projectId: pid, ...MV_PHOTO_FOLDER_FILTER })
+        .toArray(),
+      db
+        .collection<{
+          _id: ObjectId;
+          filename?: string;
+          length?: number;
+          uploadDate?: Date;
+          metadata?: MvStoredFileMetadata;
+        }>(MV_FILES_FILES_COLLECTION)
+        .find({
+          "metadata.projectId": pid,
+          "metadata.scope": "asset-images",
+        })
+        .toArray(),
+    ]);
+
+    const itemById = new Map(itemFolders.map((item) => [item._id.toString(), item]));
+    const picById = new Map(picFolders.map((pic) => [pic._id.toString(), pic]));
+    const itemPathCache = new Map<string, string[] | null>();
+    const picPathCache = new Map<string, string[] | null>();
+    const rootId = photosRoot._id.toString();
+    const uniqueItemNameById = new Map<string, string>();
+    const uniquePicNameById = new Map<string, string>();
+
+    const assignUniqueSiblingNames = <
+      T extends {
+        _id: ObjectId;
+        parent?: ObjectId | null;
+        name?: string | null;
+        createdAt?: Date | null;
+        updatedAt?: Date | null;
+      },
+    >(
+      rows: T[],
+      fallback: string,
+      target: Map<string, string>,
+    ) => {
+      const byParent = new Map<string, T[]>();
+      for (const row of rows) {
+        const parentKey = row.parent?.toString?.() ?? "__root__";
+        const group = byParent.get(parentKey) ?? [];
+        group.push(row);
+        byParent.set(parentKey, group);
+      }
+
+      for (const group of byParent.values()) {
+        const usedNames = new Set<string>();
+        group
+          .slice()
+          .sort((a, b) => {
+            const an = sanitizeZipPathPart(a.name, fallback);
+            const bn = sanitizeZipPathPart(b.name, fallback);
+            const nameCmp = an.localeCompare(bn, "ar", { numeric: true, sensitivity: "base" });
+            if (nameCmp !== 0) return nameCmp;
+            const at = a.createdAt instanceof Date ? a.createdAt.getTime() : 0;
+            const bt = b.createdAt instanceof Date ? b.createdAt.getTime() : 0;
+            if (at !== bt) return at - bt;
+            return a._id.toString().localeCompare(b._id.toString());
+          })
+          .forEach((row) => {
+            const base = sanitizeZipPathPart(row.name, fallback);
+            target.set(row._id.toString(), uniqueZipChildName(base, usedNames));
+          });
+      }
+    };
+
+    assignUniqueSiblingNames(itemFolders, "مجلد", uniqueItemNameById);
+    assignUniqueSiblingNames(picFolders as Array<AssetDoc & { parent?: ObjectId | null }>, "أصل", uniquePicNameById);
+
+    const itemPath = (id: ObjectId | string | null | undefined, seen = new Set<string>()): string[] | null => {
+      const key = typeof id === "string" ? id : id?.toString();
+      if (!key) return null;
+      if (key === rootId) return [];
+      if (itemPathCache.has(key)) return itemPathCache.get(key) ?? null;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const item = itemById.get(key);
+      if (!item) return null;
+      const parent = item.parent ? itemPath(item.parent, seen) : null;
+      if (!parent) {
+        itemPathCache.set(key, null);
+        return null;
+      }
+      const out = [...parent, uniqueItemNameById.get(key) ?? sanitizeZipPathPart(item.name, "مجلد")];
+      itemPathCache.set(key, out);
+      return out;
+    };
+
+    const picPath = (id: ObjectId | string | null | undefined, seen = new Set<string>()): string[] | null => {
+      const key = typeof id === "string" ? id : id?.toString();
+      if (!key) return null;
+      if (picPathCache.has(key)) return picPathCache.get(key) ?? null;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const pic = picById.get(key);
+      if (!pic) return null;
+      const parentSegments = itemPath(pic.parent, new Set(seen));
+      if (!parentSegments) {
+        picPathCache.set(key, null);
+        return null;
+      }
+      const out = [...parentSegments, uniquePicNameById.get(key) ?? sanitizeZipPathPart(pic.name, "أصل")];
+      picPathCache.set(key, out);
+      return out;
+    };
+
+    const rootFolderName = "صور الأصول";
+    const directoryPaths = new Set<string>([rootFolderName]);
+    for (const item of itemFolders) {
+      const path = itemPath(item._id);
+      if (path && path.length > 0) directoryPaths.add(joinZipPath([rootFolderName, ...path]));
+    }
+    for (const pic of picFolders) {
+      const path = picPath(pic._id);
+      if (path && path.length > 0) directoryPaths.add(joinZipPath([rootFolderName, ...path]));
+    }
+
+    const imageFiles = assetFiles
+      .filter((file) =>
+        isLikelyImageUpload(
+          file.metadata?.originalFileName || file.filename || "file",
+          file.metadata?.mimeType,
+        ),
+      )
+      .sort(compareAssetImageGridDocs);
+
+    const zipFileName = sanitizeZipFileName(
+      `${rootFolderName}-${project.name || projectId}.zip`,
+      "asset-images.zip",
+    );
+    const out = new PassThrough();
+
+    void (async () => {
+      const centralDirectory: ZipCentralDirectoryEntry[] = [];
+      const state = { offset: 0 };
+      const usedZipPaths = new Set<string>();
+      try {
+        for (const dir of [...directoryPaths].sort((a, b) => a.localeCompare(b, "ar", { numeric: true }))) {
+          const normalized = uniqueZipPath(`${dir.replace(/\/+$/, "")}/`, usedZipPaths);
+          await writeStoredZipEntry(out, centralDirectory, state, {
+            zipPath: normalized,
+            directory: true,
+            modifiedAt: new Date(),
+          });
+        }
+
+        for (const file of imageFiles) {
+          const meta = file.metadata;
+          const rawName =
+            meta?.originalFileName ||
+            file.filename ||
+            String(meta?.relativePath ?? "").split(/[\\/]/).filter(Boolean).pop() ||
+            "image";
+          const fileName = sanitizeZipFileName(rawName, "image");
+          const picId = meta?.picAssetId?.toString?.();
+          const picSegments = picId ? picPath(picId) : null;
+          let zipPath: string;
+          if (picSegments && picSegments.length > 0) {
+            zipPath = joinZipPath([rootFolderName, ...picSegments, fileName]);
+          } else {
+            const relative = sanitizeUploadedRelativePath(meta?.relativePath || rawName, fileName);
+            const parts = relative
+              .split("/")
+              .filter(Boolean)
+              .map((part, index, arr) =>
+                index === arr.length - 1
+                  ? sanitizeZipFileName(part, fileName)
+                  : sanitizeZipPathPart(part, "مجلد"),
+              );
+            if (parts[0] === rootFolderName) parts.shift();
+            zipPath = joinZipPath([rootFolderName, ...parts]);
+          }
+          const stream = await this.openStoredProjectFileStream(db, file);
+          await writeStoredZipEntry(out, centralDirectory, state, {
+            zipPath: uniqueZipPath(zipPath, usedZipPaths),
+            source: stream,
+            modifiedAt: meta?.updatedAt instanceof Date ? meta.updatedAt : file.uploadDate,
+          });
+        }
+
+        await finishZip(out, centralDirectory, state);
+        out.end();
+      } catch (error) {
+        out.destroy(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+
+    return { stream: out, fileName: zipFileName, imageCount: imageFiles.length };
+  }
+
   /** يُحدِّث ‎displayOrder‎ لجميع صور مسار واحد وفقًا للترتيب المطلوب. */
   async reorderProjectAssetImageFiles(
     projectId: string,
@@ -6112,6 +6595,24 @@ export class MachineValuationService implements OnModuleInit {
     return uploaded;
   }
 
+  private async openStoredProjectFileStream(
+    db: Awaited<ReturnType<typeof getMongoDb>>,
+    file: {
+      _id: ObjectId;
+      metadata?: MvStoredFileMetadata;
+    },
+  ): Promise<NodeJS.ReadableStream> {
+    if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
+      try {
+        const object = await this.inspectorSpaces.getObjectStream(file.metadata.spacesKey.trim());
+        return object.stream;
+      } catch {
+        throw new NotFoundException("File not found");
+      }
+    }
+    return this.getFilesBucket(db).openDownloadStream(file._id);
+  }
+
   async getProjectFileDownload(projectId: string, fileId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const pid = toId(projectId);
@@ -6119,21 +6620,9 @@ export class MachineValuationService implements OnModuleInit {
     const fid = toId(fileId);
     const file = await this.getStoredFileDoc(db, pid, fid);
 
-    if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
-      try {
-        const object = await this.inspectorSpaces.getObjectStream(file.metadata.spacesKey.trim());
-        return {
-          file: mapStoredFileDoc(file),
-          stream: object.stream,
-        };
-      } catch {
-        throw new NotFoundException("File not found");
-      }
-    }
-
     return {
       file: mapStoredFileDoc(file),
-      stream: this.getFilesBucket(db).openDownloadStream(fid),
+      stream: await this.openStoredProjectFileStream(db, file),
     };
   }
 
