@@ -184,6 +184,7 @@ async function ensureIndexes(db: Db) {
       { unique: true }
     ),
     createIndexSafely(userCompanyMemberships, { companyId: 1 }),
+    createIndexSafely(userCompanyMemberships, { companyId: 1, productIds: 1 }),
     createIndexSafely(userCompanyMemberships, { userId: 1 }),
     
     // User profiles collection indexes
@@ -435,9 +436,15 @@ async function syncCompanyAdminMemberships(db: Db) {
         userId: c.adminUserId,
         companyId: c._id,
         role: "company_admin",
+        productIds: c.valueTechProductIds ?? [],
         createdAt: now,
         updatedAt: now,
       } as UserCompanyMembershipDoc);
+    } else {
+      await userCompanyMemberships.updateOne(
+        { _id: ex._id },
+        { $set: { productIds: c.valueTechProductIds ?? [], updatedAt: now } },
+      );
     }
   }
 }

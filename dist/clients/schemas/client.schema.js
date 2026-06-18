@@ -11,10 +11,23 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ClientSchema = exports.Client = void 0;
 const mongoose_1 = require("@nestjs/mongoose");
+const mongoose_2 = require("mongoose");
 const clientsModule_1 = require("../../server/models/clientsModule");
 let Client = class Client {
 };
 exports.Client = Client;
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.ObjectId, default: null, index: true }),
+    __metadata("design:type", Object)
+], Client.prototype, "companyId", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: [String], default: [] }),
+    __metadata("design:type", Array)
+], Client.prototype, "productIds", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, default: "" }),
+    __metadata("design:type", String)
+], Client.prototype, "sharedClientId", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ required: true, trim: true }),
     __metadata("design:type", String)
@@ -55,6 +68,10 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Object, default: {} }),
     __metadata("design:type", Object)
 ], Client.prototype, "templateFieldValues", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Object, default: {} }),
+    __metadata("design:type", Object)
+], Client.prototype, "systemData", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)

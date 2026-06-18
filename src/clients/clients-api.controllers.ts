@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from "@nestjs/common";
+import type { Request } from "express";
 import { ClientsMongoService } from "./clients-mongo.service";
 
 @Controller("client-types")
@@ -6,23 +7,27 @@ export class ClientTypesController {
   constructor(private readonly clients: ClientsMongoService) {}
 
   @Get()
-  list() {
-    return this.clients.listClientTypes();
+  list(@Req() request: Request, @Query() query: Record<string, unknown>) {
+    return this.clients.listClientTypes(request, query);
   }
 
   @Post()
-  create(@Body() body: { name?: string }) {
-    return this.clients.createClientType(body.name ?? "");
+  create(@Req() request: Request, @Body() body: { name?: string; productId?: unknown }) {
+    return this.clients.createClientType(request, body);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: { name?: string }) {
-    return this.clients.updateClientType(id, body.name ?? "");
+  update(
+    @Req() request: Request,
+    @Param("id") id: string,
+    @Body() body: { name?: string; productId?: unknown },
+  ) {
+    return this.clients.updateClientType(request, id, body);
   }
 
   @Delete(":id")
-  remove(@Param("id") id: string) {
-    return this.clients.deleteClientType(id);
+  remove(@Req() request: Request, @Param("id") id: string, @Query() query: Record<string, unknown>) {
+    return this.clients.deleteClientType(request, id, query);
   }
 }
 
@@ -31,28 +36,35 @@ export class FormTemplatesController {
   constructor(private readonly clients: ClientsMongoService) {}
 
   @Get()
-  list() {
-    return this.clients.listFormTemplates();
+  list(@Req() request: Request, @Query() query: Record<string, unknown>) {
+    return this.clients.listFormTemplates(request, query);
   }
 
   @Post()
-  create(@Body() body: { name?: string; fields?: unknown }) {
-    return this.clients.createFormTemplate(body);
+  create(
+    @Req() request: Request,
+    @Body() body: { name?: string; fields?: unknown; productId?: unknown },
+  ) {
+    return this.clients.createFormTemplate(request, body);
   }
 
   @Get(":id")
-  getOne(@Param("id") id: string) {
-    return this.clients.getFormTemplate(id);
+  getOne(@Req() request: Request, @Param("id") id: string, @Query() query: Record<string, unknown>) {
+    return this.clients.getFormTemplate(request, id, query);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: { name?: string; fields?: unknown }) {
-    return this.clients.updateFormTemplate(id, body);
+  update(
+    @Req() request: Request,
+    @Param("id") id: string,
+    @Body() body: { name?: string; fields?: unknown; productId?: unknown },
+  ) {
+    return this.clients.updateFormTemplate(request, id, body);
   }
 
   @Delete(":id")
-  remove(@Param("id") id: string) {
-    return this.clients.deleteFormTemplate(id);
+  remove(@Req() request: Request, @Param("id") id: string, @Query() query: Record<string, unknown>) {
+    return this.clients.deleteFormTemplate(request, id, query);
   }
 }
 
@@ -61,27 +73,27 @@ export class ClientsCrudController {
   constructor(private readonly clients: ClientsMongoService) {}
 
   @Get()
-  list() {
-    return this.clients.listClients();
+  list(@Req() request: Request, @Query() query: Record<string, unknown>) {
+    return this.clients.listClients(request, query);
   }
 
   @Post()
-  create(@Body() body: Record<string, unknown>) {
-    return this.clients.createClient(body);
+  create(@Req() request: Request, @Body() body: Record<string, unknown>) {
+    return this.clients.createClient(request, body);
   }
 
   @Get(":id")
-  getOne(@Param("id") id: string) {
-    return this.clients.getClient(id);
+  getOne(@Req() request: Request, @Param("id") id: string, @Query() query: Record<string, unknown>) {
+    return this.clients.getClient(request, id, query);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: Record<string, unknown>) {
-    return this.clients.updateClient(id, body);
+  update(@Req() request: Request, @Param("id") id: string, @Body() body: Record<string, unknown>) {
+    return this.clients.updateClient(request, id, body);
   }
 
   @Delete(":id")
-  remove(@Param("id") id: string) {
-    return this.clients.deleteClient(id);
+  remove(@Req() request: Request, @Param("id") id: string, @Query() query: Record<string, unknown>) {
+    return this.clients.deleteClient(request, id, query);
   }
 }

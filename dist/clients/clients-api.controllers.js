@@ -19,46 +19,52 @@ let ClientTypesController = class ClientTypesController {
     constructor(clients) {
         this.clients = clients;
     }
-    list() {
-        return this.clients.listClientTypes();
+    list(request, query) {
+        return this.clients.listClientTypes(request, query);
     }
-    create(body) {
-        return this.clients.createClientType(body.name ?? "");
+    create(request, body) {
+        return this.clients.createClientType(request, body);
     }
-    update(id, body) {
-        return this.clients.updateClientType(id, body.name ?? "");
+    update(request, id, body) {
+        return this.clients.updateClientType(request, id, body);
     }
-    remove(id) {
-        return this.clients.deleteClientType(id);
+    remove(request, id, query) {
+        return this.clients.deleteClientType(request, id, query);
     }
 };
 exports.ClientTypesController = ClientTypesController;
 __decorate([
     (0, common_1.Get)(),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], ClientTypesController.prototype, "list", null);
 __decorate([
     (0, common_1.Post)(),
-    __param(0, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], ClientTypesController.prototype, "create", null);
 __decorate([
     (0, common_1.Patch)(":id"),
-    __param(0, (0, common_1.Param)("id")),
-    __param(1, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], ClientTypesController.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(":id"),
-    __param(0, (0, common_1.Param)("id")),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], ClientTypesController.prototype, "remove", null);
 exports.ClientTypesController = ClientTypesController = __decorate([
@@ -69,56 +75,64 @@ let FormTemplatesController = class FormTemplatesController {
     constructor(clients) {
         this.clients = clients;
     }
-    list() {
-        return this.clients.listFormTemplates();
+    list(request, query) {
+        return this.clients.listFormTemplates(request, query);
     }
-    create(body) {
-        return this.clients.createFormTemplate(body);
+    create(request, body) {
+        return this.clients.createFormTemplate(request, body);
     }
-    getOne(id) {
-        return this.clients.getFormTemplate(id);
+    getOne(request, id, query) {
+        return this.clients.getFormTemplate(request, id, query);
     }
-    update(id, body) {
-        return this.clients.updateFormTemplate(id, body);
+    update(request, id, body) {
+        return this.clients.updateFormTemplate(request, id, body);
     }
-    remove(id) {
-        return this.clients.deleteFormTemplate(id);
+    remove(request, id, query) {
+        return this.clients.deleteFormTemplate(request, id, query);
     }
 };
 exports.FormTemplatesController = FormTemplatesController;
 __decorate([
     (0, common_1.Get)(),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], FormTemplatesController.prototype, "list", null);
 __decorate([
     (0, common_1.Post)(),
-    __param(0, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], FormTemplatesController.prototype, "create", null);
 __decorate([
     (0, common_1.Get)(":id"),
-    __param(0, (0, common_1.Param)("id")),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], FormTemplatesController.prototype, "getOne", null);
 __decorate([
     (0, common_1.Patch)(":id"),
-    __param(0, (0, common_1.Param)("id")),
-    __param(1, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], FormTemplatesController.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(":id"),
-    __param(0, (0, common_1.Param)("id")),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], FormTemplatesController.prototype, "remove", null);
 exports.FormTemplatesController = FormTemplatesController = __decorate([
@@ -129,56 +143,64 @@ let ClientsCrudController = class ClientsCrudController {
     constructor(clients) {
         this.clients = clients;
     }
-    list() {
-        return this.clients.listClients();
+    list(request, query) {
+        return this.clients.listClients(request, query);
     }
-    create(body) {
-        return this.clients.createClient(body);
+    create(request, body) {
+        return this.clients.createClient(request, body);
     }
-    getOne(id) {
-        return this.clients.getClient(id);
+    getOne(request, id, query) {
+        return this.clients.getClient(request, id, query);
     }
-    update(id, body) {
-        return this.clients.updateClient(id, body);
+    update(request, id, body) {
+        return this.clients.updateClient(request, id, body);
     }
-    remove(id) {
-        return this.clients.deleteClient(id);
+    remove(request, id, query) {
+        return this.clients.deleteClient(request, id, query);
     }
 };
 exports.ClientsCrudController = ClientsCrudController;
 __decorate([
     (0, common_1.Get)(),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], ClientsCrudController.prototype, "list", null);
 __decorate([
     (0, common_1.Post)(),
-    __param(0, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], ClientsCrudController.prototype, "create", null);
 __decorate([
     (0, common_1.Get)(":id"),
-    __param(0, (0, common_1.Param)("id")),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], ClientsCrudController.prototype, "getOne", null);
 __decorate([
     (0, common_1.Patch)(":id"),
-    __param(0, (0, common_1.Param)("id")),
-    __param(1, (0, common_1.Body)()),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], ClientsCrudController.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(":id"),
-    __param(0, (0, common_1.Param)("id")),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id")),
+    __param(2, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [Object, String, Object]),
     __metadata("design:returntype", void 0)
 ], ClientsCrudController.prototype, "remove", null);
 exports.ClientsCrudController = ClientsCrudController = __decorate([

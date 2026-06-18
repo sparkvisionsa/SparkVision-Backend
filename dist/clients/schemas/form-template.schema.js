@@ -11,11 +11,20 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.FormTemplateSchema = exports.FormTemplate = void 0;
 const mongoose_1 = require("@nestjs/mongoose");
+const mongoose_2 = require("mongoose");
 const clientsModule_1 = require("../../server/models/clientsModule");
 const form_field_schema_1 = require("./form-field.schema");
 let FormTemplate = class FormTemplate {
 };
 exports.FormTemplate = FormTemplate;
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.ObjectId, default: null, index: true }),
+    __metadata("design:type", Object)
+], FormTemplate.prototype, "companyId", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, default: "real-estate-valuation", index: true }),
+    __metadata("design:type", String)
+], FormTemplate.prototype, "productId", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ required: true, trim: true }),
     __metadata("design:type", String)

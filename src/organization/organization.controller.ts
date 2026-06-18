@@ -18,6 +18,7 @@ import {
   deleteCompanyMemberBySuperAdmin,
   deleteCompanyUserByCompanyAdmin,
   getCompanyDetailForSuperAdmin,
+  getCurrentCompanyUserSignature,
   getCompanyReportDefaultsForCompanyAdmin,
   getCompanyReportDefaultsForMember,
   listCompaniesForSuperAdmin,
@@ -148,6 +149,13 @@ export class OrganizationController {
     @Body() body: unknown
   ) {
     const result = await updateCompanyMemberReportSignatureByCompanyAdmin(req, body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Get("company/user-signature")
+  async getCompanyUserSignature(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const result = await getCurrentCompanyUserSignature(req);
     applyContextCookies(res, result.context);
     return result.payload;
   }

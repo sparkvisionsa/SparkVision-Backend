@@ -562,6 +562,7 @@ function sanitizeReportData(raw) {
         agreementDate: sanitizeIsoDateOnly(data.agreementDate),
         inspectionDate: sanitizeIsoDateOnly(data.inspectionDate),
         valuationDate: sanitizeIsoDateOnly(data.valuationDate),
+        clientId: sanitizeOptionalText(data.clientId, 80),
         clientName: sanitizeOptionalText(data.clientName, 180),
         clientEmail: sanitizeOptionalText(data.clientEmail, 180),
         clientPhone: sanitizeOptionalText(data.clientPhone, 60),
@@ -4152,7 +4153,236 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             picAsset: serializePicAsset(picOnly),
         };
     }
+    async assertNoPhotoNodeNameConflict(db, projectId, parentId, name, excludeIds) {
+        const exclude = excludeIds.length > 0 ? { $nin: excludeIds } : undefined;
+        const idClause = exclude ? { _id: exclude } : {};
+        const parentClause = {
+            $or: [
+                { parent: parentId },
+                { parentSubProjectId: parentId },
+            ],
+        };
+        const [item, sub, pic] = await Promise.all([
+            db.collection(collections_2.MV_ITEMS_COLLECTION).findOne({
+                projectId,
+                name,
+                ...idClause,
+                ...parentClause,
+            }),
+            db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({
+                projectId,
+                name,
+                ...idClause,
+                ...parentClause,
+            }),
+            db.collection(collections_3.ASSETS_COLLECTION).findOne({
+                projectId,
+                parent: parentId,
+                name,
+                ...idClause,
+                ...MV_PHOTO_FOLDER_FILTER,
+            }),
+        ]);
+        if (item || sub || pic) {
+            throw new common_1.BadRequestException("يوجد مجلد أو أصل بنفس الاسم داخل هذا المكان.");
+        }
+    }
+    async resolvePhotoNodeTargetParent(db, projectId, photosRootId, rawTarget) {
+        if (rawTarget === undefined ||
+            rawTarget === null ||
+            String(rawTarget).trim() === "" ||
+            String(rawTarget).trim() === "__pv_root__") {
+            return photosRootId;
+        }
+        const target = toId(String(rawTarget).trim());
+        if (target.equals(photosRootId))
+            return target;
+        const [targetItem, targetSub, targetPic] = await Promise.all([
+            db.collection(collections_2.MV_ITEMS_COLLECTION).findOne({ _id: target, projectId }),
+            db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({ _id: target, projectId }),
+            db.collection(collections_3.ASSETS_COLLECTION).findOne({
+                _id: target,
+                projectId,
+                ...MV_PHOTO_FOLDER_FILTER,
+            }),
+        ]);
+        if (targetPic) {
+            throw new common_1.BadRequestException("لا يمكن نقل مجلد أو أصل داخل أصل آخر. اختر الجذر أو مجلداً عادياً.");
+        }
+        if (!targetItem && !targetSub) {
+            throw new common_1.NotFoundException("Target folder not found");
+        }
+        const underPhotos = await this.isInPhotosHoldingSubtree(db, projectId, photosRootId, target);
+        if (!underPhotos) {
+            throw new common_1.BadRequestException("المكان المستهدف يجب أن يكون داخل صور الأصول.");
+        }
+        return target;
+    }
+    async refreshPicAssetFileFolderMetadata(db, projectId, picAssetId, folderName) {
+        const col = db.collection(collections_2.MV_FILES_FILES_COLLECTION);
+        const files = await col
+            .find({
+            "metadata.projectId": projectId,
+            "metadata.scope": "asset-images",
+            "metadata.picAssetId": picAssetId,
+        })
+            .sort({ "metadata.displayOrder": 1, uploadDate: 1, _id: 1 })
+            .toArray();
+        if (files.length === 0)
+            return;
+        const now = new Date();
+        const folderPathNorm = normalizeMvAssetFolderPath(folderName || "asset");
+        for (const file of files) {
+            const rawPath = String(file.metadata?.relativePath ||
+                file.metadata?.originalFileName ||
+                file.filename ||
+                "image").replace(/\\/g, "/");
+            const preferredBasename = sanitizeUploadedFileName(rawPath.split("/").pop() || "image");
+            const unique = await this.uniqueRelativePathForAssetImageFolder(db, projectId, file._id, {
+                folderPathNorm,
+                preferredBasename,
+            });
+            await col.updateOne({ _id: file._id, "metadata.projectId": projectId, "metadata.scope": "asset-images" }, {
+                $set: {
+                    "metadata.relativePath": unique.relativePath,
+                    "metadata.folderPath": unique.folderPath,
+                    "metadata.updatedAt": now,
+                },
+            });
+        }
+    }
+    async patchPhotoNodeMeta(projectId, subId, ctx, body) {
+        const db = await (0, mongodb_2.getMongoDb)();
+        const pid = toId(projectId);
+        const sid = toId(subId);
+        await this.loadProjectForAccess(db, pid, ctx);
+        if (ctx.userRole === "inspector") {
+            await this.assertInspectorAccessToFolderId(db, pid, sid, ctx);
+        }
+        const photosRoot = await this.ensurePhotosRootFolder(db, pid);
+        if (sid.equals(photosRoot._id)) {
+            throw new common_1.BadRequestException("لا يمكن تعديل مجلد صور الأصول الرئيسي.");
+        }
+        const sp = db.collection(collections_2.MV_SUBPROJECTS_COLLECTION);
+        const it = db.collection(collections_2.MV_ITEMS_COLLECTION);
+        const pa = db.collection(collections_3.ASSETS_COLLECTION);
+        const pic = (await pa.findOne({
+            _id: sid,
+            projectId: pid,
+            ...MV_PHOTO_FOLDER_FILTER,
+        }));
+        const item = pic ? null : await it.findOne({ _id: sid, projectId: pid });
+        const sub = pic || item ? null : await sp.findOne({ _id: sid, projectId: pid });
+        const node = pic ?? item ?? sub;
+        if (!node)
+            throw new common_1.NotFoundException("Sub-project not found");
+        const hasName = Object.prototype.hasOwnProperty.call(body, "name");
+        const hasParent = Object.prototype.hasOwnProperty.call(body, "targetParentId") ||
+            Object.prototype.hasOwnProperty.call(body, "parent") ||
+            Object.prototype.hasOwnProperty.call(body, "parentSubProjectId");
+        if (!hasName && !hasParent) {
+            return this.getSubProject(projectId, subId, ctx);
+        }
+        const currentParent = pic
+            ? (pic.parent ?? null)
+            : getParentIdFromDoc(node) ?? null;
+        if (!currentParent) {
+            throw new common_1.BadRequestException("لا يمكن نقل هذا العنصر من جذر المشروع. استخدم عناصر صور الأصول فقط.");
+        }
+        const sourceUnderPhotos = currentParent.equals(photosRoot._id)
+            ? true
+            : await this.isInPhotosHoldingSubtree(db, pid, photosRoot._id, sid);
+        if (!sourceUnderPhotos) {
+            throw new common_1.BadRequestException("هذا العنصر ليس داخل صور الأصول.");
+        }
+        const nextName = hasName ? normalizeSubProjectName(String(body.name ?? "")) : normalizeSubProjectName(node.name);
+        if (!nextName)
+            throw new common_1.BadRequestException("اسم المجلد أو الأصل مطلوب.");
+        const rawParent = Object.prototype.hasOwnProperty.call(body, "targetParentId")
+            ? body.targetParentId
+            : Object.prototype.hasOwnProperty.call(body, "parent")
+                ? body.parent
+                : body.parentSubProjectId;
+        const nextParent = hasParent
+            ? await this.resolvePhotoNodeTargetParent(db, pid, photosRoot._id, rawParent)
+            : currentParent;
+        if (nextParent.equals(sid)) {
+            throw new common_1.BadRequestException("لا يمكن نقل العنصر داخل نفسه.");
+        }
+        if (!pic) {
+            const descendants = await this.collectDescendantSubProjectIds(db, pid, sid);
+            if (descendants.some((id) => id.equals(nextParent))) {
+                throw new common_1.BadRequestException("لا يمكن نقل مجلد داخل أحد مجلداته الفرعية.");
+            }
+        }
+        if (ctx.userRole === "inspector") {
+            await this.assertInspectorAccessToFolderId(db, pid, nextParent, ctx);
+        }
+        const tiedPic = !pic && currentParent
+            ? (await pa.findOne({
+                projectId: pid,
+                parent: currentParent,
+                name: node.name,
+                ...MV_PHOTO_FOLDER_FILTER,
+            }))
+            : null;
+        const excludeIds = [sid];
+        if (tiedPic?._id)
+            excludeIds.push(tiedPic._id);
+        await this.assertNoPhotoNodeNameConflict(db, pid, nextParent, nextName, excludeIds);
+        const now = new Date();
+        if (pic) {
+            const updated = (await pa.findOneAndUpdate({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, { $set: { name: nextName, parent: nextParent, updatedAt: now } }, { returnDocument: "after" }));
+            if (!updated)
+                throw new common_1.NotFoundException("Sub-project not found");
+            if (hasName) {
+                await this.refreshPicAssetFileFolderMetadata(db, pid, sid, nextName);
+            }
+        }
+        else if (item) {
+            await it.updateOne({ _id: sid, projectId: pid }, {
+                $set: { name: nextName, parent: nextParent, updatedAt: now },
+                $unset: { parentSubProjectId: "" },
+            });
+        }
+        else {
+            await sp.updateOne({ _id: sid, projectId: pid }, {
+                $set: { name: nextName, parent: nextParent, updatedAt: now },
+                $unset: { parentSubProjectId: "" },
+            });
+        }
+        if (tiedPic?._id) {
+            await pa.updateOne({ _id: tiedPic._id, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, { $set: { name: nextName, parent: nextParent, updatedAt: now } });
+            if (hasName) {
+                await this.refreshPicAssetFileFolderMetadata(db, pid, tiedPic._id, nextName);
+            }
+        }
+        return this.getSubProject(projectId, subId, ctx);
+    }
     async patchSubProject(projectId, subId, ctx, body) {
+        const hasNodePatch = !!body &&
+            (Object.prototype.hasOwnProperty.call(body, "name") ||
+                Object.prototype.hasOwnProperty.call(body, "parent") ||
+                Object.prototype.hasOwnProperty.call(body, "parentSubProjectId") ||
+                Object.prototype.hasOwnProperty.call(body, "targetParentId"));
+        const hasPicPatch = !!body &&
+            [
+                "writtenDescription",
+                "condition",
+                "assetType",
+                "brand",
+                "code",
+                "model",
+                "manufactureYear",
+                "kilometersDriven",
+                "isPresent",
+                "isDone",
+                "images",
+                "voiceNotes",
+            ].some((key) => Object.prototype.hasOwnProperty.call(body, key));
+        if (hasNodePatch && !hasPicPatch) {
+            return this.patchPhotoNodeMeta(projectId, subId, ctx, body);
+        }
         const db = await (0, mongodb_2.getMongoDb)();
         const pid = toId(projectId);
         await this.loadProjectForAccess(db, pid, ctx);

@@ -88,6 +88,7 @@ export interface MvProjectReportData {
   agreementDate?: string;
   inspectionDate?: string;
   valuationDate?: string;
+  clientId?: string;
   clientName?: string;
   clientEmail?: string;
   clientPhone?: string;

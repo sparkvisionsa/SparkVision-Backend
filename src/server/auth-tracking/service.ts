@@ -52,6 +52,7 @@ import type {
   UserProfileDoc,
   UserProfileMongoDoc,
   UserRole,
+  ValueTechProductId,
 } from "./types";
 import { COMPANY_MEMBER_ROLES } from "./types";
 import { buildDefaultCompanyReportDefaults } from "./company-report-defaults.constants";
@@ -63,6 +64,82 @@ const COMPANY_MEMBERSHIP_ROLE_LABELS_AR: Record<CompanyMembershipRole, string> =
   reviewer: "مراجع",
   inspector: "مفتش ميداني",
 };
+
+const VALUE_TECH_PRODUCT_IDS = [
+  "real-estate-valuation",
+  "machine-valuation",
+  "evaluation-source",
+  "value-tech-app",
+  "asset-inventory",
+  "asset-inspection",
+] as const satisfies readonly ValueTechProductId[];
+
+const VALUE_TECH_PRODUCT_ID_SET = new Set<string>(VALUE_TECH_PRODUCT_IDS);
+
+function normalizeValueTechProductId(value: unknown): ValueTechProductId | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return VALUE_TECH_PRODUCT_ID_SET.has(trimmed) ? (trimmed as ValueTechProductId) : null;
+}
+
+function normalizeProductIds(value: unknown): ValueTechProductId[] {
+  const raw = Array.isArray(value) ? value : [];
+  const seen = new Set<ValueTechProductId>();
+  const out: ValueTechProductId[] = [];
+  for (const item of raw) {
+    const productId = normalizeValueTechProductId(item);
+    if (!productId || seen.has(productId)) continue;
+    seen.add(productId);
+    out.push(productId);
+  }
+  return out;
+}
+
+function readQueryString(request: Request, key: string): string | undefined {
+  const value = request.query?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return typeof value === "string" ? value : undefined;
+}
+
+function readProductIdFromRequest(request: Request): ValueTechProductId | null {
+  return normalizeValueTechProductId(readQueryString(request, "productId"));
+}
+
+function membershipProductIds(
+  membership: UserCompanyMembershipMongoDoc | UserCompanyMembershipDoc | null | undefined,
+  company: CompanyMongoDoc | null | undefined
+): ValueTechProductId[] {
+  const companyProductIds = normalizeProductIds(company?.valueTechProductIds);
+  if (!membership) return companyProductIds;
+  if (membership.role === "company_admin") return companyProductIds;
+  const explicit = normalizeProductIds((membership as { productIds?: unknown }).productIds);
+  if (explicit.length === 0) return companyProductIds;
+  if (companyProductIds.length === 0) return [];
+  return explicit.filter((id) => companyProductIds.includes(id));
+}
+
+function membershipHasProductAccess(
+  membership: UserCompanyMembershipMongoDoc | UserCompanyMembershipDoc,
+  productId: ValueTechProductId,
+  company: CompanyMongoDoc | null | undefined
+) {
+  if (membership.role === "company_admin") return true;
+  return membershipProductIds(membership, company).includes(productId);
+}
+
+function mergeProductIds(
+  current: unknown,
+  productId: ValueTechProductId | null,
+  company: CompanyMongoDoc | null | undefined
+): ValueTechProductId[] {
+  const existing = normalizeProductIds(current);
+  if (!productId) return existing;
+  const companyProductIds = normalizeProductIds(company?.valueTechProductIds);
+  if (companyProductIds.length > 0 && !companyProductIds.includes(productId)) {
+    return existing;
+  }
+  return existing.includes(productId) ? existing : [...existing, productId];
+}
 
 export class HttpError extends Error {
   status: number;
@@ -235,13 +312,12 @@ function readCookie(request: Request, name: string) {
 
 function resolveValueTechProductIds(
   user: UserMongoDoc,
-  company: CompanyMongoDoc | null
+  company: CompanyMongoDoc | null,
+  membership?: UserCompanyMembershipMongoDoc | null
 ): string[] | null {
   if (user.role === "super_admin") return null;
   if (!company) return null;
-  const ids = company.valueTechProductIds;
-  if (!ids || ids.length === 0) return [];
-  return [...ids];
+  return membershipProductIds(membership ?? null, company);
 }
 
 function effectivePublicRole(
@@ -281,7 +357,7 @@ function toPublicUser(
       company?._id.toString() ?? (user.company ? user.company.toString() : null),
     companyIds,
     companyName: company?.name ?? null,
-    valueTechProductIds: resolveValueTechProductIds(user, company),
+    valueTechProductIds: resolveValueTechProductIds(user, company, opts?.membership ?? null),
     createdAt: user.createdAt.toISOString(),
     lastLoginAt: toIso(user.lastLoginAt),
   };
@@ -2015,7 +2091,7 @@ const updateCompanyBrandingSchema = z
   });
 
 const updateMemberSignatureBodySchema = z.object({
-  userId: z.string().trim().min(1).max(64),
+  userId: z.string().trim().min(1).max(64).optional(),
   valuationReportSignatureDataUrl: z.union([
     z
       .string()
@@ -2089,6 +2165,7 @@ const createCompanyUserSchema = z.object({
   username: z.preprocess(asTrimmedString, z.string().trim().min(3).max(64)).optional(),
   password: z.preprocess(asTrimmedString, z.string().min(8).max(128)),
   role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
+  productId: z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
   email: z.union([z.string().email(), z.literal("")]).optional(),
   phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
     message: "Phone number must include country code.",
@@ -2098,6 +2175,7 @@ const createCompanyUserSchema = z.object({
 const updateCompanyUserByCompanyAdminBodySchema = z
   .object({
     role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
+    productId: z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: z.union([z.string().email(), z.literal("")]).optional(),
     phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
       message: "Phone number must include country code.",
@@ -2107,6 +2185,7 @@ const updateCompanyUserByCompanyAdminBodySchema = z
   .superRefine((data, ctx) => {
     if (
       data.role === undefined &&
+      data.productId === undefined &&
       data.email === undefined &&
       data.phone === undefined &&
       data.newPassword === undefined
@@ -2183,6 +2262,7 @@ export async function createCompanyBySuperAdmin(request: Request, body: unknown)
       userId,
       companyId,
       role: "company_admin",
+      productIds,
       createdAt: now,
       updatedAt: now,
     } as UserCompanyMembershipDoc);
@@ -2340,8 +2420,12 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
   const { users, companies, userCompanyMemberships } = getAuthCollections(db);
   const companyId = context.company!._id;
   const company = await companies.findOne({ _id: companyId });
+  const productId = readProductIdFromRequest(request);
 
-  const memberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+  const allMemberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+  const memberLinks = productId
+    ? allMemberLinks.filter((m) => membershipHasProductAccess(m, productId, company))
+    : allMemberLinks;
   const memberIds = memberLinks.map((m) => m.userId);
   const roleByUserId = new Map(
     memberLinks.map((m) => [m.userId.toString(), m.role]),
@@ -2372,6 +2456,10 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
         companyId: companyId.toString(),
         email: u.email ?? null,
         phone: u.phone ?? null,
+        productIds: membershipProductIds(
+          memberLinks.find((m) => m.userId.equals(u._id)) ?? null,
+          company
+        ),
         createdAt: u.createdAt.toISOString(),
         lastLoginAt: toIso(u.lastLoginAt),
         valuationReportSignatureDataUrl:
@@ -2393,7 +2481,11 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
   const companyId = context.company!._id;
   const company = await companies.findOne({ _id: companyId });
 
-  const memberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+  const allMemberLinks = await userCompanyMemberships.find({ companyId }).toArray();
+  const memberLinks =
+    context.companyMembership.role === "company_admin"
+      ? allMemberLinks.filter((m) => membershipHasProductAccess(m, "machine-valuation", company))
+      : allMemberLinks.filter((m) => m.userId.equals(context.user._id));
   const memberIds = memberLinks.map((m) => m.userId);
   const roleByUserId = new Map(
     memberLinks.map((m) => [m.userId.toString(), m.role as CompanyMembershipRole]),
@@ -2532,7 +2624,7 @@ export async function updateCompanyBrandingByCompanyAdmin(request: Request, body
 
 export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: Request, body: unknown) {
   const context = await resolveRequestContext(request);
-  assertCompanyAdminUser(context);
+  assertCompanyMemberUser(context);
   assertCsrf(request);
 
   const parsed = updateMemberSignatureBodySchema.safeParse(coerceRequestJsonBody(body));
@@ -2548,7 +2640,11 @@ export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: 
     } as Record<string, unknown>);
   }
 
-  const targetOid = tryParseObjectId(parsed.data.userId);
+  const requestedTargetOid = tryParseObjectId(parsed.data.userId);
+  const targetOid =
+    context.companyMembership.role === "company_admin"
+      ? requestedTargetOid
+      : context.user._id;
   if (!targetOid) {
     throw new HttpError(400, "invalid_user_id", "Invalid user id.");
   }
@@ -2560,6 +2656,9 @@ export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: 
   const link = await userCompanyMemberships.findOne({ companyId, userId: targetOid });
   if (!link) {
     throw new HttpError(403, "forbidden", "User is not a member of this company.");
+  }
+  if (context.companyMembership.role !== "company_admin" && !targetOid.equals(context.user._id)) {
+    throw new HttpError(403, "forbidden", "Only company administrators can modify another user signature.");
   }
 
   const raw = parsed.data.valuationReportSignatureDataUrl;
@@ -2583,6 +2682,21 @@ export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: 
   return {
     context,
     payload: { ok: true as const },
+  };
+}
+
+export async function getCurrentCompanyUserSignature(request: Request) {
+  const context = await resolveRequestContext(request);
+  assertCompanyMemberUser(context);
+
+  const value = context.user.valuationReportSignatureDataUrl;
+  return {
+    context,
+    payload: {
+      userId: context.user._id.toString(),
+      valuationReportSignatureDataUrl:
+        typeof value === "string" && value.startsWith("data:image/") ? value : null,
+    },
   };
 }
 
@@ -2612,11 +2726,108 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
   const username = phone;
   const usernameLower = username.toLowerCase();
   const email = normalizeOptionalText(payload.email);
-  await assertPhoneIdentifierAvailable(users, phone);
 
   const now = new Date();
   const passwordHash = await hashPassword(payload.password);
   const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  const productId = payload.productId ?? readProductIdFromRequest(request);
+  if (productId && !membershipProductIds(context.companyMembership, company).includes(productId)) {
+    throw new HttpError(403, "forbidden", "Company does not have access to this product.");
+  }
+
+  const existingUser = await findUserByLoginIdentifier(users, phone);
+  if (existingUser) {
+    if (existingUser.role === "super_admin") {
+      throw new HttpError(409, "registration_conflict", "Phone number is already used by an administrator.");
+    }
+    const existingLink = await userCompanyMemberships.findOne({
+      userId: existingUser._id,
+      companyId,
+    });
+    if (!existingLink) {
+      throw new HttpError(409, "registration_conflict", "Phone number is already used in another company.");
+    }
+
+    const nextProductIds = productId
+      ? mergeProductIds(membershipProductIds(existingLink, company), productId, company)
+      : normalizeProductIds(existingLink.productIds);
+    const membershipSet: Partial<UserCompanyMembershipDoc> = {
+      updatedAt: now,
+      ...(nextProductIds.length > 0 ? { productIds: nextProductIds } : {}),
+    };
+    if (existingLink.role !== "company_admin") {
+      membershipSet.role = payload.role;
+    }
+
+    await userCompanyMemberships.updateOne(
+      { _id: existingLink._id },
+      {
+        $set: membershipSet,
+      },
+    );
+
+    const userSet: Partial<UserDoc> = { updatedAt: now };
+    if (email) userSet.email = email;
+    if (!existingUser.company || existingUser.company.equals(companyId)) {
+      userSet.company = companyId;
+      if (existingLink.role !== "company_admin") {
+        userSet.role = payload.role as UserRole;
+      }
+    }
+    await users.updateOne({ _id: existingUser._id }, { $set: userSet });
+    await userProfiles.updateOne(
+      { userId: existingUser._id },
+      {
+        $set: {
+          userId: existingUser._id,
+          email: email ?? existingUser.email ?? null,
+          phone: phone ?? existingUser.phone ?? null,
+          updatedAt: now,
+        },
+        $setOnInsert: {
+          additionalInfo: null,
+        },
+      },
+      { upsert: true },
+    );
+
+    const linkedUser = await users.findOne({ _id: existingUser._id });
+    const linkedMembership =
+      (await userCompanyMemberships.findOne({ _id: existingLink._id })) ?? existingLink;
+
+    await recordActivities(
+      context.session._id,
+      context.identityId,
+      context.user._id,
+      [
+        {
+          actionType: "company_user_product_linked",
+          actionDetails: {
+            targetUserId: existingUser._id.toString(),
+            role: payload.role,
+            username,
+            productId,
+          },
+        },
+      ],
+      {
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        referrer: readHeader(request, "referer"),
+      },
+    );
+
+    return {
+      context,
+      payload: {
+        user: toPublicUser(linkedUser, company, {
+          membership: linkedMembership,
+          allCompanyIds: [companyId.toString()],
+        }),
+      },
+    };
+  }
 
   let userId: import("mongodb").ObjectId;
   let newMembership: UserCompanyMembershipMongoDoc | null = null;
@@ -2640,6 +2851,7 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
       userId,
       companyId,
       role: payload.role,
+      productIds: mergeProductIds([], productId, company),
       createdAt: now,
       updatedAt: now,
     } as UserCompanyMembershipDoc);
@@ -2666,7 +2878,6 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
     { upsert: true }
   );
 
-  const company = await companies.findOne({ _id: companyId });
   const newUser = await users.findOne({ _id: userId });
 
   await recordActivities(
@@ -2679,6 +2890,7 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
         actionDetails: {
           targetUserId: userId,
           role: payload.role,
+          productId,
           username,
         },
       },
@@ -2784,6 +2996,18 @@ export async function updateCompanyUserByCompanyAdmin(
     }
   }
 
+  if (parsed.data.productId !== undefined) {
+    const nextProductIds = mergeProductIds(
+      membershipProductIds(link, context.company),
+      parsed.data.productId,
+      context.company,
+    );
+    await userCompanyMemberships.updateOne(
+      { _id: link._id },
+      { $set: { productIds: nextProductIds, updatedAt: now } },
+    );
+  }
+
   if (Object.keys(userSet).length > 1 || userSet.passwordHash) {
     try {
       const res = await users.updateOne({ _id: targetOid }, { $set: userSet });
@@ -2856,7 +3080,7 @@ export async function deleteCompanyUserByCompanyAdmin(request: Request, userId: 
   }
 
   const db = await getMongoDb();
-  const { users, userProfiles, userCompanyMemberships } = getAuthCollections(db);
+  const { users, userProfiles, userCompanyMemberships, companies } = getAuthCollections(db);
   const link = await userCompanyMemberships.findOne({
     userId: memberOid,
     companyId: companyOid,
@@ -2866,6 +3090,43 @@ export async function deleteCompanyUserByCompanyAdmin(request: Request, userId: 
   }
   if (link.role === "company_admin") {
     throw new HttpError(400, "invalid_action", "Cannot delete a company administrator.");
+  }
+
+  const productId = readProductIdFromRequest(request);
+  if (productId) {
+    const company = await companies.findOne({ _id: companyOid });
+    const currentProductIds = membershipProductIds(link, company);
+    const remainingProductIds = currentProductIds.filter((id) => id !== productId);
+    if (remainingProductIds.length > 0) {
+      await userCompanyMemberships.updateOne(
+        { _id: link._id },
+        { $set: { productIds: remainingProductIds, updatedAt: new Date() } },
+      );
+      await recordActivities(
+        context.session._id,
+        context.identityId,
+        context.user._id,
+        [
+          {
+            actionType: "company_user_product_unlinked",
+            actionDetails: {
+              companyId: companyOid.toString(),
+              targetUserId: memberOid.toString(),
+              productId,
+            },
+          },
+        ],
+        {
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          referrer: readHeader(request, "referer"),
+        },
+      );
+      return {
+        context,
+        payload: { success: true as const, productUnlinked: true as const },
+      };
+    }
   }
 
   await userCompanyMemberships.deleteOne({ _id: link._id });

@@ -398,7 +398,13 @@ export class MachineValuationController {
     @Res({ passthrough: true }) res: Response,
     @Param("pid") pid: string,
     @Param("sid") sid: string,
-    @Body() body: PicAssetPatch,
+    @Body()
+    body: PicAssetPatch & {
+      name?: unknown;
+      parent?: unknown;
+      parentSubProjectId?: unknown;
+      targetParentId?: unknown;
+    },
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);

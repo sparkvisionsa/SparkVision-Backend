@@ -108,6 +108,7 @@ async function ensureIndexes(db) {
         createIndexSafely(companies, { name: 1 }),
         createIndexSafely(userCompanyMemberships, { userId: 1, companyId: 1 }, { unique: true }),
         createIndexSafely(userCompanyMemberships, { companyId: 1 }),
+        createIndexSafely(userCompanyMemberships, { companyId: 1, productIds: 1 }),
         createIndexSafely(userCompanyMemberships, { userId: 1 }),
         createIndexSafely(userProfiles, { userId: 1 }, { unique: true }),
         createIndexSafely(sessions, { userId: 1, isActive: 1, lastSeenAt: -1 }),
@@ -290,9 +291,13 @@ async function syncCompanyAdminMemberships(db) {
                 userId: c.adminUserId,
                 companyId: c._id,
                 role: "company_admin",
+                productIds: c.valueTechProductIds ?? [],
                 createdAt: now,
                 updatedAt: now,
             });
+        }
+        else {
+            await userCompanyMemberships.updateOne({ _id: ex._id }, { $set: { productIds: c.valueTechProductIds ?? [], updatedAt: now } });
         }
     }
 }

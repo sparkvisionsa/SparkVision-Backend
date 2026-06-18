@@ -178,6 +178,12 @@ export interface UserCompanyMembershipDoc {
   userId: ObjectId;
   companyId: ObjectId;
   role: CompanyMembershipRole;
+  /**
+   * Product-level access inside the company. Missing or empty means legacy
+   * membership and is treated as all company products for backwards
+   * compatibility.
+   */
+  productIds?: ValueTechProductId[];
   createdAt: Date;
   updatedAt: Date;
 }

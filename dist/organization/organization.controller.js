@@ -77,6 +77,11 @@ let OrganizationController = class OrganizationController {
         (0, context_1.applyContextCookies)(res, result.context);
         return result.payload;
     }
+    async getCompanyUserSignature(req, res) {
+        const result = await (0, service_1.getCurrentCompanyUserSignature)(req);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
     async createCompanyUser(req, res, body) {
         let payload = body ?? req.body;
         if (typeof payload === "string") {
@@ -218,6 +223,14 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, Object]),
     __metadata("design:returntype", Promise)
 ], OrganizationController.prototype, "patchCompanyUserSignature", null);
+__decorate([
+    (0, common_1.Get)("company/user-signature"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], OrganizationController.prototype, "getCompanyUserSignature", null);
 __decorate([
     (0, common_1.Post)("company/users"),
     __param(0, (0, common_1.Req)()),
