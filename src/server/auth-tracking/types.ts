@@ -23,6 +23,7 @@ export interface CompanyReportSignatoryRow {
   id: string;
   name: string;
   roleLabel: string;
+  membershipNo?: string;
   signatureImageDataUrl: string;
 }
 
@@ -201,6 +202,10 @@ export interface UserDoc {
   passwordHash: string;
   email?: string | null;
   phone?: string | null;
+  /** Professional title shown under the user's name in valuation reports. */
+  valuationReportJobTitle?: string | null;
+  /** Membership number shown with the user's signature in valuation reports. */
+  valuationReportMembershipNo?: string | null;
   /**
    * الدور الظاهر في الشركة: `super_admin`، أو `company_admin`، أو أحد أدوار العضو: `valuer` / `data_entry` / `reviewer` / `inspector`.
    * يُحدَّث ليتوافق مع `user_company_memberships` للشركة الأساسية.
@@ -370,6 +375,8 @@ export interface PublicUser {
   username: string;
   email?: string | null;
   phone?: string | null;
+  valuationReportJobTitle?: string | null;
+  valuationReportMembershipNo?: string | null;
   /** الدور الفعّال في `companyId` النشط (من العضوية أو سوبر أدمن). */
   role: UserRole;
   /** الشركة النشطة في الجلسة (نفس `companies._id` كنص). */

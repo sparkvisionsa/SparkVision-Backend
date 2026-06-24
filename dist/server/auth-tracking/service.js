@@ -211,6 +211,8 @@ const loginSchema = zod_1.z.object({
 const profileSchema = zod_1.z.object({
     email: zod_1.z.string().email().optional().nullable(),
     phone: zod_1.z.string().max(32).optional().nullable(),
+    valuationReportJobTitle: zod_1.z.string().trim().max(160).optional().nullable(),
+    valuationReportMembershipNo: zod_1.z.string().trim().max(80).optional().nullable(),
     additionalInfo: zod_1.z.record(zod_1.z.unknown()).optional().nullable(),
 });
 const adminConfigSchema = zod_1.z.object({
@@ -299,6 +301,8 @@ function toPublicUser(user, company = null, opts) {
         username: user.username,
         email: user.email ?? null,
         phone: user.phone ?? null,
+        valuationReportJobTitle: user.valuationReportJobTitle ?? null,
+        valuationReportMembershipNo: user.valuationReportMembershipNo ?? null,
         role: effectivePublicRole(user, opts?.membership ?? null),
         companyId: company?._id.toString() ?? (user.company ? user.company.toString() : null),
         companyIds,
@@ -1253,6 +1257,8 @@ async function updateUserProfile(request, body) {
     const { users, userProfiles, companies } = (0, collections_1.getAuthCollections)(db);
     const email = normalizeOptionalText(payload.email ?? undefined);
     const phone = normalizeOptionalText(payload.phone ?? undefined);
+    const jobTitle = normalizeOptionalText(payload.valuationReportJobTitle ?? undefined);
+    const membershipNo = normalizeOptionalText(payload.valuationReportMembershipNo ?? undefined);
     const userSet = {
         updatedAt: now,
     };
@@ -1268,6 +1274,12 @@ async function updateUserProfile(request, body) {
     }
     else {
         userUnset.phone = "";
+    }
+    if (payload.valuationReportJobTitle !== undefined) {
+        userSet.valuationReportJobTitle = jobTitle ?? null;
+    }
+    if (payload.valuationReportMembershipNo !== undefined) {
+        userSet.valuationReportMembershipNo = membershipNo ?? null;
     }
     try {
         await users.updateOne({ _id: context.user._id }, {
@@ -1754,6 +1766,10 @@ function sanitizeCompanyUserJsonBody(body) {
         delete o.email;
     if (o.phone === null || o.phone === "")
         delete o.phone;
+    if (o.valuationReportJobTitle === null)
+        delete o.valuationReportJobTitle;
+    if (o.valuationReportMembershipNo === null)
+        delete o.valuationReportMembershipNo;
     return o;
 }
 function asTrimmedString(v) {
@@ -1769,6 +1785,8 @@ const createCompanyUserSchema = zod_1.z.object({
     role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
     productId: zod_1.z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    valuationReportJobTitle: zod_1.z.string().trim().max(160).optional().or(zod_1.z.literal("")),
+    valuationReportMembershipNo: zod_1.z.string().trim().max(80).optional().or(zod_1.z.literal("")),
     phone: zod_1.z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
         message: "Phone number must include country code.",
     }),
@@ -1778,6 +1796,8 @@ const updateCompanyUserByCompanyAdminBodySchema = zod_1.z
     role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
     productId: zod_1.z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    valuationReportJobTitle: zod_1.z.string().trim().max(160).optional().or(zod_1.z.literal("")),
+    valuationReportMembershipNo: zod_1.z.string().trim().max(80).optional().or(zod_1.z.literal("")),
     phone: zod_1.z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
         message: "Phone number must include country code.",
     }).optional(),
@@ -1787,6 +1807,8 @@ const updateCompanyUserByCompanyAdminBodySchema = zod_1.z
     if (data.role === undefined &&
         data.productId === undefined &&
         data.email === undefined &&
+        data.valuationReportJobTitle === undefined &&
+        data.valuationReportMembershipNo === undefined &&
         data.phone === undefined &&
         data.newPassword === undefined) {
         ctx.addIssue({
@@ -1804,6 +1826,10 @@ function sanitizeCompanyUserUpdateJsonBody(body) {
         o.email = "";
     if (o.phone === null)
         o.phone = "";
+    if (o.valuationReportJobTitle === null)
+        o.valuationReportJobTitle = "";
+    if (o.valuationReportMembershipNo === null)
+        o.valuationReportMembershipNo = "";
     return o;
 }
 async function createCompanyBySuperAdmin(request, body) {
@@ -2019,6 +2045,8 @@ async function listCompanyUsersForCompanyAdmin(request) {
                 companyId: companyId.toString(),
                 email: u.email ?? null,
                 phone: u.phone ?? null,
+                valuationReportJobTitle: u.valuationReportJobTitle ?? null,
+                valuationReportMembershipNo: u.valuationReportMembershipNo ?? null,
                 productIds: membershipProductIds(memberLinks.find((m) => m.userId.equals(u._id)) ?? null, company),
                 createdAt: u.createdAt.toISOString(),
                 lastLoginAt: toIso(u.lastLoginAt),
@@ -2028,6 +2056,20 @@ async function listCompanyUsersForCompanyAdmin(request) {
                     : null,
             })),
         },
+    };
+}
+async function resolveCompanyAdminReportIdentity(db, companyId, company) {
+    const { users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
+    const adminMem = await userCompanyMemberships.findOne({ companyId, role: "company_admin" });
+    const adminUserId = adminMem?.userId ?? company?.adminUserId ?? null;
+    if (!adminUserId)
+        return { membershipNo: null, name: null };
+    const adminUser = await users.findOne({ _id: adminUserId });
+    if (!adminUser)
+        return { membershipNo: null, name: null };
+    return {
+        membershipNo: normalizeOptionalText(adminUser.valuationReportMembershipNo) ?? null,
+        name: normalizeOptionalText(adminUser.username) ?? null,
     };
 }
 async function getCompanyReportDefaultsForMember(request) {
@@ -2050,7 +2092,9 @@ async function getCompanyReportDefaultsForMember(request) {
         .toArray();
     const reportSignatoryRows = memberUsers.map((u) => {
         const memRole = roleByUserId.get(u._id.toString()) ?? "valuer";
-        const roleLabel = COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ?? memRole;
+        const roleLabel = normalizeOptionalText(u.valuationReportJobTitle) ??
+            COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ??
+            memRole;
         const sig = typeof u.valuationReportSignatureDataUrl === "string" &&
             u.valuationReportSignatureDataUrl.startsWith("data:image/")
             ? u.valuationReportSignatureDataUrl
@@ -2059,14 +2103,18 @@ async function getCompanyReportDefaultsForMember(request) {
             id: u._id.toString(),
             name: u.username,
             roleLabel,
+            membershipNo: normalizeOptionalText(u.valuationReportMembershipNo) ?? "",
             signatureImageDataUrl: sig,
         };
     });
+    const companyAdminIdentity = await resolveCompanyAdminReportIdentity(db, companyId, company);
     return {
         context,
         payload: {
             companyName: company?.name ?? "",
             logoDataUrl: company?.logoDataUrl ?? null,
+            companyAdminMembershipNo: companyAdminIdentity.membershipNo,
+            companyAdminName: companyAdminIdentity.name,
             reportSignatoryRows,
             reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
         },
@@ -2219,6 +2267,8 @@ async function createCompanyUserByCompanyAdmin(request, body) {
     const username = phone;
     const usernameLower = username.toLowerCase();
     const email = normalizeOptionalText(payload.email);
+    const jobTitle = normalizeOptionalText(payload.valuationReportJobTitle);
+    const membershipNo = normalizeOptionalText(payload.valuationReportMembershipNo);
     const now = new Date();
     const passwordHash = await (0, crypto_1.hashPassword)(payload.password);
     const companyId = context.company._id;
@@ -2255,6 +2305,12 @@ async function createCompanyUserByCompanyAdmin(request, body) {
         const userSet = { updatedAt: now };
         if (email)
             userSet.email = email;
+        if (payload.valuationReportJobTitle !== undefined) {
+            userSet.valuationReportJobTitle = jobTitle ?? null;
+        }
+        if (payload.valuationReportMembershipNo !== undefined) {
+            userSet.valuationReportMembershipNo = membershipNo ?? null;
+        }
         if (!existingUser.company || existingUser.company.equals(companyId)) {
             userSet.company = companyId;
             if (existingLink.role !== "company_admin") {
@@ -2309,6 +2365,8 @@ async function createCompanyUserByCompanyAdmin(request, body) {
             passwordHash,
             ...(email ? { email } : {}),
             ...(phone ? { phone } : {}),
+            ...(jobTitle ? { valuationReportJobTitle: jobTitle } : {}),
+            ...(membershipNo ? { valuationReportMembershipNo: membershipNo } : {}),
             role: payload.role,
             company: companyId,
             createdAt: now,
@@ -2421,6 +2479,12 @@ async function updateCompanyUserByCompanyAdmin(request, userId, body) {
         userSet.usernameLower = ph.toLowerCase();
         userSet.phone = ph;
         profileSet.phone = ph;
+    }
+    if (parsed.data.valuationReportJobTitle !== undefined) {
+        userSet.valuationReportJobTitle = normalizeOptionalText(parsed.data.valuationReportJobTitle) ?? null;
+    }
+    if (parsed.data.valuationReportMembershipNo !== undefined) {
+        userSet.valuationReportMembershipNo = normalizeOptionalText(parsed.data.valuationReportMembershipNo) ?? null;
     }
     if (parsed.data.role !== undefined) {
         const nextRole = parsed.data.role;

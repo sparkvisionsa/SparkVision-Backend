@@ -248,6 +248,8 @@ const loginSchema = z.object({
 const profileSchema = z.object({
   email: z.string().email().optional().nullable(),
   phone: z.string().max(32).optional().nullable(),
+  valuationReportJobTitle: z.string().trim().max(160).optional().nullable(),
+  valuationReportMembershipNo: z.string().trim().max(80).optional().nullable(),
   additionalInfo: z.record(z.unknown()).optional().nullable(),
 });
 
@@ -352,6 +354,8 @@ function toPublicUser(
     username: user.username,
     email: user.email ?? null,
     phone: user.phone ?? null,
+    valuationReportJobTitle: user.valuationReportJobTitle ?? null,
+    valuationReportMembershipNo: user.valuationReportMembershipNo ?? null,
     role: effectivePublicRole(user, opts?.membership ?? null),
     companyId:
       company?._id.toString() ?? (user.company ? user.company.toString() : null),
@@ -1552,7 +1556,15 @@ export async function updateUserProfile(request: Request, body: unknown) {
   const { users, userProfiles, companies } = getAuthCollections(db);
   const email = normalizeOptionalText(payload.email ?? undefined);
   const phone = normalizeOptionalText(payload.phone ?? undefined);
-  const userSet: { updatedAt: Date; email?: string; phone?: string } = {
+  const jobTitle = normalizeOptionalText(payload.valuationReportJobTitle ?? undefined);
+  const membershipNo = normalizeOptionalText(payload.valuationReportMembershipNo ?? undefined);
+  const userSet: {
+    updatedAt: Date;
+    email?: string;
+    phone?: string;
+    valuationReportJobTitle?: string | null;
+    valuationReportMembershipNo?: string | null;
+  } = {
     updatedAt: now,
   };
   const userUnset: Record<string, ""> = {};
@@ -1565,6 +1577,12 @@ export async function updateUserProfile(request: Request, body: unknown) {
     userSet.phone = phone;
   } else {
     userUnset.phone = "";
+  }
+  if (payload.valuationReportJobTitle !== undefined) {
+    userSet.valuationReportJobTitle = jobTitle ?? null;
+  }
+  if (payload.valuationReportMembershipNo !== undefined) {
+    userSet.valuationReportMembershipNo = membershipNo ?? null;
   }
 
   try {
@@ -2152,6 +2170,8 @@ function sanitizeCompanyUserJsonBody(body: unknown): unknown {
   const o = { ...(base as Record<string, unknown>) };
   if (o.email === null || o.email === "") delete o.email;
   if (o.phone === null || o.phone === "") delete o.phone;
+  if (o.valuationReportJobTitle === null) delete o.valuationReportJobTitle;
+  if (o.valuationReportMembershipNo === null) delete o.valuationReportMembershipNo;
   return o;
 }
 
@@ -2167,6 +2187,8 @@ const createCompanyUserSchema = z.object({
   role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
   productId: z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
   email: z.union([z.string().email(), z.literal("")]).optional(),
+  valuationReportJobTitle: z.string().trim().max(160).optional().or(z.literal("")),
+  valuationReportMembershipNo: z.string().trim().max(80).optional().or(z.literal("")),
   phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
     message: "Phone number must include country code.",
   }),
@@ -2177,6 +2199,8 @@ const updateCompanyUserByCompanyAdminBodySchema = z
     role: z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
     productId: z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: z.union([z.string().email(), z.literal("")]).optional(),
+    valuationReportJobTitle: z.string().trim().max(160).optional().or(z.literal("")),
+    valuationReportMembershipNo: z.string().trim().max(80).optional().or(z.literal("")),
     phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
       message: "Phone number must include country code.",
     }).optional(),
@@ -2187,6 +2211,8 @@ const updateCompanyUserByCompanyAdminBodySchema = z
       data.role === undefined &&
       data.productId === undefined &&
       data.email === undefined &&
+      data.valuationReportJobTitle === undefined &&
+      data.valuationReportMembershipNo === undefined &&
       data.phone === undefined &&
       data.newPassword === undefined
     ) {
@@ -2203,6 +2229,8 @@ function sanitizeCompanyUserUpdateJsonBody(body: unknown): unknown {
   const o = { ...(base as Record<string, unknown>) };
   if (o.email === null) o.email = "";
   if (o.phone === null) o.phone = "";
+  if (o.valuationReportJobTitle === null) o.valuationReportJobTitle = "";
+  if (o.valuationReportMembershipNo === null) o.valuationReportMembershipNo = "";
   return o;
 }
 
@@ -2456,6 +2484,8 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
         companyId: companyId.toString(),
         email: u.email ?? null,
         phone: u.phone ?? null,
+        valuationReportJobTitle: u.valuationReportJobTitle ?? null,
+        valuationReportMembershipNo: u.valuationReportMembershipNo ?? null,
         productIds: membershipProductIds(
           memberLinks.find((m) => m.userId.equals(u._id)) ?? null,
           company
@@ -2469,6 +2499,23 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
             : null,
       })),
     },
+  };
+}
+
+async function resolveCompanyAdminReportIdentity(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  companyId: import("mongodb").ObjectId,
+  company: { adminUserId?: import("mongodb").ObjectId } | null,
+): Promise<{ membershipNo: string | null; name: string | null }> {
+  const { users, userCompanyMemberships } = getAuthCollections(db);
+  const adminMem = await userCompanyMemberships.findOne({ companyId, role: "company_admin" });
+  const adminUserId = adminMem?.userId ?? company?.adminUserId ?? null;
+  if (!adminUserId) return { membershipNo: null, name: null };
+  const adminUser = await users.findOne({ _id: adminUserId });
+  if (!adminUser) return { membershipNo: null, name: null };
+  return {
+    membershipNo: normalizeOptionalText(adminUser.valuationReportMembershipNo) ?? null,
+    name: normalizeOptionalText(adminUser.username) ?? null,
   };
 }
 
@@ -2499,7 +2546,10 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
 
   const reportSignatoryRows = memberUsers.map((u) => {
     const memRole = roleByUserId.get(u._id.toString()) ?? "valuer";
-    const roleLabel = COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ?? memRole;
+    const roleLabel =
+      normalizeOptionalText(u.valuationReportJobTitle) ??
+      COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ??
+      memRole;
     const sig =
       typeof u.valuationReportSignatureDataUrl === "string" &&
       u.valuationReportSignatureDataUrl.startsWith("data:image/")
@@ -2509,15 +2559,21 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
       id: u._id.toString(),
       name: u.username,
       roleLabel,
+      membershipNo: normalizeOptionalText(u.valuationReportMembershipNo) ?? "",
       signatureImageDataUrl: sig,
     };
   });
+
+  const companyAdminIdentity = await resolveCompanyAdminReportIdentity(db, companyId, company);
 
   return {
     context,
     payload: {
       companyName: company?.name ?? "",
       logoDataUrl: company?.logoDataUrl ?? null,
+      /** رقم عضوية مدير الشركة مباشرة من ‎users.valuationReportMembershipNo‎ — للغلاف والتوقيعات. */
+      companyAdminMembershipNo: companyAdminIdentity.membershipNo,
+      companyAdminName: companyAdminIdentity.name,
       reportSignatoryRows,
       reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
     },
@@ -2726,6 +2782,8 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
   const username = phone;
   const usernameLower = username.toLowerCase();
   const email = normalizeOptionalText(payload.email);
+  const jobTitle = normalizeOptionalText(payload.valuationReportJobTitle);
+  const membershipNo = normalizeOptionalText(payload.valuationReportMembershipNo);
 
   const now = new Date();
   const passwordHash = await hashPassword(payload.password);
@@ -2769,6 +2827,12 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
 
     const userSet: Partial<UserDoc> = { updatedAt: now };
     if (email) userSet.email = email;
+    if (payload.valuationReportJobTitle !== undefined) {
+      userSet.valuationReportJobTitle = jobTitle ?? null;
+    }
+    if (payload.valuationReportMembershipNo !== undefined) {
+      userSet.valuationReportMembershipNo = membershipNo ?? null;
+    }
     if (!existingUser.company || existingUser.company.equals(companyId)) {
       userSet.company = companyId;
       if (existingLink.role !== "company_admin") {
@@ -2838,6 +2902,8 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
       passwordHash,
       ...(email ? { email } : {}),
       ...(phone ? { phone } : {}),
+      ...(jobTitle ? { valuationReportJobTitle: jobTitle } : {}),
+      ...(membershipNo ? { valuationReportMembershipNo: membershipNo } : {}),
       role: payload.role as UserRole,
       company: companyId,
       createdAt: now,
@@ -2982,6 +3048,14 @@ export async function updateCompanyUserByCompanyAdmin(
     userSet.usernameLower = ph.toLowerCase();
     userSet.phone = ph;
     profileSet.phone = ph;
+  }
+
+  if (parsed.data.valuationReportJobTitle !== undefined) {
+    userSet.valuationReportJobTitle = normalizeOptionalText(parsed.data.valuationReportJobTitle) ?? null;
+  }
+
+  if (parsed.data.valuationReportMembershipNo !== undefined) {
+    userSet.valuationReportMembershipNo = normalizeOptionalText(parsed.data.valuationReportMembershipNo) ?? null;
   }
 
   if (parsed.data.role !== undefined) {

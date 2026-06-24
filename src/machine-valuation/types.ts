@@ -318,6 +318,8 @@ export type PicAssetMongoDoc = AssetDoc;
 export type PicAssetPatch = Partial<{
   writtenDescription: string | null;
   condition: string | null;
+  /** ملاحظات نصية — تُكتب في ‎rawData/normalizedData‎ كما في ‎assets.service‎ */
+  notes: string | null;
   assetType: AssetType;
   brand: string | null;
   code: string | null;

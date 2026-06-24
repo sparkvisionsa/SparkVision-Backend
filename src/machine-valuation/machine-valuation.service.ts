@@ -1481,6 +1481,51 @@ function serializeMvSubProject(
   };
 }
 
+/**
+ * شكل الوثيقة عند قراءة الملاحظات: الحقل العلوي ‎`notes`‎ يبقى افتراضياً ‎""‎
+ * منذ الاستيراد، بينما تحديثات المستخدم تُكتب داخل ‎`rawData.notes`‎ و
+ * ‎`normalizedData.notes`‎ (انظر ‎`buildUpdateDocument`‎ في ‎assets.service‎).
+ * ‎`hasNotes`‎ يُستخدم كمؤشّر «هذا الأصل عليه ملاحظة» عند الإمكان.
+ */
+type PicAssetNotesSource = {
+  notes?: unknown;
+  hasNotes?: unknown;
+  rawData?: Record<string, unknown> | null;
+  normalizedData?: Record<string, unknown> | null;
+};
+
+/**
+ * استخراج محتوى الملاحظات من وثيقة الأصل بنفس منطق ‎resolveAssetFieldValue‎:
+ *   1) الحقل العلوي ‎doc.notes‎ إذا كان نصاً غير فارغ.
+ *   2) ‎doc.normalizedData.notes‎ إذا كان نصاً غير فارغ.
+ *   3) ‎doc.rawData.notes‎ إذا كان نصاً غير فارغ (قد يكون رقماً أو منطقياً
+ *      مُمرَّرَين من الاستيراد — يُحوّل إلى ‎string‎ ثم تُتشذّب المسافات).
+ * عند انعدام المحتوى تُعاد ‎null‎ بصرف النظر عن قيمة ‎hasNotes‎.
+ */
+function resolvePicAssetNotes(doc: PicAssetNotesSource | null | undefined): string | null {
+  if (!doc) return null;
+  const pick = (value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      const asText = String(value).trim();
+      return asText.length > 0 ? asText : null;
+    }
+    return null;
+  };
+
+  const direct = pick(doc.notes);
+  if (direct != null) return direct;
+  const normalized = pick(doc.normalizedData?.notes);
+  if (normalized != null) return normalized;
+  const raw = pick(doc.rawData?.notes);
+  if (raw != null) return raw;
+  return null;
+}
+
 function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; projectId: ObjectId }) {
   const parentRaw = (pic as { parent?: ObjectId | null }).parent;
   const createdSrc =
@@ -1502,6 +1547,15 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
     isAssetFolder: true as const,
     writtenDescription: pic.writtenDescription,
     condition: pic.condition,
+    /*
+     * يُحلّ ‎`notes`‎ بنفس منطق ‎resolveAssetFieldValue‎ في ‎assets.service‎:
+     * تحديث الملاحظات عبر ‎`updateAsset`‎ يكتبها داخل ‎`rawData.notes`‎ و
+     * ‎`normalizedData.notes`‎ بينما يبقى الحقل العلوي ‎`doc.notes = ""`‎ من
+     * زمن الاستيراد. كما نعتمد على ‎`hasNotes`‎ كمؤشّر «يوجد ملاحظة» إن وُجد،
+     * ولكن المحتوى نفسه يأتي من أيّ من المواقع الثلاثة (الأعلى ثم
+     * ‎normalizedData‎ ثم ‎rawData‎). يُعاد ‎null‎ عند انعدام المحتوى.
+     */
+    notes: resolvePicAssetNotes(pic as PicAssetNotesSource),
     assetType: normalizeAssetTypeForApi((pic as { assetType?: unknown }).assetType),
     brand: pic.brand,
     code: pic.code,
@@ -5357,6 +5411,7 @@ export class MachineValuationService implements OnModuleInit {
       [
         "writtenDescription",
         "condition",
+        "notes",
         "assetType",
         "brand",
         "code",
@@ -5433,6 +5488,16 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("condition must be a string or null");
       }
       $set.condition = b.condition;
+    }
+    if (b.notes !== undefined) {
+      if (b.notes !== null && typeof b.notes !== "string") {
+        throw new BadRequestException("notes must be a string or null");
+      }
+      const notesText = b.notes === null ? "" : b.notes.trim();
+      $set.notes = notesText;
+      $set["rawData.notes"] = notesText;
+      $set["normalizedData.notes"] = notesText;
+      $set.hasNotes = notesText.length > 0;
     }
     if (b.assetType !== undefined) {
       if (typeof b.assetType !== "string" || !ASSET_TYPE_SET.has(b.assetType)) {
