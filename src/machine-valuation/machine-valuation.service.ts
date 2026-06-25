@@ -26,6 +26,10 @@ import {
   MV_HEADER_OPTIONS_COLLECTION,
 } from "./collections";
 import type { AssetType } from "@/assets/types";
+import {
+  MV_PROJECT_WORKFLOW_STATUSES,
+  MV_PROJECT_WORKFLOW_STATUS_META,
+} from "./types";
 import type {
   MvAccessContext,
   MvProjectDoc,
@@ -72,6 +76,7 @@ import { ASSETS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/
 import type { AssetDoc } from "@/assets/types";
 import { sanitizeTextInput } from "@/assets/asset-import.utils";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
+import { computeMvProjectProgressPct, countValuationAccountImages } from "./mv-project-progress.util";
 
 const MV_PHOTO_FOLDER_FILTER = { isAssetFolder: true as const };
 const EXTERNAL_ASSET_IMAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -703,6 +708,51 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
     reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
   };
+}
+
+/** حقول مختصرة من reportData لحساب تقدّم المشروع في قائمة المشاريع دون نقل HTML الكامل. */
+function pickReportDataProgressSummary(raw: unknown): MvProjectReportData | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const data = raw as Record<string, unknown>;
+  const pickText = (key: keyof MvProjectReportData, maxLength = 500) => {
+    const value = sanitizeOptionalText(data[key as string], maxLength);
+    return value || undefined;
+  };
+
+  const summary: MvProjectReportData = {
+    valuationMethod: pickText("valuationMethod", 120),
+    reportReference: pickText("reportReference", 120),
+    reportTitle: pickText("reportTitle", 220),
+    valuationPurpose: pickText("valuationPurpose", 120),
+    valuePremise: pickText("valuePremise", 120),
+    valuationBasis: pickText("valuationBasis", 220),
+    reportIssueDate: sanitizeIsoDateOnly(data.reportIssueDate) || undefined,
+    agreementDate: sanitizeIsoDateOnly(data.agreementDate) || undefined,
+    inspectionDate: sanitizeIsoDateOnly(data.inspectionDate) || undefined,
+    valuationDate: sanitizeIsoDateOnly(data.valuationDate) || undefined,
+    clientName: pickText("clientName", 180),
+    clientEmail: pickText("clientEmail", 180),
+    clientPhone: pickText("clientPhone", 60),
+    clientLegalType: pickText("clientLegalType", 180),
+    clientActivity: pickText("clientActivity", 240),
+    clientRepresentativeName: pickText("clientRepresentativeName", 180),
+    intendedUsers: pickText("intendedUsers", 500),
+    intendedUse: pickText("intendedUse", 1000),
+    inspectionLocation: pickText("inspectionLocation", 500),
+    inspectionMapUrl: pickText("inspectionMapUrl", 800),
+  };
+
+  const finalValue = sanitizeFinalValue(data.finalValue);
+  if (finalValue != null) summary.finalValue = finalValue;
+
+  const reportTemplateId = pickText("reportTemplateId", 120);
+  if (reportTemplateId) summary.reportTemplateId = reportTemplateId;
+
+  const cleaned = Object.fromEntries(
+    Object.entries(summary).filter(([, value]) => value != null && value !== ""),
+  ) as MvProjectReportData;
+
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
 const MV_VALUATION_WORKSPACE_MAX_JSON_CHARS = 9_500_000;
@@ -3840,6 +3890,31 @@ export class MachineValuationService implements OnModuleInit {
       locations: 1,
       contacts: 1,
       inspectionAssignments: 1,
+      reportData: {
+        valuationMethod: 1,
+        reportReference: 1,
+        reportTitle: 1,
+        valuationPurpose: 1,
+        valuePremise: 1,
+        valuationBasis: 1,
+        reportIssueDate: 1,
+        agreementDate: 1,
+        inspectionDate: 1,
+        valuationDate: 1,
+        clientName: 1,
+        clientEmail: 1,
+        clientPhone: 1,
+        clientLegalType: 1,
+        clientActivity: 1,
+        clientRepresentativeName: 1,
+        intendedUsers: 1,
+        intendedUse: 1,
+        inspectionLocation: 1,
+        inspectionMapUrl: 1,
+        finalValue: 1,
+        reportTemplateId: 1,
+      },
+      valuationAccountingWorkspace: { images: 1 },
     } as const;
 
     let projects: MvProjectMongoDoc[];
@@ -3868,7 +3943,7 @@ export class MachineValuationService implements OnModuleInit {
     const matchInProjects = { $match: { projectId: { $in: projectIds } } } as const;
     const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } } as const;
 
-    const [counts, itemCounts, sheetAgg] = await Promise.all([
+    const [counts, itemCounts, sheetAgg, picAssetAgg] = await Promise.all([
       db
         .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
         .aggregate<{ _id: ObjectId | null; count: number }>([matchInProjects, groupByProject])
@@ -3899,6 +3974,27 @@ export class MachineValuationService implements OnModuleInit {
           );
           return [] as { _id: ObjectId | null; count: number }[];
         }),
+      db
+        .collection<AssetDoc>(ASSETS_COLLECTION)
+        .aggregate<{ _id: ObjectId | null; picAssetCount: number; imageCount: number }>([
+          { $match: { projectId: { $in: projectIds }, ...MV_PHOTO_FOLDER_FILTER } },
+          {
+            $group: {
+              _id: "$projectId",
+              picAssetCount: { $sum: 1 },
+              imageCount: {
+                $sum: { $size: { $ifNull: ["$images", []] } },
+              },
+            },
+          },
+        ])
+        .toArray()
+        .catch((err) => {
+          this.logger.warn(
+            `listProjects: pic asset aggregate failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return [] as { _id: ObjectId | null; picAssetCount: number; imageCount: number }[];
+        }),
     ]);
 
     const countMap = new Map(
@@ -3915,6 +4011,20 @@ export class MachineValuationService implements OnModuleInit {
       sheetAgg
         .filter((c) => c._id != null)
         .map((c) => [c._id!.toString(), toSafeNonNegativeInt(c.count)] as [string, number]),
+    );
+    const picAssetMap = new Map(
+      picAssetAgg
+        .filter((c) => c._id != null)
+        .map(
+          (c) =>
+            [
+              c._id!.toString(),
+              {
+                picAssetCount: toSafeNonNegativeInt(c.picAssetCount),
+                imageCount: toSafeNonNegativeInt(c.imageCount),
+              },
+            ] as [string, { picAssetCount: number; imageCount: number }],
+        ),
     );
 
     const creatorIds = Array.from(
@@ -3950,6 +4060,11 @@ export class MachineValuationService implements OnModuleInit {
           this.logger.warn("listProjects: skipped project with missing/invalid _id");
           return null;
         }
+        const reportDataSummary = pickReportDataProgressSummary(p.reportData);
+        const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
+        const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
+        const valuationAccountImageCount = countValuationAccountImages(p.valuationAccountingWorkspace);
+
         return {
           _id: idStr,
           name: String(p.name ?? ""),
@@ -3968,8 +4083,17 @@ export class MachineValuationService implements OnModuleInit {
           subProjectCount:
             toSafeNonNegativeInt(countMap.get(idStr)) + toSafeNonNegativeInt(itemMap.get(idStr)),
           sheetCount: toSafeNonNegativeInt(sheetMap.get(idStr)),
+          assetImageCount,
+          picAssetCount,
+          valuationAccountImageCount,
+          progressPct: computeMvProjectProgressPct({
+            reportData: reportDataSummary,
+            assetImageCount,
+            valuationAccountImageCount,
+          }),
           workflowStatus: projectWorkflowStatus(p),
           reportType: projectReportType(p),
+          reportData: reportDataSummary,
           locations: sanitizeProjectLocations(p.locations, false),
           contacts: sanitizeProjectContacts(p.contacts, false),
           inspectionAssignments: sanitizeInspectionAssignments(
@@ -7272,6 +7396,14 @@ export class MachineValuationService implements OnModuleInit {
   }
 
   /* ───────── Header Options ───────── */
+
+  listProjectWorkflowStatuses() {
+    return MV_PROJECT_WORKFLOW_STATUSES.map((value) => ({
+      value,
+      labelAr: MV_PROJECT_WORKFLOW_STATUS_META[value].labelAr,
+      labelEn: MV_PROJECT_WORKFLOW_STATUS_META[value].labelEn,
+    }));
+  }
 
   async listHeaderOptions() {
     const db = await getMongoDb();

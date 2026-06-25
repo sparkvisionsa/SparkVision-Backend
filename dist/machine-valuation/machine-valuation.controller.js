@@ -57,6 +57,9 @@ let MachineValuationController = class MachineValuationController {
         (0, context_1.applyContextCookies)(res, context);
         return this.mvService.listProjects(toMvAccess(context));
     }
+    listProjectWorkflowStatuses() {
+        return this.mvService.listProjectWorkflowStatuses();
+    }
     async createProject(req, res, body) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
@@ -507,6 +510,12 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "listProjects", null);
+__decorate([
+    (0, common_1.Get)("project-workflow-statuses"),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", void 0)
+], MachineValuationController.prototype, "listProjectWorkflowStatuses", null);
 __decorate([
     (0, common_1.Post)("projects"),
     __param(0, (0, common_1.Req)()),

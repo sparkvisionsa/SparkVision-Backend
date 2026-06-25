@@ -21,6 +21,7 @@ const mongodb_1 = require("mongodb");
 const mongodb_2 = require("../server/mongodb");
 const collections_1 = require("../server/auth-tracking/collections");
 const collections_2 = require("./collections");
+const types_1 = require("./types");
 const digitalocean_spaces_service_1 = require("./digitalocean-spaces.service");
 const inspector_files_constants_1 = require("./inspector-files.constants");
 const inspector_files_util_1 = require("./inspector-files.util");
@@ -30,6 +31,7 @@ const mv_project_scope_util_1 = require("./mv-project-scope.util");
 const collections_3 = require("../assets/collections");
 const asset_import_utils_1 = require("../assets/asset-import.utils");
 const asset_import_constants_1 = require("../assets/asset-import.constants");
+const mv_project_progress_util_1 = require("./mv-project-progress.util");
 const MV_PHOTO_FOLDER_FILTER = { isAssetFolder: true };
 const EXTERNAL_ASSET_IMAGE_FETCH_TIMEOUT_MS = 15_000;
 const MV_VALUATION_EXCEL_SCOPE = "valuation-excel";
@@ -613,6 +615,45 @@ function sanitizeReportData(raw) {
         reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
         reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
     };
+}
+function pickReportDataProgressSummary(raw) {
+    if (!raw || typeof raw !== "object")
+        return undefined;
+    const data = raw;
+    const pickText = (key, maxLength = 500) => {
+        const value = sanitizeOptionalText(data[key], maxLength);
+        return value || undefined;
+    };
+    const summary = {
+        valuationMethod: pickText("valuationMethod", 120),
+        reportReference: pickText("reportReference", 120),
+        reportTitle: pickText("reportTitle", 220),
+        valuationPurpose: pickText("valuationPurpose", 120),
+        valuePremise: pickText("valuePremise", 120),
+        valuationBasis: pickText("valuationBasis", 220),
+        reportIssueDate: sanitizeIsoDateOnly(data.reportIssueDate) || undefined,
+        agreementDate: sanitizeIsoDateOnly(data.agreementDate) || undefined,
+        inspectionDate: sanitizeIsoDateOnly(data.inspectionDate) || undefined,
+        valuationDate: sanitizeIsoDateOnly(data.valuationDate) || undefined,
+        clientName: pickText("clientName", 180),
+        clientEmail: pickText("clientEmail", 180),
+        clientPhone: pickText("clientPhone", 60),
+        clientLegalType: pickText("clientLegalType", 180),
+        clientActivity: pickText("clientActivity", 240),
+        clientRepresentativeName: pickText("clientRepresentativeName", 180),
+        intendedUsers: pickText("intendedUsers", 500),
+        intendedUse: pickText("intendedUse", 1000),
+        inspectionLocation: pickText("inspectionLocation", 500),
+        inspectionMapUrl: pickText("inspectionMapUrl", 800),
+    };
+    const finalValue = sanitizeFinalValue(data.finalValue);
+    if (finalValue != null)
+        summary.finalValue = finalValue;
+    const reportTemplateId = pickText("reportTemplateId", 120);
+    if (reportTemplateId)
+        summary.reportTemplateId = reportTemplateId;
+    const cleaned = Object.fromEntries(Object.entries(summary).filter(([, value]) => value != null && value !== ""));
+    return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 const MV_VALUATION_WORKSPACE_MAX_JSON_CHARS = 9_500_000;
 function jsonDeepClone(value) {
@@ -3157,6 +3198,31 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             locations: 1,
             contacts: 1,
             inspectionAssignments: 1,
+            reportData: {
+                valuationMethod: 1,
+                reportReference: 1,
+                reportTitle: 1,
+                valuationPurpose: 1,
+                valuePremise: 1,
+                valuationBasis: 1,
+                reportIssueDate: 1,
+                agreementDate: 1,
+                inspectionDate: 1,
+                valuationDate: 1,
+                clientName: 1,
+                clientEmail: 1,
+                clientPhone: 1,
+                clientLegalType: 1,
+                clientActivity: 1,
+                clientRepresentativeName: 1,
+                intendedUsers: 1,
+                intendedUse: 1,
+                inspectionLocation: 1,
+                inspectionMapUrl: 1,
+                finalValue: 1,
+                reportTemplateId: 1,
+            },
+            valuationAccountingWorkspace: { images: 1 },
         };
         let projects;
         if (ctx.isSuperAdmin) {
@@ -3183,7 +3249,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const projectIds = projects.map((p) => p._id);
         const matchInProjects = { $match: { projectId: { $in: projectIds } } };
         const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } };
-        const [counts, itemCounts, sheetAgg] = await Promise.all([
+        const [counts, itemCounts, sheetAgg, picAssetAgg] = await Promise.all([
             db
                 .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
                 .aggregate([matchInProjects, groupByProject])
@@ -3208,6 +3274,25 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 this.logger.warn(`listProjects: sheet aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
                 return [];
             }),
+            db
+                .collection(collections_3.ASSETS_COLLECTION)
+                .aggregate([
+                { $match: { projectId: { $in: projectIds }, ...MV_PHOTO_FOLDER_FILTER } },
+                {
+                    $group: {
+                        _id: "$projectId",
+                        picAssetCount: { $sum: 1 },
+                        imageCount: {
+                            $sum: { $size: { $ifNull: ["$images", []] } },
+                        },
+                    },
+                },
+            ])
+                .toArray()
+                .catch((err) => {
+                this.logger.warn(`listProjects: pic asset aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
+                return [];
+            }),
         ]);
         const countMap = new Map(counts
             .filter((c) => c._id != null)
@@ -3218,6 +3303,15 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const sheetMap = new Map(sheetAgg
             .filter((c) => c._id != null)
             .map((c) => [c._id.toString(), toSafeNonNegativeInt(c.count)]));
+        const picAssetMap = new Map(picAssetAgg
+            .filter((c) => c._id != null)
+            .map((c) => [
+            c._id.toString(),
+            {
+                picAssetCount: toSafeNonNegativeInt(c.picAssetCount),
+                imageCount: toSafeNonNegativeInt(c.imageCount),
+            },
+        ]));
         const creatorIds = Array.from(new Set(projects
             .map((project) => (0, object_id_util_1.tryCoerceToObjectId)(project.userId))
             .filter((value) => value != null)));
@@ -3245,6 +3339,10 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 this.logger.warn("listProjects: skipped project with missing/invalid _id");
                 return null;
             }
+            const reportDataSummary = pickReportDataProgressSummary(p.reportData);
+            const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
+            const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
+            const valuationAccountImageCount = (0, mv_project_progress_util_1.countValuationAccountImages)(p.valuationAccountingWorkspace);
             return {
                 _id: idStr,
                 name: String(p.name ?? ""),
@@ -3263,8 +3361,17 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 updatedAt: mvProjectDateToIso(p.updatedAt),
                 subProjectCount: toSafeNonNegativeInt(countMap.get(idStr)) + toSafeNonNegativeInt(itemMap.get(idStr)),
                 sheetCount: toSafeNonNegativeInt(sheetMap.get(idStr)),
+                assetImageCount,
+                picAssetCount,
+                valuationAccountImageCount,
+                progressPct: (0, mv_project_progress_util_1.computeMvProjectProgressPct)({
+                    reportData: reportDataSummary,
+                    assetImageCount,
+                    valuationAccountImageCount,
+                }),
                 workflowStatus: projectWorkflowStatus(p),
                 reportType: projectReportType(p),
+                reportData: reportDataSummary,
                 locations: sanitizeProjectLocations(p.locations, false),
                 contacts: sanitizeProjectContacts(p.contacts, false),
                 inspectionAssignments: sanitizeInspectionAssignments(p.inspectionAssignments, sanitizeProjectLocations(p.locations, false)).map(serializeInspectionAssignment),
@@ -5848,6 +5955,13 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             filter.subProjectId = { $exists: false };
         const result = await db.collection(collections_2.MV_SHEETS_COLLECTION).deleteMany(filter);
         return { ok: true, deletedCount: result.deletedCount };
+    }
+    listProjectWorkflowStatuses() {
+        return types_1.MV_PROJECT_WORKFLOW_STATUSES.map((value) => ({
+            value,
+            labelAr: types_1.MV_PROJECT_WORKFLOW_STATUS_META[value].labelAr,
+            labelEn: types_1.MV_PROJECT_WORKFLOW_STATUS_META[value].labelEn,
+        }));
     }
     async listHeaderOptions() {
         const db = await (0, mongodb_2.getMongoDb)();

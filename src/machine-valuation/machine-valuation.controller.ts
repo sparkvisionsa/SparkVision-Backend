@@ -77,6 +77,11 @@ export class MachineValuationController {
     return this.mvService.listProjects(toMvAccess(context));
   }
 
+  @Get("project-workflow-statuses")
+  listProjectWorkflowStatuses() {
+    return this.mvService.listProjectWorkflowStatuses();
+  }
+
   @Post("projects")
   async createProject(
     @Req() req: Request,

@@ -37,6 +37,15 @@ export interface MvSpreadsheetMeta {
 export const MV_PROJECT_WORKFLOW_STATUSES = ["new", "review", "approved"] as const;
 export type MvProjectWorkflowStatus = (typeof MV_PROJECT_WORKFLOW_STATUSES)[number];
 
+export const MV_PROJECT_WORKFLOW_STATUS_META: Record<
+  MvProjectWorkflowStatus,
+  { labelAr: string; labelEn: string }
+> = {
+  new: { labelAr: "جديد", labelEn: "New" },
+  review: { labelAr: "قيد المراجعة", labelEn: "Under review" },
+  approved: { labelAr: "معتمد", labelEn: "Approved" },
+};
+
 export const MV_PROJECT_REPORT_TYPES = ["simple", "advanced"] as const;
 export type MvProjectReportType = (typeof MV_PROJECT_REPORT_TYPES)[number];
 
