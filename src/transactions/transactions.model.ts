@@ -60,6 +60,9 @@ export type EvalData = {
   ownerName: string;
   clientName: string;
   authorizedName: string;
+  authorizedLandCoverPct: string;
+  streetWidth: string;
+  streetFronts: string;
   propertyType: string;
   landUse: string;
 
@@ -166,6 +169,10 @@ export type EvalData = {
   maintenanceDesc: string;
   finishesDesc: string;
   replacementNotes: string;
+  investmentEntries: any[];
+  residualValueEntries: any[];
+  dcfEntries: any[];
+  rentalValueEntries: any[];
 
   subDivisionRecordNumber: string;
   otherUsers: string;
@@ -219,6 +226,9 @@ export function emptyEvalData(): EvalData {
     landUse: "",
     clientName: "",
     authorizedName: "",
+    authorizedLandCoverPct: "",
+    streetWidth: "",
+    streetFronts: "",
     northBoundary: "",
     northLength: "",
     southBoundary: "",
@@ -299,6 +309,10 @@ export function emptyEvalData(): EvalData {
     maintenanceDesc: "",
     finishesDesc: "",
     replacementNotes: "",
+    investmentEntries: [],
+    residualValueEntries: [],
+    dcfEntries: [],
+    rentalValueEntries: [],
     completionPct: "",
     subDivisionRecordNumber: "",
     otherUsers: "",
