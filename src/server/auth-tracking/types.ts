@@ -117,6 +117,48 @@ export interface CompanyReportLetterheadTemplate {
   signatureStampDataUrl?: string | null;
 }
 
+export interface CompanyAiReportTemplateVariable {
+  key: string;
+  label: string;
+  source: string;
+  required?: boolean;
+}
+
+export interface CompanyAiReportTemplateSection {
+  id: string;
+  title: string;
+  order: number;
+  description?: string;
+  dynamicVariables?: string[];
+}
+
+export interface CompanyAiReportTemplate {
+  id: string;
+  type: "AI Template";
+  name: string;
+  sourceFileName?: string;
+  createdAt: string;
+  updatedAt: string;
+  analysisSummary?: string;
+  coverImageDataUrl?: string | null;
+  pageImageDataUrl?: string | null;
+  landscapePageImageDataUrl?: string | null;
+  theme?: Record<string, unknown>;
+  layout?: Record<string, unknown>;
+  sections?: CompanyAiReportTemplateSection[];
+  dynamicVariables?: CompanyAiReportTemplateVariable[];
+  rules?: string[];
+  templateJson?: Record<string, unknown>;
+}
+
+export interface CompanyReportWordTemplate {
+  fileName?: string;
+  fileUrl?: string | null;
+  uploadedAt?: string;
+  sizeBytes?: number;
+  bookmarkNames?: string[];
+}
+
 /** قوالب التقرير النهائي الافتراضية على مستوى الشركة. */
 export interface CompanyReportDefaults {
   scope?: CompanyReportScopeDefaults;
@@ -125,6 +167,8 @@ export interface CompanyReportDefaults {
   customGroups?: CompanyReportCustomGroup[];
   customSections?: CompanyReportCustomSection[];
   letterhead?: CompanyReportLetterheadTemplate;
+  aiTemplates?: CompanyAiReportTemplate[];
+  wordTemplate?: CompanyReportWordTemplate | null;
 }
 
 /**

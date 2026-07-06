@@ -13,6 +13,10 @@ export interface MvPhotoFolderAssetFields {
   /** اسم المجلد (يطابق اسم مجلد mv_subprojects تحت 2.صور المعاينة) */
   name?: string | null;
   writtenDescription?: string | null;
+  /** نوع فرعي عند ‎assetType === "other"‎ (مثل ‎sofa‎) — من التطبيق أو ‎rawData‎ */
+  subAssetType?: string | null;
+  /** الكمية — لأصول ‎other‎ */
+  quantity?: number | string | null;
   code?: string | null;
   /** طراز/وصف نموذجي لمعاينة الصور — منفصل عن حقول الأنواع الأخرى */
   model?: string | null;

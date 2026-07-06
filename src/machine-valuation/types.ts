@@ -161,6 +161,11 @@ export interface MvProjectReportData {
   reportHiddenAnchorIds?: string[];
   /** اتجاهات صفحات التقرير اليدوية، مفاتيحها anchor الصفحة أو معرف الصورة. */
   reportPageOrientations?: Record<string, MvReportPageOrientationPreference>;
+  /** معرف ملف قالب Word (.docx) المرفوع لدمج التقرير النهائي. */
+  wordReportTemplateFileId?: string;
+  wordReportTemplateFileName?: string;
+  wordReportTemplatePlaceholders?: string[];
+  wordReportTemplateAnalyzedAt?: string;
 }
 
 export interface MvProjectLocation {
@@ -307,6 +312,8 @@ export interface PicAssetDoc {
   writtenDescription: string | null;
   condition: string | null;
   assetType: AssetType;
+  subAssetType: string | null;
+  quantity: number | string | null;
   brand: string | null;
   code: string | null;
   model: string | null;
@@ -330,6 +337,8 @@ export type PicAssetPatch = Partial<{
   /** ملاحظات نصية — تُكتب في ‎rawData/normalizedData‎ كما في ‎assets.service‎ */
   notes: string | null;
   assetType: AssetType;
+  subAssetType: string | null;
+  quantity: number | string | null;
   brand: string | null;
   code: string | null;
   model: string | null;

@@ -33,12 +33,14 @@ import type {
   ActivityDoc,
   AdminConfigDoc,
   CompanyDoc,
+  CompanyAiReportTemplate,
   CompanyReportCustomGroup,
   CompanyReportCustomSection,
   CompanyMongoDoc,
   CompanyMembershipRole,
   CompanyReportDefaults,
   CompanyReportLetterheadTemplate,
+  CompanyReportWordTemplate,
   GuestAccessStatus,
   PublicUser,
   PublicUserProfile,
@@ -1720,7 +1722,42 @@ function sanitizeReportDefaultsText(value: unknown, max: number): string {
 const REPORT_DEFAULTS_IMAGE_DATA_URL_MAX_CHARS = 12_000_000;
 const REPORT_DEFAULTS_IMAGE_FILE_MAX_BYTES = 8 * 1024 * 1024;
 const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
+const REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS = 40_000_000;
+const REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME}`;
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE: CompanyReportWordTemplate = {
+  fileName: PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
+  fileUrl: PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
+  uploadedAt: "2026-07-04T00:00:00.000Z",
+  sizeBytes: 813_413,
+  bookmarkNames: [
+    "عميلغلاف",
+    "عنوان",
+    "عميل",
+    "الغرض",
+    "تاريختقييم",
+    "تاريخاتفاق",
+    "تاريخمعاينة",
+    "تاريخاصدار",
+    "عميلهوية",
+    "عنواناصل",
+    "غرضالتقييم",
+    "عميلاستخدام",
+    "فرضية",
+    "فرضية1",
+    "عنوانغ",
+    "موقع",
+    "تاريختقييمت",
+    "تاريخمعاين",
+    "قوقل",
+    "قيمة",
+    "قيمةاحرف",
+    "صورحسابات",
+    "صوراصول",
+  ],
+};
 const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
   "coverImageDataUrl",
   "pageImageDataUrl",
@@ -1730,7 +1767,11 @@ const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
   "signatureStampDataUrl",
 ] as const;
 
-type ReportDefaultsLetterheadImageField = (typeof REPORT_DEFAULTS_LETTERHEAD_FIELDS)[number];
+const REPORT_DEFAULTS_AI_TEMPLATE_IMAGE_FIELDS = [
+  "coverImageDataUrl",
+  "pageImageDataUrl",
+  "landscapePageImageDataUrl",
+] as const;
 
 function isReportDefaultsImageReference(value: string): boolean {
   return (
@@ -1753,6 +1794,31 @@ function sanitizeReportDefaultsImageReference(value: unknown): string | null {
   return null;
 }
 
+function isReportDefaultsWordTemplateUrl(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    ((value.trim().startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX) &&
+      value.trim().toLowerCase().endsWith(".docx")) ||
+      value.trim() === PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL)
+  );
+}
+
+function parseReportDefaultsWordTemplateDataUrl(value: string): Buffer | null {
+  const match = value.match(
+    /^data:(application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/octet-stream|application\/zip);base64,([a-z0-9+/=\s]+)$/i,
+  );
+  if (!match) return null;
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (
+    buffer.byteLength <= 0 ||
+    buffer.byteLength > REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES ||
+    buffer.subarray(0, 2).toString("utf8") !== "PK"
+  ) {
+    return null;
+  }
+  return buffer;
+}
+
 function parseReportDefaultsImageDataUrl(value: string): { buffer: Buffer; ext: string } | null {
   const match = value.match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,([a-z0-9+/=\s]+)$/i);
   if (!match) return null;
@@ -1768,7 +1834,7 @@ function parseReportDefaultsImageDataUrl(value: string): { buffer: Buffer; ext: 
 
 async function persistCompanyReportLetterheadImage(
   companyId: string,
-  field: ReportDefaultsLetterheadImageField,
+  field: string,
   value: unknown,
 ): Promise<string | null> {
   if (typeof value !== "string") return null;
@@ -1789,11 +1855,63 @@ async function persistCompanyReportLetterheadImage(
   }
 
   const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const safeField = field.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120) || "image";
   const dir = join(process.cwd(), "uploads", "company-report-templates", safeCompanyId);
   await mkdir(dir, { recursive: true });
-  const filename = `${field}-${Date.now()}-${randomId()}.${parsed.ext}`;
+  const filename = `${safeField}-${Date.now()}-${randomId()}.${parsed.ext}`;
   await writeFile(join(dir, filename), parsed.buffer);
   return `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
+}
+
+async function persistCompanyReportWordTemplate(
+  companyId: string,
+  value: unknown,
+): Promise<Record<string, unknown> | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  const fileName =
+    sanitizeReportDefaultsText(data.fileName, 240).replace(/[\\/:*?"<>|]+/g, "-") || "word-template.docx";
+  const uploadedAt = sanitizeReportDefaultsText(data.uploadedAt, 40) || new Date().toISOString();
+  const bookmarkNames = Array.isArray(data.bookmarkNames)
+    ? data.bookmarkNames
+        .slice(0, 300)
+        .map((name) => sanitizeReportDefaultsText(name, 120))
+        .filter(Boolean)
+    : [];
+  const fileDataUrl = typeof data.fileDataUrl === "string" ? data.fileDataUrl.trim() : "";
+
+  if (!fileDataUrl) {
+    if (!isReportDefaultsWordTemplateUrl(data.fileUrl)) return null;
+    return {
+      fileName,
+      fileUrl: data.fileUrl.trim().slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS),
+      uploadedAt,
+      sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
+      bookmarkNames,
+    };
+  }
+
+  if (fileDataUrl.length > REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS) {
+    throw new HttpError(400, "invalid_payload", "Word template is too large.");
+  }
+
+  const buffer = parseReportDefaultsWordTemplateDataUrl(fileDataUrl);
+  if (!buffer) {
+    throw new HttpError(400, "invalid_payload", "Word template must be a valid .docx file no larger than 25MB.");
+  }
+
+  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const dir = join(process.cwd(), "uploads", "company-report-templates", safeCompanyId);
+  await mkdir(dir, { recursive: true });
+  const filename = `word-template-${Date.now()}-${randomId()}.docx`;
+  await writeFile(join(dir, filename), buffer);
+  return {
+    fileName,
+    fileUrl: `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`,
+    uploadedAt,
+    sizeBytes: buffer.byteLength,
+    bookmarkNames,
+  };
 }
 
 async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: string): Promise<Record<string, unknown>> {
@@ -1804,13 +1922,37 @@ async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: strin
     data.letterhead && typeof data.letterhead === "object" && !Array.isArray(data.letterhead)
       ? { ...(data.letterhead as Record<string, unknown>) }
       : null;
-  if (!letterheadRaw) return data;
 
-  const letterhead: Record<string, unknown> = { ...letterheadRaw };
-  for (const field of REPORT_DEFAULTS_LETTERHEAD_FIELDS) {
-    letterhead[field] = await persistCompanyReportLetterheadImage(companyId, field, letterheadRaw[field]);
+  if (letterheadRaw) {
+    const letterhead: Record<string, unknown> = { ...letterheadRaw };
+    for (const field of REPORT_DEFAULTS_LETTERHEAD_FIELDS) {
+      letterhead[field] = await persistCompanyReportLetterheadImage(companyId, field, letterheadRaw[field]);
+    }
+    data.letterhead = letterhead;
   }
-  data.letterhead = letterhead;
+
+  if ("wordTemplate" in data) {
+    data.wordTemplate = await persistCompanyReportWordTemplate(companyId, data.wordTemplate);
+  }
+
+  if (Array.isArray(data.aiTemplates)) {
+    data.aiTemplates = await Promise.all(
+      data.aiTemplates.slice(0, 20).map(async (template, index) => {
+        const templateRaw =
+          template && typeof template === "object" && !Array.isArray(template)
+            ? { ...(template as Record<string, unknown>) }
+            : {};
+        for (const field of REPORT_DEFAULTS_AI_TEMPLATE_IMAGE_FIELDS) {
+          templateRaw[field] = await persistCompanyReportLetterheadImage(
+            companyId,
+            `ai-${index + 1}-${field}`,
+            templateRaw[field],
+          );
+        }
+        return templateRaw;
+      }),
+    );
+  }
   return data;
 }
 
@@ -1879,6 +2021,116 @@ function sanitizeCompanyReportLetterheadTemplate(value: unknown): CompanyReportL
   };
 }
 
+function sanitizeCompanyReportWordTemplate(value: unknown): CompanyReportWordTemplate | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  const fileUrl = isReportDefaultsWordTemplateUrl(data.fileUrl)
+    ? data.fileUrl.trim().slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS)
+    : "";
+  if (!fileUrl) return null;
+  const bookmarkNames = Array.isArray(data.bookmarkNames)
+    ? data.bookmarkNames
+        .slice(0, 300)
+        .map((name) => sanitizeReportDefaultsText(name, 120))
+        .filter(Boolean)
+    : [];
+  return {
+    fileName: sanitizeReportDefaultsText(data.fileName, 240) || "word-template.docx",
+    fileUrl,
+    uploadedAt: sanitizeReportDefaultsText(data.uploadedAt, 40),
+    sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
+    bookmarkNames,
+  };
+}
+
+function sanitizeCompanyAiTemplateObject(value: unknown, maxChars: number): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized || serialized.length > maxChars) return {};
+    return JSON.parse(serialized) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function sanitizeCompanyAiTemplateStringList(value: unknown, maxItems: number, maxChars: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value.slice(0, maxItems)) {
+    const normalized = sanitizeReportDefaultsText(item, maxChars);
+    if (normalized) out.push(normalized);
+  }
+  return out;
+}
+
+function sanitizeCompanyAiReportTemplates(value: unknown): CompanyAiReportTemplate[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 20)
+    .map((item, index): CompanyAiReportTemplate | null => {
+      const data =
+        item && typeof item === "object" && !Array.isArray(item)
+          ? (item as Record<string, unknown>)
+          : {};
+      const name = sanitizeReportDefaultsText(data.name, 160);
+      const createdAt = sanitizeReportDefaultsText(data.createdAt, 40) || new Date().toISOString();
+      const updatedAt = sanitizeReportDefaultsText(data.updatedAt, 40) || createdAt;
+      const sections = Array.isArray(data.sections)
+        ? data.sections.slice(0, 60).map((section, sectionIndex) => {
+            const sectionData =
+              section && typeof section === "object" && !Array.isArray(section)
+                ? (section as Record<string, unknown>)
+                : {};
+            return {
+              id: sanitizeReportDefaultsText(sectionData.id, 120) || `section-${sectionIndex + 1}`,
+              title: sanitizeReportDefaultsText(sectionData.title, 220) || `Section ${sectionIndex + 1}`,
+              order:
+                typeof sectionData.order === "number" && Number.isFinite(sectionData.order)
+                  ? Math.max(1, Math.min(500, Math.round(sectionData.order)))
+                  : sectionIndex + 1,
+              description: sanitizeReportDefaultsText(sectionData.description, 1000),
+              dynamicVariables: sanitizeCompanyAiTemplateStringList(sectionData.dynamicVariables, 80, 120),
+            };
+          })
+        : [];
+      const dynamicVariables = Array.isArray(data.dynamicVariables)
+        ? data.dynamicVariables.slice(0, 120).map((variable, variableIndex) => {
+            const variableData =
+              variable && typeof variable === "object" && !Array.isArray(variable)
+                ? (variable as Record<string, unknown>)
+                : {};
+            return {
+              key: sanitizeReportDefaultsText(variableData.key, 120) || `variable_${variableIndex + 1}`,
+              label: sanitizeReportDefaultsText(variableData.label, 220) || `Variable ${variableIndex + 1}`,
+              source: sanitizeReportDefaultsText(variableData.source, 220) || "project",
+              required: variableData.required === true,
+            };
+          })
+        : [];
+      if (!name && sections.length === 0 && dynamicVariables.length === 0) return null;
+      return {
+        id: sanitizeReportDefaultsText(data.id, 120) || `ai-template-${index + 1}`,
+        type: "AI Template",
+        name: name || `AI Template ${index + 1}`,
+        sourceFileName: sanitizeReportDefaultsText(data.sourceFileName, 240),
+        createdAt,
+        updatedAt,
+        analysisSummary: sanitizeReportDefaultsText(data.analysisSummary, 2000),
+        coverImageDataUrl: sanitizeReportDefaultsImageReference(data.coverImageDataUrl),
+        pageImageDataUrl: sanitizeReportDefaultsImageReference(data.pageImageDataUrl),
+        landscapePageImageDataUrl: sanitizeReportDefaultsImageReference(data.landscapePageImageDataUrl),
+        theme: sanitizeCompanyAiTemplateObject(data.theme, 20_000),
+        layout: sanitizeCompanyAiTemplateObject(data.layout, 20_000),
+        sections,
+        dynamicVariables,
+        rules: sanitizeCompanyAiTemplateStringList(data.rules, 80, 1000),
+        templateJson: sanitizeCompanyAiTemplateObject(data.templateJson, 200_000),
+      } satisfies CompanyAiReportTemplate;
+    })
+    .filter((item): item is CompanyAiReportTemplate => item != null);
+}
+
 function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const scopeRaw =
@@ -1921,6 +2173,8 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
     customGroups: sanitizeCompanyReportCustomGroups(data.customGroups),
     customSections: sanitizeCompanyReportCustomSections(data.customSections),
     letterhead: sanitizeCompanyReportLetterheadTemplate(data.letterhead),
+    aiTemplates: sanitizeCompanyAiReportTemplates(data.aiTemplates),
+    wordTemplate: sanitizeCompanyReportWordTemplate(data.wordTemplate),
   };
 }
 
@@ -1929,8 +2183,38 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
  * missing field — guarantees the company panel & report preview always have
  * a meaningful initial value to render or override.
  */
+type CompanyReportDefaultsContext = {
+  companyName?: string | null;
+  adminPhone?: string | null;
+  adminUsername?: string | null;
+};
+
+function normalizeCompanyMatchText(value?: string | null): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ؤ/g, "و")
+    .replace(/ئ/g, "ي")
+    .replace(/[^a-z0-9\u0600-\u06ff]+/g, "");
+}
+
+function normalizePhoneDigits(value?: string | null): string {
+  return (value ?? "").replace(/\D/g, "");
+}
+
+export function shouldUseProOptionBundledWordTemplate(context?: CompanyReportDefaultsContext): boolean {
+  const companyName = normalizeCompanyMatchText(context?.companyName);
+  const adminDigits = normalizePhoneDigits(context?.adminPhone ?? context?.adminUsername);
+  const looksLikeProOption =
+    companyName.includes("prooption") ||
+    (companyName.includes("برو") &&
+      (companyName.includes("اوبشن") || companyName.includes("اوبشنز") || companyName.includes("option")));
+  return looksLikeProOption || adminDigits.startsWith("966555");
+}
+
 export function resolveCompanyReportDefaults(
   stored: CompanyReportDefaults | undefined | null,
+  context?: CompanyReportDefaultsContext,
 ): CompanyReportDefaults {
   const seeds = buildDefaultCompanyReportDefaults();
   const scopeStored = stored?.scope ?? {};
@@ -1939,6 +2223,11 @@ export function resolveCompanyReportDefaults(
   const customGroupsStored = sanitizeCompanyReportCustomGroups(stored?.customGroups);
   const customSectionsStored = sanitizeCompanyReportCustomSections(stored?.customSections);
   const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
+  const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
+  const wordTemplateStored = sanitizeCompanyReportWordTemplate(stored?.wordTemplate);
+  const wordTemplateDefault = shouldUseProOptionBundledWordTemplate(context)
+    ? PRO_OPTION_BUNDLED_WORD_TEMPLATE
+    : null;
   return {
     scope: {
       complianceStatement:
@@ -2008,6 +2297,8 @@ export function resolveCompanyReportDefaults(
     customGroups: customGroupsStored,
     customSections: customSectionsStored,
     letterhead: letterheadStored,
+    aiTemplates: aiTemplatesStored,
+    wordTemplate: wordTemplateStored ?? wordTemplateDefault,
   };
 }
 
@@ -2019,6 +2310,78 @@ const reportDefaultsImageDataUrlSchema = z
     z.null(),
   ])
   .optional();
+
+const aiTemplateStringListSchema = z.array(z.string().max(1000)).max(120);
+
+const aiTemplateSchema = z.object({
+  id: z.string().max(120).optional(),
+  type: z.literal("AI Template").optional(),
+  name: z.string().max(160).optional(),
+  sourceFileName: z.string().max(240).optional(),
+  createdAt: z.string().max(40).optional(),
+  updatedAt: z.string().max(40).optional(),
+  analysisSummary: z.string().max(2000).optional(),
+  coverImageDataUrl: reportDefaultsImageDataUrlSchema,
+  pageImageDataUrl: reportDefaultsImageDataUrlSchema,
+  landscapePageImageDataUrl: reportDefaultsImageDataUrlSchema,
+  theme: z.record(z.unknown()).optional(),
+  layout: z.record(z.unknown()).optional(),
+  sections: z
+    .array(
+      z.object({
+        id: z.string().max(120).optional(),
+        title: z.string().max(220).optional(),
+        order: z.number().optional(),
+        description: z.string().max(1000).optional(),
+        dynamicVariables: z.array(z.string().max(120)).max(80).optional(),
+      }),
+    )
+    .max(60)
+    .optional(),
+  dynamicVariables: z
+    .array(
+      z.object({
+        key: z.string().max(120).optional(),
+        label: z.string().max(220).optional(),
+        source: z.string().max(220).optional(),
+        required: z.boolean().optional(),
+      }),
+    )
+    .max(120)
+    .optional(),
+  rules: aiTemplateStringListSchema.optional(),
+  templateJson: z.record(z.unknown()).optional(),
+});
+
+const wordTemplateSchema = z
+  .object({
+    fileName: z.string().max(240).optional(),
+    fileUrl: z
+      .union([
+        z.string().max(REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS).refine(isReportDefaultsWordTemplateUrl, {
+          message: "word template URL must be a persisted .docx upload URL or bundled /files .docx URL",
+        }),
+        z.literal(""),
+        z.null(),
+      ])
+      .optional(),
+    fileDataUrl: z
+      .union([
+        z
+          .string()
+          .max(REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS)
+          .refine((value) => value.startsWith("data:"), { message: "word template must be a data URL" }),
+        z.literal(""),
+        z.null(),
+      ])
+      .optional(),
+    uploadedAt: z.string().max(40).optional(),
+    sizeBytes: z.number().optional(),
+    bookmarkNames: z.array(z.string().max(120)).max(300).optional(),
+  })
+  .partial()
+  .optional()
+  .nullable();
 
 const updateCompanyReportDefaultsSchema = z.object({
   scope: z
@@ -2092,6 +2455,8 @@ const updateCompanyReportDefaultsSchema = z.object({
     })
     .partial()
     .optional(),
+  aiTemplates: z.array(aiTemplateSchema).max(20).optional(),
+  wordTemplate: wordTemplateSchema,
 });
 
 const updateCompanyBrandingSchema = z
@@ -2506,16 +2871,17 @@ async function resolveCompanyAdminReportIdentity(
   db: Awaited<ReturnType<typeof getMongoDb>>,
   companyId: import("mongodb").ObjectId,
   company: { adminUserId?: import("mongodb").ObjectId } | null,
-): Promise<{ membershipNo: string | null; name: string | null }> {
+): Promise<{ membershipNo: string | null; name: string | null; phone: string | null }> {
   const { users, userCompanyMemberships } = getAuthCollections(db);
   const adminMem = await userCompanyMemberships.findOne({ companyId, role: "company_admin" });
   const adminUserId = adminMem?.userId ?? company?.adminUserId ?? null;
-  if (!adminUserId) return { membershipNo: null, name: null };
+  if (!adminUserId) return { membershipNo: null, name: null, phone: null };
   const adminUser = await users.findOne({ _id: adminUserId });
-  if (!adminUser) return { membershipNo: null, name: null };
+  if (!adminUser) return { membershipNo: null, name: null, phone: null };
   return {
     membershipNo: normalizeOptionalText(adminUser.valuationReportMembershipNo) ?? null,
     name: normalizeOptionalText(adminUser.username) ?? null,
+    phone: normalizeOptionalText(adminUser.phone) ?? null,
   };
 }
 
@@ -2575,7 +2941,11 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
       companyAdminMembershipNo: companyAdminIdentity.membershipNo,
       companyAdminName: companyAdminIdentity.name,
       reportSignatoryRows,
-      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
+      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults, {
+        companyName: company?.name,
+        adminPhone: companyAdminIdentity.phone,
+        adminUsername: companyAdminIdentity.name,
+      }),
     },
   };
 }
@@ -2595,7 +2965,11 @@ export async function getCompanyReportDefaultsForCompanyAdmin(request: Request) 
   return {
     context,
     payload: {
-      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults),
+      reportDefaults: resolveCompanyReportDefaults(company?.reportDefaults, {
+        companyName: company?.name,
+        adminPhone: context.user.phone,
+        adminUsername: context.user.username,
+      }),
     },
   };
 }
@@ -2637,7 +3011,14 @@ export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request
 
   return {
     context,
-    payload: { ok: true as const, reportDefaults: resolveCompanyReportDefaults(sanitized) },
+    payload: {
+      ok: true as const,
+      reportDefaults: resolveCompanyReportDefaults(sanitized, {
+        companyName: context.company.name,
+        adminPhone: context.user.phone,
+        adminUsername: context.user.username,
+      }),
+    },
   };
 }
 

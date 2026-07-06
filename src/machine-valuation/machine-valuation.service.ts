@@ -707,6 +707,10 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     reportInsertedBlocks: sanitizeReportInsertedBlocks(data.reportInsertedBlocks),
     reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
     reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
+    wordReportTemplateFileId: sanitizeOptionalText(data.wordReportTemplateFileId, 80),
+    wordReportTemplateFileName: sanitizeOptionalText(data.wordReportTemplateFileName, 240),
+    wordReportTemplatePlaceholders: sanitizeReportAnchorIds(data.wordReportTemplatePlaceholders),
+    wordReportTemplateAnalyzedAt: sanitizeIsoDateOnly(data.wordReportTemplateAnalyzedAt),
   };
 }
 
@@ -1055,6 +1059,8 @@ function buildPicAssetDocument(
     isAssetFolder: true,
     writtenDescription: null,
     condition: null,
+    subAssetType: null,
+    quantity: null,
     brand: null,
     code: null,
     model: null,
@@ -1576,6 +1582,50 @@ function resolvePicAssetNotes(doc: PicAssetNotesSource | null | undefined): stri
   return null;
 }
 
+function resolvePicAssetSubAssetType(doc: {
+  subAssetType?: unknown;
+  rawData?: Record<string, unknown> | null;
+  normalizedData?: Record<string, unknown> | null;
+} | null | undefined): string | null {
+  if (!doc) return null;
+  const pick = (v: unknown): string | null => {
+    if (typeof v === "string") {
+      const t = v.trim();
+      return t ? t : null;
+    }
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return null;
+  };
+  const top = pick(doc.subAssetType);
+  if (top) return top;
+  const norm = pick(doc.normalizedData?.subAssetType);
+  if (norm) return norm;
+  return pick(doc.rawData?.subAssetType);
+}
+
+function resolvePicAssetQuantity(doc: {
+  quantity?: unknown;
+  rawData?: Record<string, unknown> | null;
+  normalizedData?: Record<string, unknown> | null;
+} | null | undefined): number | string | null {
+  if (!doc) return null;
+  const pick = (v: unknown): number | string | null => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (!t) return null;
+      const n = Number(t);
+      return Number.isFinite(n) ? n : t;
+    }
+    return null;
+  };
+  const top = pick(doc.quantity);
+  if (top != null) return top;
+  const norm = pick(doc.normalizedData?.quantity);
+  if (norm != null) return norm;
+  return pick(doc.rawData?.quantity);
+}
+
 function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; projectId: ObjectId }) {
   const parentRaw = (pic as { parent?: ObjectId | null }).parent;
   const createdSrc =
@@ -1607,6 +1657,8 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
      */
     notes: resolvePicAssetNotes(pic as PicAssetNotesSource),
     assetType: normalizeAssetTypeForApi((pic as { assetType?: unknown }).assetType),
+    subAssetType: resolvePicAssetSubAssetType(pic),
+    quantity: coerceNumberishField(resolvePicAssetQuantity(pic)),
     brand: pic.brand,
     code: pic.code,
     model: pic.model,
@@ -3004,6 +3056,8 @@ export class MachineValuationService implements OnModuleInit {
         writtenDescription: (d as { writtenDescription?: string | null }).writtenDescription ?? null,
         condition: (d as { condition?: string | null }).condition ?? null,
         assetType: ((d as { assetType?: AssetType }).assetType ?? "other") as AssetType,
+        subAssetType: (d as { subAssetType?: string | null }).subAssetType ?? null,
+        quantity: (d as { quantity?: number | string | null }).quantity ?? null,
         brand: (d as { brand?: string | null }).brand ?? null,
         code: (d as { code?: string | null }).code ?? null,
         model: (d as { model?: string | null }).model ?? null,
@@ -3027,6 +3081,8 @@ export class MachineValuationService implements OnModuleInit {
         writtenDescription: pad.writtenDescription,
         condition: pad.condition,
         assetType: pad.assetType,
+        subAssetType: pad.subAssetType,
+        quantity: pad.quantity,
         brand: pad.brand,
         code: pad.code,
         model: pad.model,
@@ -5537,6 +5593,8 @@ export class MachineValuationService implements OnModuleInit {
         "condition",
         "notes",
         "assetType",
+        "subAssetType",
+        "quantity",
         "brand",
         "code",
         "model",
@@ -5628,6 +5686,24 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("Invalid assetType");
       }
       $set.assetType = b.assetType as AssetType;
+    }
+    if (b.subAssetType !== undefined) {
+      if (b.subAssetType !== null && typeof b.subAssetType !== "string") {
+        throw new BadRequestException("subAssetType must be a string or null");
+      }
+      const subText = b.subAssetType === null ? "" : b.subAssetType.trim();
+      $set.subAssetType = subText || null;
+      $set["rawData.subAssetType"] = subText;
+      $set["normalizedData.subAssetType"] = subText;
+    }
+    if (b.quantity !== undefined) {
+      if (b.quantity !== null && typeof b.quantity !== "string" && typeof b.quantity !== "number") {
+        throw new BadRequestException("quantity must be a number, string, or null");
+      }
+      const q = coerceNumberishField(b.quantity);
+      $set.quantity = q;
+      $set["rawData.quantity"] = q;
+      $set["normalizedData.quantity"] = q;
     }
     for (const key of ["brand", "code", "model"] as const) {
       if (b[key] !== undefined) {

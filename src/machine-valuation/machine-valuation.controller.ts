@@ -24,6 +24,7 @@ import type { Request, Response } from "express";
 import { MachineValuationService } from "./machine-valuation.service";
 import { FileParserService } from "./file-parser.service";
 import { MvRealtimeService, type MvRealtimeEventType } from "./mv-realtime.service";
+import { WordTemplateMergeService } from "./word-template-merge.service";
 import {
   ASSET_IMPORT_MAX_FILE_BYTES,
   VALUATION_EXCEL_MAX_FILE_BYTES,
@@ -62,6 +63,7 @@ export class MachineValuationController {
     private readonly mvService: MachineValuationService,
     private readonly fileParser: FileParserService,
     private readonly mvRealtime: MvRealtimeService,
+    private readonly wordTemplateMerge: WordTemplateMergeService,
   ) {}
 
   private publishRealtime(projectId: string, type: MvRealtimeEventType, reason: string) {
@@ -807,6 +809,27 @@ export class MachineValuationController {
       subProjectId,
       preferDigitalOcean ? { preferDigitalOcean: true } : {},
     );
+  }
+
+  @Post("projects/:pid/word-template/merge")
+  async mergeWordTemplate(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param("pid") projectId: string,
+    @Body()
+    body: {
+      templateFileId?: string;
+      assetImageUrls?: string[];
+      valuationImageUrls?: string[];
+      assetImagesBase64?: string[];
+      valuationImagesBase64?: string[];
+      textValues?: Record<string, string>;
+      textByBookmarkName?: Record<string, string>;
+    },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.wordTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body, res);
   }
 
   @Get("projects/:pid/files/:fid/download")
