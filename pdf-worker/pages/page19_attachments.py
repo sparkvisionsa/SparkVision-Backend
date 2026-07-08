@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import io
+import math
+from typing import List
+
 """
 page19_attachments.py
 =====================
@@ -15,11 +20,6 @@ Rules
 Each page reuses the same branded header / footer shell as every other
 page in the report.
 """
-
-import base64
-import io
-import math
-from typing import List
 
 # pdf2image is available wherever Poppler is installed (same venv as WeasyPrint).
 # If it's missing the module fails gracefully — PDF pages are simply skipped

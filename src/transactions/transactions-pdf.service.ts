@@ -160,8 +160,8 @@ function resolveFilePath(filePath: string): string {
  */
 function findPythonBin(): string {
   const venvPaths = [
-    path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
-    path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"), // Windows
+    path.join(process.cwd(), "pdf-worker", ".venv", "bin", "python"),
+    path.join(process.cwd(), "pdf-worker", ".venv", "Scripts", "python.exe"), // Windows
   ];
   for (const p of venvPaths) {
     if (fs.existsSync(p)) return p;
@@ -218,8 +218,11 @@ async function runPythonWorker(payload: object): Promise<Buffer> {
 
     // Write JSON payload to stdin and close it
     const json = JSON.stringify(payload);
-    child.stdin.write(json, "utf8");
-    child.stdin.end();
+    child.stdin.on("error", (err) => {
+      console.error("stdin error:", err);
+    });
+
+    child.stdin.end(json, "utf8");
   });
 }
 
