@@ -39,12 +39,15 @@ const ALLOWED_FIELD_TYPES: TemplateFieldType[] = [
   "neighborhood",
 ];
 
-const CLIENT_PRODUCT_IDS = ["real-estate-valuation", "machine-valuation"] as const;
+const CLIENT_PRODUCT_IDS = [
+  "real-estate-valuation",
+  "machine-valuation",
+] as const;
 type ClientProductId = (typeof CLIENT_PRODUCT_IDS)[number];
 const DEFAULT_CLIENT_PRODUCT_ID: ClientProductId = "real-estate-valuation";
 
 type ClientScope = {
-  companyId: Types.ObjectId;
+  companyId: Types.ObjectId | null;
   productId: ClientProductId;
 };
 
@@ -68,7 +71,10 @@ function normalizeClientProductId(raw: unknown): ClientProductId {
   return DEFAULT_CLIENT_PRODUCT_ID;
 }
 
-function queryValue(query: Record<string, unknown> | undefined, key: string): unknown {
+function queryValue(
+  query: Record<string, unknown> | undefined,
+  key: string,
+): unknown {
   const value = query?.[key];
   return Array.isArray(value) ? value[0] : value;
 }
@@ -122,7 +128,10 @@ function coerceStringMap(raw: unknown): Record<string, string> {
   return out;
 }
 
-function normalizeProductIds(raw: unknown, fallback: ClientProductId): ClientProductId[] {
+function normalizeProductIds(
+  raw: unknown,
+  fallback: ClientProductId,
+): ClientProductId[] {
   const values = Array.isArray(raw) ? raw : [];
   const out = values
     .map((item) => (typeof item === "string" ? item.trim() : ""))
@@ -136,18 +145,27 @@ function normalizeSystemData(raw: unknown): Record<string, ClientSystemData> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const out: Record<string, ClientSystemData> = {};
   for (const [productId, value] of Object.entries(raw)) {
-    if (!(CLIENT_PRODUCT_IDS as readonly string[]).includes(productId)) continue;
+    if (!(CLIENT_PRODUCT_IDS as readonly string[]).includes(productId))
+      continue;
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const rec = value as Record<string, unknown>;
     out[productId] = {
-      clientTypeId: typeof rec.clientTypeId === "string" ? rec.clientTypeId : "",
+      clientTypeId:
+        typeof rec.clientTypeId === "string" ? rec.clientTypeId : "",
       formTemplateId:
-        typeof rec.formTemplateId === "string" && rec.formTemplateId ? rec.formTemplateId : null,
+        typeof rec.formTemplateId === "string" && rec.formTemplateId
+          ? rec.formTemplateId
+          : null,
       templateFieldValues: coerceStringMap(rec.templateFieldValues),
-      clientAddress: typeof rec.clientAddress === "string" ? rec.clientAddress : "",
+      clientAddress:
+        typeof rec.clientAddress === "string" ? rec.clientAddress : "",
       bankName: typeof rec.bankName === "string" ? rec.bankName : "",
-      bankAccountAddress: typeof rec.bankAccountAddress === "string" ? rec.bankAccountAddress : "",
-      bankAccountNumber: typeof rec.bankAccountNumber === "string" ? rec.bankAccountNumber : "",
+      bankAccountAddress:
+        typeof rec.bankAccountAddress === "string"
+          ? rec.bankAccountAddress
+          : "",
+      bankAccountNumber:
+        typeof rec.bankAccountNumber === "string" ? rec.bankAccountNumber : "",
     };
   }
   return out;
@@ -267,11 +285,19 @@ function toTemplateJson(d: FormTemplateDocument) {
   };
 }
 
-function toClientJson(d: ClientDocument, productId: ClientProductId = DEFAULT_CLIENT_PRODUCT_ID) {
-  const raw = d.toObject ? (d.toObject() as unknown as Record<string, unknown>) : (d as unknown as Record<string, unknown>);
+function toClientJson(
+  d: ClientDocument,
+  productId: ClientProductId = DEFAULT_CLIENT_PRODUCT_ID,
+) {
+  const raw = d.toObject
+    ? (d.toObject() as unknown as Record<string, unknown>)
+    : (d as unknown as Record<string, unknown>);
   const allSystemData = normalizeSystemData(raw.systemData);
   const system = allSystemData[productId];
-  const productIds = normalizeProductIds(raw.productIds, DEFAULT_CLIENT_PRODUCT_ID);
+  const productIds = normalizeProductIds(
+    raw.productIds,
+    DEFAULT_CLIENT_PRODUCT_ID,
+  );
   return {
     id: d._id.toString(),
     name: d.name,
@@ -282,18 +308,22 @@ function toClientJson(d: ClientDocument, productId: ClientProductId = DEFAULT_CL
     address: d.address,
     clientAddress: system?.clientAddress ?? d.clientAddress,
     formTemplateId: system ? system.formTemplateId : d.formTemplateId,
-    templateFieldValues: system?.templateFieldValues ?? d.templateFieldValues ?? {},
+    templateFieldValues:
+      system?.templateFieldValues ?? d.templateFieldValues ?? {},
     bankName: system?.bankName ?? d.bankName,
     bankAccountAddress: system?.bankAccountAddress ?? d.bankAccountAddress,
     bankAccountNumber: system?.bankAccountNumber ?? d.bankAccountNumber,
     productIds,
-    sharedClientId: typeof raw.sharedClientId === "string" ? raw.sharedClientId : "",
+    sharedClientId:
+      typeof raw.sharedClientId === "string" ? raw.sharedClientId : "",
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
 }
 
-function systemDataFromClientFields(fields: ClientUpsertFields): ClientSystemData {
+function systemDataFromClientFields(
+  fields: ClientUpsertFields,
+): ClientSystemData {
   return {
     clientTypeId: fields.clientTypeId,
     formTemplateId: fields.formTemplateId,
@@ -334,18 +364,18 @@ export class ClientsMongoService {
     if (!context.user || context.isUserBlocked || context.user.isBlocked) {
       throw new ForbiddenException({ message: "Authentication required" });
     }
-    if (!context.company) {
+    const isSuperAdmin = context.user.role === "super_admin";
+    if (!context.company && !isSuperAdmin) {
       throw new ForbiddenException({ message: "Company context required" });
     }
-    const companyId = new Types.ObjectId(context.company._id.toString());
+    const companyId = context.company
+      ? new Types.ObjectId(context.company._id.toString())
+      : null;
     const productId = normalizeClientProductId(productInput);
-    if (
-      context.user.role !== "super_admin" &&
-      context.companyMembership?.role !== "company_admin"
-    ) {
+    if (!isSuperAdmin && context.companyMembership?.role !== "company_admin") {
       const allowed = context.companyMembership?.productIds?.length
         ? context.companyMembership.productIds
-        : context.company.valueTechProductIds;
+        : context.company?.valueTechProductIds;
       if (!allowed?.includes(productId)) {
         throw new ForbiddenException({ message: "No access to this product" });
       }
@@ -354,7 +384,7 @@ export class ClientsMongoService {
   }
 
   private scopedCompanyFilter(scope: ClientScope) {
-    return companyObjectIdFilter(scope.companyId);
+    return scope.companyId ? companyObjectIdFilter(scope.companyId) : {};
   }
 
   private scopedProductFilter(scope: ClientScope) {
@@ -365,48 +395,86 @@ export class ClientsMongoService {
     return includeAllProducts
       ? this.scopedCompanyFilter(scope)
       : {
-          $and: [this.scopedCompanyFilter(scope), clientProductFilter(scope.productId)],
+          $and: [
+            this.scopedCompanyFilter(scope),
+            clientProductFilter(scope.productId),
+          ],
         };
   }
 
-  private async assertClientFormRefs(scope: ClientScope, normalized: ClientUpsertFields) {
+  private async assertClientFormRefs(
+    scope: ClientScope,
+    normalized: ClientUpsertFields,
+  ) {
     if (!Types.ObjectId.isValid(normalized.clientTypeId)) {
-      throw new BadRequestException({ message: "Ù†ÙˆØ¹ Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± ØµØ§Ù„Ø­" });
+      throw new BadRequestException({
+        message: "Ù†ÙˆØ¹ Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± ØµØ§Ù„Ø­",
+      });
     }
     const typeOk = await this.clientTypeModel
       .findOne({
         _id: new Types.ObjectId(normalized.clientTypeId),
-        $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)],
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
       })
       .exec();
     if (!typeOk) {
-      throw new BadRequestException({ message: "Ù†ÙˆØ¹ Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± ØµØ§Ù„Ø­" });
+      throw new BadRequestException({
+        message: "Ù†ÙˆØ¹ Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± ØµØ§Ù„Ø­",
+      });
     }
     if (normalized.formTemplateId) {
       if (!Types.ObjectId.isValid(normalized.formTemplateId)) {
-        throw new BadRequestException({ message: "Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯" });
+        throw new BadRequestException({
+          message: "Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯",
+        });
       }
       const tpl = await this.formTemplateModel
         .findOne({
           _id: new Types.ObjectId(normalized.formTemplateId),
-          $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)],
+          $and: [
+            this.scopedCompanyFilter(scope),
+            this.scopedProductFilter(scope),
+          ],
         })
         .exec();
-      if (!tpl) throw new BadRequestException({ message: "Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯" });
+      if (!tpl)
+        throw new BadRequestException({
+          message: "Ø§Ù„Ù†Ù…ÙˆØ°Ø¬ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯",
+        });
     }
   }
 
   async listClientTypes(request: Request, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
+    if (!scope.companyId) {
+      throw new BadRequestException({ message: "الرجاء اختيار شركة أولاً" });
+    }
     const rows = await this.clientTypeModel
-      .find({ $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] })
+      .find({
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
+      })
       .sort({ createdAt: 1 })
       .exec();
     return rows.map(toTypeJson);
   }
 
-  async createClientType(request: Request, body: { name?: string; productId?: unknown }) {
+  async createClientType(
+    request: Request,
+    body: { name?: string; productId?: unknown },
+  ) {
     const scope = await this.resolveScope(request, body.productId);
+    if (!scope.companyId) {
+      throw new BadRequestException({ message: "الرجاء اختيار شركة أولاً" });
+    }
     const name = body.name ?? "";
     const n = name.trim();
     if (!n) throw new BadRequestException({ message: "اسم النوع مطلوب" });
@@ -418,7 +486,11 @@ export class ClientsMongoService {
     return toTypeJson(created);
   }
 
-  async updateClientType(request: Request, id: string, body: { name?: string; productId?: unknown }) {
+  async updateClientType(
+    request: Request,
+    id: string,
+    body: { name?: string; productId?: unknown },
+  ) {
     const scope = await this.resolveScope(request, body.productId);
     const name = body.name ?? "";
     const n = name.trim();
@@ -427,8 +499,20 @@ export class ClientsMongoService {
       throw new NotFoundException({ message: "النوع غير موجود" });
     const row = await this.clientTypeModel
       .findOneAndUpdate(
-        { _id: new Types.ObjectId(id), $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] },
-        { $set: { name: n, companyId: scope.companyId, productId: scope.productId } },
+        {
+          _id: new Types.ObjectId(id),
+          $and: [
+            this.scopedCompanyFilter(scope),
+            this.scopedProductFilter(scope),
+          ],
+        },
+        {
+          $set: {
+            name: n,
+            companyId: scope.companyId,
+            productId: scope.productId,
+          },
+        },
         { new: true },
       )
       .exec();
@@ -436,8 +520,15 @@ export class ClientsMongoService {
     return toTypeJson(row);
   }
 
-  async deleteClientType(request: Request, id: string, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async deleteClientType(
+    request: Request,
+    id: string,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "النوع غير موجود" });
     const count = await this.clientModel
@@ -459,7 +550,13 @@ export class ClientsMongoService {
       });
     }
     const del = await this.clientTypeModel
-      .deleteOne({ _id: new Types.ObjectId(id), $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] })
+      .deleteOne({
+        _id: new Types.ObjectId(id),
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
+      })
       .exec();
     if (del.deletedCount === 0)
       throw new NotFoundException({ message: "النوع غير موجود" });
@@ -536,27 +633,54 @@ export class ClientsMongoService {
     return toClientJson(row);
   }
 
-  async listFormTemplates(request: Request, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async listFormTemplates(
+    request: Request,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     const rows = await this.formTemplateModel
-      .find({ $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] })
+      .find({
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
+      })
       .sort({ updatedAt: -1 })
       .exec();
     return rows.map(toTemplateJson);
   }
 
-  async getFormTemplate(request: Request, id: string, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async getFormTemplate(
+    request: Request,
+    id: string,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "النموذج غير موجود" });
     const row = await this.formTemplateModel
-      .findOne({ _id: new Types.ObjectId(id), $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] })
+      .findOne({
+        _id: new Types.ObjectId(id),
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
+      })
       .exec();
     if (!row) throw new NotFoundException({ message: "النموذج غير موجود" });
     return toTemplateJson(row);
   }
 
-  async createFormTemplate(request: Request, body: { name?: string; fields?: unknown; productId?: unknown }) {
+  async createFormTemplate(
+    request: Request,
+    body: { name?: string; fields?: unknown; productId?: unknown },
+  ) {
     const scope = await this.resolveScope(request, body.productId);
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name) throw new BadRequestException({ message: "اسم النموذج مطلوب" });
@@ -596,8 +720,22 @@ export class ClientsMongoService {
     const now = new Date();
     const row = await this.formTemplateModel
       .findOneAndUpdate(
-        { _id: new Types.ObjectId(id), $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] },
-        { $set: { name, fields, companyId: scope.companyId, productId: scope.productId, updatedAt: now } },
+        {
+          _id: new Types.ObjectId(id),
+          $and: [
+            this.scopedCompanyFilter(scope),
+            this.scopedProductFilter(scope),
+          ],
+        },
+        {
+          $set: {
+            name,
+            fields,
+            companyId: scope.companyId,
+            productId: scope.productId,
+            updatedAt: now,
+          },
+        },
         { new: true },
       )
       .exec();
@@ -605,12 +743,25 @@ export class ClientsMongoService {
     return toTemplateJson(row);
   }
 
-  async deleteFormTemplate(request: Request, id: string, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async deleteFormTemplate(
+    request: Request,
+    id: string,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "النموذج غير موجود" });
     const del = await this.formTemplateModel
-      .deleteOne({ _id: new Types.ObjectId(id), $and: [this.scopedCompanyFilter(scope), this.scopedProductFilter(scope)] })
+      .deleteOne({
+        _id: new Types.ObjectId(id),
+        $and: [
+          this.scopedCompanyFilter(scope),
+          this.scopedProductFilter(scope),
+        ],
+      })
       .exec();
     if (del.deletedCount === 0)
       throw new NotFoundException({ message: "النموذج غير موجود" });
@@ -641,17 +792,28 @@ export class ClientsMongoService {
   }
 
   async listClients(request: Request, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     const includeAllProducts = queryValue(query, "scope") === "all";
     const rawQ = queryValue(query, "q");
     const q = typeof rawQ === "string" ? rawQ.trim() : "";
     const clauses: FilterQuery<ClientDocument>[] = [
-      this.scopedClientFilter(scope, includeAllProducts) as FilterQuery<ClientDocument>,
+      this.scopedClientFilter(
+        scope,
+        includeAllProducts,
+      ) as FilterQuery<ClientDocument>,
     ];
     if (q) {
       const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       clauses.push({
-        $or: [{ name: rx }, { phone: rx }, { email: rx }, { clientAddress: rx }],
+        $or: [
+          { name: rx },
+          { phone: rx },
+          { email: rx },
+          { clientAddress: rx },
+        ],
       } as FilterQuery<ClientDocument>);
     }
     const rows = await this.clientModel
@@ -662,12 +824,22 @@ export class ClientsMongoService {
     return rows.map((row) => toClientJson(row, scope.productId));
   }
 
-  async getClient(request: Request, id: string, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async getClient(
+    request: Request,
+    id: string,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "العميل غير موجود" });
     const row = await this.clientModel
-      .findOne({ _id: new Types.ObjectId(id), $and: [this.scopedClientFilter(scope, true)] })
+      .findOne({
+        _id: new Types.ObjectId(id),
+        $and: [this.scopedClientFilter(scope, true)],
+      })
       .exec();
     if (!row) throw new NotFoundException({ message: "العميل غير موجود" });
     return toClientJson(row, scope.productId);
@@ -693,18 +865,30 @@ export class ClientsMongoService {
     }
     const systemData = systemDataFromClientFields(normalized);
     const linkFromClientId =
-      typeof body.linkFromClientId === "string" && Types.ObjectId.isValid(body.linkFromClientId)
+      typeof body.linkFromClientId === "string" &&
+      Types.ObjectId.isValid(body.linkFromClientId)
         ? body.linkFromClientId
         : "";
 
     if (linkFromClientId) {
       const row = await this.clientModel
-        .findOne({ _id: new Types.ObjectId(linkFromClientId), $and: [this.scopedClientFilter(scope, true)] })
+        .findOne({
+          _id: new Types.ObjectId(linkFromClientId),
+          $and: [this.scopedClientFilter(scope, true)],
+        })
         .exec();
-      if (!row) throw new NotFoundException({ message: "Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯" });
+      if (!row)
+        throw new NotFoundException({
+          message: "Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯",
+        });
       const raw = row.toObject() as unknown as Record<string, unknown>;
-      const productIds = normalizeProductIds(raw.productIds, DEFAULT_CLIENT_PRODUCT_ID);
-      const nextProductIds = Array.from(new Set([...productIds, scope.productId]));
+      const productIds = normalizeProductIds(
+        raw.productIds,
+        DEFAULT_CLIENT_PRODUCT_ID,
+      );
+      const nextProductIds = Array.from(
+        new Set([...productIds, scope.productId]),
+      );
       const updated = await this.clientModel
         .findOneAndUpdate(
           { _id: row._id },
@@ -714,7 +898,10 @@ export class ClientsMongoService {
               ...systemData,
               companyId: scope.companyId,
               productIds: nextProductIds,
-              sharedClientId: typeof raw.sharedClientId === "string" && raw.sharedClientId ? raw.sharedClientId : randomUUID(),
+              sharedClientId:
+                typeof raw.sharedClientId === "string" && raw.sharedClientId
+                  ? raw.sharedClientId
+                  : randomUUID(),
               [`systemData.${scope.productId}`]: systemData,
               updatedAt: new Date(),
             },
@@ -722,7 +909,10 @@ export class ClientsMongoService {
           { new: true },
         )
         .exec();
-      if (!updated) throw new NotFoundException({ message: "Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯" });
+      if (!updated)
+        throw new NotFoundException({
+          message: "Ø§Ù„Ø¹Ù…ÙŠÙ„ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯",
+        });
       return toClientJson(updated, scope.productId);
     }
 
@@ -738,7 +928,11 @@ export class ClientsMongoService {
     return toClientJson(created, scope.productId);
   }
 
-  async updateClient(request: Request, id: string, body: Record<string, unknown>) {
+  async updateClient(
+    request: Request,
+    id: string,
+    body: Record<string, unknown>,
+  ) {
     const scope = await this.resolveScope(request, body.productId);
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "العميل غير موجود" });
@@ -761,12 +955,20 @@ export class ClientsMongoService {
       if (!tpl) throw new BadRequestException({ message: "النموذج غير موجود" });
     }
     const existing = await this.clientModel
-      .findOne({ _id: new Types.ObjectId(id), $and: [this.scopedClientFilter(scope, true)] })
+      .findOne({
+        _id: new Types.ObjectId(id),
+        $and: [this.scopedClientFilter(scope, true)],
+      })
       .exec();
     if (!existing) throw new NotFoundException({ message: "Client not found" });
     const raw = existing.toObject() as unknown as Record<string, unknown>;
-    const productIds = normalizeProductIds(raw.productIds, DEFAULT_CLIENT_PRODUCT_ID);
-    const nextProductIds = Array.from(new Set([...productIds, scope.productId]));
+    const productIds = normalizeProductIds(
+      raw.productIds,
+      DEFAULT_CLIENT_PRODUCT_ID,
+    );
+    const nextProductIds = Array.from(
+      new Set([...productIds, scope.productId]),
+    );
     const systemData = systemDataFromClientFields(normalized);
     const now = new Date();
     const row = await this.clientModel
@@ -793,17 +995,32 @@ export class ClientsMongoService {
     return toClientJson(row, scope.productId);
   }
 
-  async deleteClient(request: Request, id: string, query: Record<string, unknown> = {}) {
-    const scope = await this.resolveScope(request, queryValue(query, "productId"));
+  async deleteClient(
+    request: Request,
+    id: string,
+    query: Record<string, unknown> = {},
+  ) {
+    const scope = await this.resolveScope(
+      request,
+      queryValue(query, "productId"),
+    );
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException({ message: "العميل غير موجود" });
     const existing = await this.clientModel
-      .findOne({ _id: new Types.ObjectId(id), $and: [this.scopedClientFilter(scope, true)] })
+      .findOne({
+        _id: new Types.ObjectId(id),
+        $and: [this.scopedClientFilter(scope, true)],
+      })
       .exec();
     if (!existing) throw new NotFoundException({ message: "Client not found" });
     const raw = existing.toObject() as unknown as Record<string, unknown>;
-    const productIds = normalizeProductIds(raw.productIds, DEFAULT_CLIENT_PRODUCT_ID);
-    const nextProductIds = productIds.filter((item) => item !== scope.productId);
+    const productIds = normalizeProductIds(
+      raw.productIds,
+      DEFAULT_CLIENT_PRODUCT_ID,
+    );
+    const nextProductIds = productIds.filter(
+      (item) => item !== scope.productId,
+    );
     if (productIds.length > 1 && nextProductIds.length > 0) {
       await this.clientModel
         .updateOne(
@@ -816,9 +1033,7 @@ export class ClientsMongoService {
         .exec();
       return { ok: true, productUnlinked: true };
     }
-    const del = await this.clientModel
-      .deleteOne({ _id: existing._id })
-      .exec();
+    const del = await this.clientModel.deleteOne({ _id: existing._id }).exec();
     if (del.deletedCount === 0)
       throw new NotFoundException({ message: "العميل غير موجود" });
     return { ok: true };

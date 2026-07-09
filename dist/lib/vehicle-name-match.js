@@ -1,0 +1,423 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildVehicleAliases = buildVehicleAliases;
+exports.toVehicleCanonicalKey = toVehicleCanonicalKey;
+exports.isVehicleTextMatch = isVehicleTextMatch;
+const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+const ARABIC_WEAK_CHAR_REGEX = /[\u0627\u0648\u064A\u0649\u0647\u0629\u0621\u0624\u0626]/g;
+const REPEATED_CHAR_REGEX = /(.)\1{2,}/g;
+const DEFAULT_ALIAS_FUZZY_DISTANCE = 2;
+const ARABIC_DIGIT_MAP = {
+    "٠": "0",
+    "١": "1",
+    "٢": "2",
+    "٣": "3",
+    "٤": "4",
+    "٥": "5",
+    "٦": "6",
+    "٧": "7",
+    "٨": "8",
+    "٩": "9",
+};
+const ARABIC_CHAR_TO_LATIN = {
+    ا: "a",
+    أ: "a",
+    إ: "a",
+    آ: "a",
+    ب: "b",
+    ت: "t",
+    ث: "th",
+    ج: "j",
+    ح: "h",
+    خ: "kh",
+    د: "d",
+    ذ: "dh",
+    ر: "r",
+    ز: "z",
+    س: "s",
+    ش: "sh",
+    ص: "s",
+    ض: "d",
+    ط: "t",
+    ظ: "z",
+    ع: "a",
+    غ: "gh",
+    ف: "f",
+    ق: "q",
+    ك: "k",
+    ل: "l",
+    م: "m",
+    ن: "n",
+    ه: "h",
+    و: "w",
+    ي: "y",
+    ة: "h",
+    ى: "a",
+    ؤ: "w",
+    ئ: "y",
+};
+const ARABIC_SPELLED_LETTER_TO_LATIN = {
+    سي: "c",
+    اس: "s",
+    إكس: "x",
+    اكس: "x",
+    أكس: "x",
+    جي: "g",
+    بي: "b",
+    دي: "d",
+    تي: "t",
+    في: "v",
+    اف: "f",
+    كي: "k",
+    كيو: "q",
+    ال: "l",
+    إل: "l",
+    ام: "m",
+    إم: "m",
+    ان: "n",
+    إن: "n",
+    ار: "r",
+    آر: "r",
+    واي: "y",
+    دبليو: "w",
+    اتش: "h",
+    زد: "z",
+    او: "o",
+    يو: "u",
+};
+const LATIN_TO_ARABIC_SPELLED_LETTER = {
+    a: "اي",
+    b: "بي",
+    c: "سي",
+    d: "دي",
+    e: "اي",
+    f: "اف",
+    g: "جي",
+    h: "اتش",
+    i: "اي",
+    j: "جاي",
+    k: "كي",
+    l: "ال",
+    m: "ام",
+    n: "ان",
+    o: "او",
+    p: "بي",
+    q: "كيو",
+    r: "ار",
+    s: "اس",
+    t: "تي",
+    u: "يو",
+    v: "في",
+    w: "دبليو",
+    x: "اكس",
+    y: "واي",
+    z: "زد",
+    "0": "0",
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9",
+};
+const KNOWN_VEHICLE_ALIAS_GROUPS = [
+    ["toyota", "تويوتا"],
+    ["nissan", "نيسان"],
+    ["hyundai", "هيونداي", "هونداي"],
+    ["kia", "كيا"],
+    ["ford", "فورد"],
+    ["chevrolet", "chevy", "شفروليه", "شيفروليه", "شفر"],
+    ["gmc", "جمس", "جي ام سي"],
+    ["lexus", "لكزس"],
+    ["mercedes", "mercedes benz", "benz", "مرسيدس", "مرسيدس بنز", "بنز"],
+    ["bmw", "بي ام دبليو", "بى ام دبليو"],
+    ["audi", "اودي", "أودي"],
+    ["mazda", "مازدا"],
+    ["honda", "هوندا"],
+    ["mitsubishi", "ميتسوبيشي"],
+    ["dodge", "دودج"],
+    ["jeep", "جيب"],
+    ["isuzu", "ايسوزو", "إيسوزو"],
+    ["land cruiser", "landcruiser", "لاند كروزر", "لاندكروزر", "gxr", "جي اكس ار", "vxr", "في اكس ار"],
+    ["prado", "برادو"],
+    ["camry", "كامري"],
+    ["corolla", "كورولا"],
+    ["yaris", "يارس", "ياريس"],
+    ["hilux", "هايلكس", "هايلوكس"],
+    ["rav4", "rav 4", "راف4", "راف فور"],
+    ["fortuner", "فورتشنر", "فورشنر"],
+    ["sonata", "سوناتا"],
+    ["elantra", "النترا", "إلنترا"],
+    ["accent", "اكسنت", "أكسنت"],
+    ["tucson", "توسان"],
+    ["patrol", "باترول"],
+    ["sunny", "صني", "سني"],
+    ["altima", "التيما", "ألتيما"],
+    ["maxima", "ماكسيما", "مكسيما"],
+    ["accord", "اكورد", "أكورد"],
+    ["civic", "سيفيك", "سيفك"],
+    ["crv", "cr v", "cr-v", "سي ار في", "سي آر في"],
+    ["tahoe", "تاهو"],
+    ["suburban", "سوبربان"],
+    ["yukon", "يوكن"],
+    ["silverado", "سلفرادو", "سيلفرادو"],
+    ["sierra", "سييرا"],
+];
+function replaceArabicDigits(value) {
+    return value.replace(/[٠-٩]/g, (digit) => ARABIC_DIGIT_MAP[digit] ?? digit);
+}
+function normalizeArabicLetters(value) {
+    return value
+        .replace(/[أإآ]/g, "ا")
+        .replace(/ى/g, "ي")
+        .replace(/ؤ/g, "و")
+        .replace(/ئ/g, "ي")
+        .replace(/ة/g, "ه");
+}
+function normalizeText(value) {
+    return normalizeArabicLetters(replaceArabicDigits(value.toLowerCase()))
+        .replace(ARABIC_DIACRITICS_REGEX, "")
+        .replace(/ـ/g, "")
+        .replace(/[-_/]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+function compactAlias(value) {
+    return normalizeText(value).replace(/[^a-z0-9\u0621-\u064A]+/gi, "");
+}
+function transliterateArabicToLatin(value) {
+    const normalized = normalizeText(value);
+    let output = "";
+    for (const char of normalized) {
+        if (/[a-z0-9]/.test(char)) {
+            output += char;
+            continue;
+        }
+        output += ARABIC_CHAR_TO_LATIN[char] ?? "";
+    }
+    return output.replace(/[^a-z0-9]+/g, "");
+}
+function arabicSpelledLettersToLatin(value) {
+    const normalized = normalizeText(value);
+    const keys = Object.keys(ARABIC_SPELLED_LETTER_TO_LATIN).sort((a, b) => b.length - a.length);
+    let converted = normalized;
+    for (const key of keys) {
+        const regex = new RegExp(key, "g");
+        converted = converted.replace(regex, ARABIC_SPELLED_LETTER_TO_LATIN[key]);
+    }
+    return converted.replace(/[^a-z0-9]+/g, "");
+}
+function latinToArabicSpelledLetters(value) {
+    const compact = normalizeText(value).replace(/[^a-z0-9]+/g, "");
+    if (!compact)
+        return "";
+    return compact
+        .split("")
+        .map((char) => LATIN_TO_ARABIC_SPELLED_LETTER[char] ?? char)
+        .join(" ");
+}
+function latinSkeleton(value) {
+    return value.replace(/[aeiouyw]/g, "");
+}
+function arabicSkeleton(value) {
+    return value.replace(ARABIC_WEAK_CHAR_REGEX, "");
+}
+function boundedLevenshteinDistance(a, b, maxDistance = DEFAULT_ALIAS_FUZZY_DISTANCE) {
+    if (a === b)
+        return 0;
+    if (!a || !b)
+        return Math.max(a.length, b.length);
+    if (Math.abs(a.length - b.length) > maxDistance)
+        return maxDistance + 1;
+    const previous = new Array(b.length + 1);
+    const current = new Array(b.length + 1);
+    for (let j = 0; j <= b.length; j += 1) {
+        previous[j] = j;
+    }
+    for (let i = 1; i <= a.length; i += 1) {
+        current[0] = i;
+        let rowMin = current[0];
+        for (let j = 1; j <= b.length; j += 1) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+            if (current[j] < rowMin) {
+                rowMin = current[j];
+            }
+        }
+        if (rowMin > maxDistance) {
+            return maxDistance + 1;
+        }
+        for (let j = 0; j <= b.length; j += 1) {
+            previous[j] = current[j];
+        }
+    }
+    return previous[b.length];
+}
+function resolveAliasMaxDistance(a, b) {
+    const minLength = Math.min(a.length, b.length);
+    if (minLength >= 7)
+        return 2;
+    return 1;
+}
+function hasStrongAliasMatch(a, b) {
+    if (!a || !b)
+        return false;
+    if (a === b)
+        return true;
+    if ((a.includes(b) || b.includes(a)) && Math.min(a.length, b.length) >= 4) {
+        return true;
+    }
+    const aDigits = numericSignature(a);
+    const bDigits = numericSignature(b);
+    if ((aDigits || bDigits) && aDigits !== bDigits) {
+        return false;
+    }
+    const aLatinOnly = /^[a-z0-9]+$/i.test(a);
+    const bLatinOnly = /^[a-z0-9]+$/i.test(b);
+    if (aLatinOnly && bLatinOnly) {
+        const aLatinSkeleton = latinSkeleton(a);
+        const bLatinSkeleton = latinSkeleton(b);
+        if (aLatinSkeleton.length >= 2 &&
+            bLatinSkeleton.length >= 2 &&
+            (aLatinSkeleton === bLatinSkeleton ||
+                aLatinSkeleton.includes(bLatinSkeleton) ||
+                bLatinSkeleton.includes(aLatinSkeleton))) {
+            return true;
+        }
+    }
+    const aArabicSkeleton = arabicSkeleton(a);
+    const bArabicSkeleton = arabicSkeleton(b);
+    if (aArabicSkeleton.length >= 2 &&
+        bArabicSkeleton.length >= 2 &&
+        (aArabicSkeleton === bArabicSkeleton ||
+            aArabicSkeleton.includes(bArabicSkeleton) ||
+            bArabicSkeleton.includes(aArabicSkeleton))) {
+        return true;
+    }
+    const maxDistance = resolveAliasMaxDistance(a, b);
+    const distance = boundedLevenshteinDistance(a, b, maxDistance);
+    return distance <= maxDistance;
+}
+function addKnownVehicleAliases(aliasSet, addAlias) {
+    const existing = Array.from(aliasSet);
+    if (existing.length === 0)
+        return;
+    const compactExisting = new Set(existing
+        .map((item) => normalizeText(item).replace(/\s+/g, ""))
+        .filter(Boolean));
+    const compactExistingAliases = Array.from(compactExisting);
+    for (const group of KNOWN_VEHICLE_ALIAS_GROUPS) {
+        const compactGroupAliases = Array.from(new Set(group
+            .map((alias) => normalizeText(alias).replace(/\s+/g, ""))
+            .filter(Boolean)));
+        const hasExactMatch = compactGroupAliases.some((alias) => compactExisting.has(alias));
+        const hasFuzzyMatch = !hasExactMatch &&
+            compactExistingAliases.some((existingAlias) => compactGroupAliases.some((alias) => hasStrongAliasMatch(existingAlias, alias)));
+        const hasMatch = hasExactMatch || hasFuzzyMatch;
+        if (!hasMatch)
+            continue;
+        for (const alias of group) {
+            addAlias(alias);
+        }
+    }
+}
+function buildVehicleAliases(value) {
+    const input = String(value ?? "").trim();
+    if (!input)
+        return [];
+    const normalized = normalizeText(input);
+    const compact = compactAlias(normalized);
+    const hasArabic = /[\u0621-\u064A]/.test(normalized);
+    const hasLatin = /[a-z]/.test(normalized);
+    const aliases = new Set();
+    const addAlias = (candidate) => {
+        const clean = normalizeText(candidate);
+        if (!clean)
+            return;
+        aliases.add(clean);
+        aliases.add(clean.replace(/\s+/g, ""));
+    };
+    addAlias(normalized);
+    addAlias(compact);
+    const compactWithoutLongRepeats = compact.replace(REPEATED_CHAR_REGEX, "$1$1");
+    if (compactWithoutLongRepeats !== compact) {
+        addAlias(compactWithoutLongRepeats);
+    }
+    if (hasArabic) {
+        addAlias(arabicSpelledLettersToLatin(normalized));
+        addAlias(transliterateArabicToLatin(normalized));
+    }
+    if (hasLatin) {
+        const latinCompact = normalized.replace(/[^a-z0-9]+/g, "");
+        addAlias(latinCompact);
+        const latinSkeletonAlias = latinSkeleton(latinCompact);
+        if (latinSkeletonAlias.length >= 3) {
+            addAlias(latinSkeletonAlias);
+        }
+        addAlias(latinCompact.split("").join(" "));
+        addAlias(latinToArabicSpelledLetters(latinCompact));
+        addAlias(latinToArabicSpelledLetters(latinCompact).replace(/\s+/g, ""));
+    }
+    addKnownVehicleAliases(aliases, addAlias);
+    return Array.from(aliases).filter(Boolean);
+}
+function toVehicleCanonicalKey(value) {
+    const aliases = buildVehicleAliases(value);
+    const latinCandidates = aliases.filter((alias) => /^[a-z0-9]+$/i.test(alias));
+    const latinCompact = latinCandidates.sort((a, b) => b.length - a.length)[0];
+    if (latinCompact)
+        return latinCompact;
+    return aliases[0] ?? normalizeText(String(value ?? ""));
+}
+function numericSignature(value) {
+    return value.replace(/[^0-9]/g, "");
+}
+function isVehicleTextMatch(candidate, query) {
+    const normalizedQuery = String(query ?? "").trim();
+    if (!normalizedQuery)
+        return true;
+    const candidateAliases = buildVehicleAliases(candidate);
+    if (candidateAliases.length === 0)
+        return false;
+    const queryAliases = buildVehicleAliases(normalizedQuery);
+    for (const queryAlias of queryAliases) {
+        for (const candidateAlias of candidateAliases) {
+            if (candidateAlias === queryAlias) {
+                return true;
+            }
+            if (/^[a-z0-9]+$/i.test(candidateAlias) &&
+                /^[a-z0-9]+$/i.test(queryAlias)) {
+                const candidateDigits = numericSignature(candidateAlias);
+                const queryDigits = numericSignature(queryAlias);
+                if ((candidateDigits || queryDigits) && candidateDigits !== queryDigits) {
+                    continue;
+                }
+                const candidateSkeleton = latinSkeleton(candidateAlias);
+                const querySkeleton = latinSkeleton(queryAlias);
+                if (candidateSkeleton.length >= 2 &&
+                    querySkeleton.length >= 2 &&
+                    candidateSkeleton === querySkeleton) {
+                    return true;
+                }
+            }
+            const candidateArabicSkeleton = arabicSkeleton(candidateAlias);
+            const queryArabicSkeleton = arabicSkeleton(queryAlias);
+            if (candidateArabicSkeleton.length >= 2 &&
+                queryArabicSkeleton.length >= 2 &&
+                (candidateArabicSkeleton === queryArabicSkeleton ||
+                    candidateArabicSkeleton.includes(queryArabicSkeleton) ||
+                    queryArabicSkeleton.includes(candidateArabicSkeleton))) {
+                return true;
+            }
+            const maxDistance = resolveAliasMaxDistance(candidateAlias, queryAlias);
+            const distance = boundedLevenshteinDistance(candidateAlias, queryAlias, maxDistance);
+            if (distance <= maxDistance) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
