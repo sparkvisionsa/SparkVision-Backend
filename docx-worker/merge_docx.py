@@ -72,10 +72,16 @@ IMAGES_PER_ROW = 3
 IMAGE_ROWS_PER_PAGE = 3
 IMAGES_PER_PAGE = IMAGES_PER_ROW * IMAGE_ROWS_PER_PAGE
 EMU_PER_INCH = 914400
-VALUATION_IMAGE_PAGE_MARGIN_EMU = int(0.06 * EMU_PER_INCH)
-# تصغير طفيف داخل هوامش المحتوى — يمنع اقتطاع الحافة اليمنى في تخطيط Word (RTL).
-VALUATION_IMAGE_CONTENT_SCALE = 0.96
-VALUATION_IMAGE_EXTRA_INSET_EMU = int(0.04 * EMU_PER_INCH)
+PIXEL_DXA = 15
+PIXEL_EMU = int(EMU_PER_INCH / 96)
+ASSET_IMAGE_GAP_DXA = PIXEL_DXA
+ASSET_IMAGE_GAP_EMU = PIXEL_EMU
+VALUATION_IMAGE_PAGE_WIDTH_RATIO = 0.90
+VALUATION_IMAGE_RTL_RIGHT_MARGIN_RATIO = 0.03
+DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
+DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
+DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
+COVER_BOOKMARK_FONT_FAMILY = "Tajawal"
 ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
 MOJIBAKE_RE = re.compile(r"[ØÙÃÂÐÑ]")
 
@@ -597,9 +603,9 @@ def set_paragraph_cover_alignment(para: etree._Element) -> None:
 
 def cover_bookmark_font_size(bookmark_name: str) -> int | None:
     norm = normalize_bookmark_name(bookmark_name)
-    if norm == normalize_bookmark_name("عنوان"):
+    if norm in {normalize_bookmark_name(name) for name in ("عنوان", "عنوانغ", "غلاف", "عنواناصل")}:
         return 64
-    if norm == normalize_bookmark_name("عميلغلاف"):
+    if norm in {normalize_bookmark_name(name) for name in ("عميلغلاف",)}:
         return 56
     return None
 
@@ -612,6 +618,17 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
     if para is not None:
         set_paragraph_cover_alignment(para)
     styled = deepcopy(rpr) if rpr is not None else etree.Element(w("rPr"))
+    set_rpr_value(
+        styled,
+        "rFonts",
+        {
+            "ascii": COVER_BOOKMARK_FONT_FAMILY,
+            "hAnsi": COVER_BOOKMARK_FONT_FAMILY,
+            "eastAsia": COVER_BOOKMARK_FONT_FAMILY,
+            "cs": COVER_BOOKMARK_FONT_FAMILY,
+            "hint": "cs",
+        },
+    )
     set_rpr_value(styled, "sz", {"val": str(size)})
     set_rpr_value(styled, "szCs", {"val": str(size)})
     set_rpr_flag(styled, "b")
@@ -651,6 +668,12 @@ def insert_text_before_bookmark_end(
 ) -> None:
     safe = sanitize_xml_text(text)
     if end.getparent() is not None and end.getparent().tag == w("r"):
+        run = end.getparent()
+        if rpr is not None:
+            existing = run.find(w("rPr"))
+            if existing is not None:
+                run.remove(existing)
+            run.insert(0, deepcopy(rpr))
         t = etree.Element(w("t"))
         t.text = safe
         t.set(f"{{{XML_NS}}}space", "preserve")
@@ -884,6 +907,7 @@ def build_asset_table(imgs: list[bytes], add_image) -> etree._Element:
     tbl = etree.Element(w("tbl"))
     tblpr = etree.SubElement(tbl, w("tblPr"))
     set_w_attrs(etree.SubElement(tblpr, w("tblW")), {"w": "5000", "type": "pct"})
+    set_w_attrs(etree.SubElement(tblpr, w("tblCellSpacing")), {"w": str(ASSET_IMAGE_GAP_DXA), "type": "dxa"})
     grid = etree.SubElement(tbl, w("tblGrid"))
     for _ in range(3):
         set_w_attrs(etree.SubElement(grid, w("gridCol")), {"w": "3000"})
@@ -935,7 +959,11 @@ class ImageRegistry:
 
     def add_valuation(self, img_bytes: bytes) -> tuple[str, int, int, int]:
         rid, _, _, doc_id = self.add(img_bytes)
-        return rid, 5500000, 4000000, doc_id
+        cx, cy = scaled_image_size_for_width_only(
+            img_bytes,
+            int(8.27 * EMU_PER_INCH * VALUATION_IMAGE_PAGE_WIDTH_RATIO),
+        )
+        return rid, cx, cy, doc_id
 
 
 def apply_image_bookmarks(
@@ -1200,6 +1228,17 @@ def set_docx_table_borders_none(table) -> None:
     tbl_pr.append(tbl_borders)
 
 
+def set_docx_table_cell_spacing(table, spacing_dxa: int = 0) -> None:
+    tbl_pr = table._tbl.tblPr
+    existing = tbl_pr.find(docx_qn("w:tblCellSpacing"))
+    if existing is not None:
+        tbl_pr.remove(existing)
+    spacing = make_docx_element("w:tblCellSpacing")
+    spacing.set(docx_qn("w:w"), str(max(0, int(spacing_dxa))))
+    spacing.set(docx_qn("w:type"), "dxa")
+    tbl_pr.append(spacing)
+
+
 def set_docx_table_width(table, width_emu: int) -> None:
     width_dxa = max(1, int(width_emu / EMU_PER_INCH * 1440))
     tbl_pr = table._tbl.tblPr
@@ -1272,6 +1311,113 @@ def document_physical_page_box_emu(doc) -> tuple[int, int]:
     return page_width, page_height
 
 
+def document_section_margins_emu(doc) -> tuple[int, int, int, int]:
+    section = doc.sections[0]
+    left_margin = int(section.left_margin or int(0.5 * EMU_PER_INCH))
+    right_margin = int(section.right_margin or int(0.5 * EMU_PER_INCH))
+    top_margin = int(section.top_margin or int(0.5 * EMU_PER_INCH))
+    bottom_margin = int(section.bottom_margin or int(0.5 * EMU_PER_INCH))
+    return left_margin, right_margin, top_margin, bottom_margin
+
+
+def w_attr_int(el, name: str, fallback: int) -> int:
+    if el is None:
+        return fallback
+    raw = el.get(docx_qn(f"w:{name}"))
+    try:
+        return int(raw) if raw is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def twips_to_emu(value: int) -> int:
+    return int(value * EMU_PER_INCH / 1440)
+
+
+def emu_to_twips(value: int | float) -> int:
+    return int(round(float(value) * 1440 / EMU_PER_INCH))
+
+
+def section_metrics_from_sect_pr(sect_pr) -> tuple[int, int, int, int, int, int] | None:
+    if sect_pr is None:
+        return None
+
+    pg_sz = sect_pr.find(docx_qn("w:pgSz"))
+    pg_mar = sect_pr.find(docx_qn("w:pgMar"))
+    page_width_twips = w_attr_int(pg_sz, "w", 0)
+    page_height_twips = w_attr_int(pg_sz, "h", 0)
+
+    page_width = twips_to_emu(page_width_twips) if page_width_twips > 0 else DEFAULT_PAGE_WIDTH_EMU
+    page_height = twips_to_emu(page_height_twips) if page_height_twips > 0 else DEFAULT_PAGE_HEIGHT_EMU
+    left_margin = twips_to_emu(w_attr_int(pg_mar, "left", emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)))
+    right_margin = twips_to_emu(w_attr_int(pg_mar, "right", emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)))
+    top_margin = twips_to_emu(w_attr_int(pg_mar, "top", emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)))
+    bottom_margin = twips_to_emu(w_attr_int(pg_mar, "bottom", emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)))
+    return page_width, page_height, left_margin, right_margin, top_margin, bottom_margin
+
+
+def first_section_metrics_at_or_after(children: list[Any], start_idx: int):
+    for child in children[max(0, start_idx) :]:
+        sect_pr = child if getattr(child, "tag", None) == docx_qn("w:sectPr") else child.find(f".//{docx_qn('w:sectPr')}")
+        metrics = section_metrics_from_sect_pr(sect_pr)
+        if metrics is not None:
+            return metrics
+    return None
+
+
+def document_valuation_image_layout_emu(
+    doc,
+    section_metrics: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[int, int, int]:
+    """Use 90% of the physical page width with a small RTL-side margin."""
+    if section_metrics is None:
+        page_width, _ = document_physical_page_box_emu(doc)
+        left_margin, right_margin, _top_margin, _bottom_margin = document_section_margins_emu(doc)
+    else:
+        page_width, _page_height, left_margin, right_margin, _top_margin, _bottom_margin = section_metrics
+    page_width = max(1, page_width)
+
+    target_width = max(1, int(page_width * VALUATION_IMAGE_PAGE_WIDTH_RATIO))
+    desired_right_margin = max(0, int(page_width * VALUATION_IMAGE_RTL_RIGHT_MARGIN_RATIO))
+    desired_left_margin = max(0, page_width - target_width - desired_right_margin)
+
+    left_indent = desired_left_margin - left_margin
+    right_indent = desired_right_margin - right_margin
+    return target_width, left_indent, right_indent
+
+
+def configure_rtl_valuation_image_paragraph(paragraph, indent_left: int, indent_right: int) -> None:
+    p_pr = paragraph._element.get_or_add_pPr()
+    for tag in ("w:jc", "w:bidi", "w:ind"):
+        el = p_pr.find(docx_qn(tag))
+        if el is not None:
+            p_pr.remove(el)
+
+    p_pr.append(make_docx_element("w:bidi"))
+    jc = make_docx_element("w:jc")
+    jc.set(docx_qn("w:val"), "right")
+    p_pr.append(jc)
+
+    ind = make_docx_element("w:ind")
+    left_twips = emu_to_twips(indent_left)
+    right_twips = emu_to_twips(indent_right)
+    ind.set(docx_qn("w:left"), str(left_twips))
+    ind.set(docx_qn("w:right"), str(right_twips))
+    ind.set(docx_qn("w:start"), str(right_twips))
+    ind.set(docx_qn("w:end"), str(left_twips))
+    p_pr.append(ind)
+
+
+def scaled_image_size_for_width_only(img_bytes: bytes, target_width_emu: int) -> tuple[int, int]:
+    with Image.open(io.BytesIO(img_bytes)) as img:
+        width_px, height_px = img.size
+    if width_px <= 0 or height_px <= 0:
+        raise ValueError("invalid image dimensions")
+    cx = max(1, int(target_width_emu))
+    cy = max(1, int(cx * height_px / width_px))
+    return cx, cy
+
+
 def document_content_box_emu(doc) -> tuple[int, int]:
     content_width, content_height = document_page_inner_box_emu(doc)
     content_height = int(content_height - int(0.65 * EMU_PER_INCH))
@@ -1282,8 +1428,8 @@ def document_content_box_emu(doc) -> tuple[int, int]:
 
 def document_cell_size_emu(doc) -> int:
     content_width, content_height = document_content_box_emu(doc)
-    width_fit = content_width // IMAGES_PER_ROW
-    height_fit = content_height // IMAGE_ROWS_PER_PAGE
+    width_fit = max(1, (content_width - (IMAGES_PER_ROW - 1) * ASSET_IMAGE_GAP_EMU) // IMAGES_PER_ROW)
+    height_fit = max(1, (content_height - (IMAGE_ROWS_PER_PAGE - 1) * ASSET_IMAGE_GAP_EMU) // IMAGE_ROWS_PER_PAGE)
     return max(int(1.8 * EMU_PER_INCH), min(width_fit, height_fit))
 
 
@@ -1314,7 +1460,8 @@ def make_docx_image_table_element(doc, images: list[bytes]) -> tuple[Any, int]:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     set_docx_table_borders_none(table)
-    set_docx_table_width(table, cell_emu * IMAGES_PER_ROW)
+    set_docx_table_cell_spacing(table, ASSET_IMAGE_GAP_DXA)
+    set_docx_table_width(table, cell_emu * IMAGES_PER_ROW + (IMAGES_PER_ROW - 1) * ASSET_IMAGE_GAP_EMU)
 
     inserted = 0
     img_index = 0
@@ -1350,20 +1497,18 @@ def make_docx_image_table_element(doc, images: list[bytes]) -> tuple[Any, int]:
     return detach_docx_body_element(table._tbl), inserted
 
 
-def make_docx_valuation_image_element(doc, img_bytes: bytes) -> tuple[Any, int]:
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+def make_docx_valuation_image_element(
+    doc,
+    img_bytes: bytes,
+    section_metrics: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[Any, int]:
     from docx.shared import Emu, Pt
 
-    content_width, content_height = document_page_inner_box_emu(doc)
-    inset = VALUATION_IMAGE_EXTRA_INSET_EMU
-    target_width = max(1, int(content_width * VALUATION_IMAGE_CONTENT_SCALE) - inset * 2)
-    max_height = max(1, int(content_height * VALUATION_IMAGE_CONTENT_SCALE) - inset * 2)
-    cx, cy = scaled_image_size_for_width(img_bytes, target_width, max_height)
+    target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
+    cx, cy = scaled_image_size_for_width_only(img_bytes, target_width)
 
     p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.left_indent = Emu(0)
-    p.paragraph_format.right_indent = Emu(0)
+    configure_rtl_valuation_image_paragraph(p, indent_left, indent_right)
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
     try:
@@ -1420,10 +1565,11 @@ def replace_image_bookmark_with_docx_elements(
     elements: list[Any] = []
     inserted = 0
     if layout == "valuation_pages":
+        section_metrics = first_section_metrics_at_or_after(children, target_idx)
         for image_idx, image in enumerate(images):
             if image_idx > 0:
                 elements.append(make_docx_page_break_element(doc))
-            image_elem, count = make_docx_valuation_image_element(doc, image)
+            image_elem, count = make_docx_valuation_image_element(doc, image, section_metrics)
             elements.append(image_elem)
             inserted += count
     else:

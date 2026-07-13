@@ -5,7 +5,15 @@ import io
 import json
 import zipfile
 from lxml import etree
-from merge_docx import EMU_PER_INCH, IMAGE_PAGE_TITLE, IMAGES_PER_ROW, merge_package, validate_part_xml
+from merge_docx import (
+    ASSET_IMAGE_GAP_DXA,
+    EMU_PER_INCH,
+    IMAGE_PAGE_TITLE,
+    IMAGES_PER_ROW,
+    VALUATION_IMAGE_PAGE_WIDTH_RATIO,
+    merge_package,
+    validate_part_xml,
+)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -29,6 +37,11 @@ DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:bookmarkStart w:id="0" w:name="عميل"/>
         <w:bookmarkEnd w:id="0"/>
       </w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:bookmarkStart w:id="16" w:name="عميلغلاف"/></w:r>
+      <w:r><w:t>old cover client</w:t></w:r>
+      <w:r><w:bookmarkEnd w:id="16"/></w:r>
     </w:p>
     <w:p>
       <w:r><w:bookmarkStart w:id="1" w:name="تاريخاصدار"/></w:r>
@@ -110,6 +123,14 @@ DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:p>
       <w:bookmarkStart w:id="6" w:name="صورحسابات"/>
       <w:bookmarkEnd w:id="6"/>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:sectPr>
+          <w:pgSz w:w="11906" w:h="16838"/>
+          <w:pgMar w:top="1440" w:right="2127" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+        </w:sectPr>
+      </w:pPr>
     </w:p>
     <w:p>
       <w:r><w:t>بعد الأخذ في الاعتبار جميع البيانات ذات الصلة والمبادئ المنصوص عليها، فإننا نرى أن رأي قيمة التصفية ( </w:t></w:r>
@@ -202,6 +223,7 @@ def main() -> None:
     assert "old short value" not in text, "short final value placeholder was not removed"
     assert "old hyperlink text" not in text, "hyperlink placeholder was not removed"
     assert "old words" not in text, "final value words placeholder was not removed"
+    assert "old cover client" not in text, "cover client placeholder was not removed"
     assert "مائة وعشرون ألف ريال سعودي" in text, "final value words bookmark not filled"
     assert "١٢٠٬٠٠٠" in text, "final value amount not inserted before currency in opinion paragraph"
     assert "رأي قيمة التصفية" in text, "value opinion paragraph missing"
@@ -214,6 +236,19 @@ def main() -> None:
     w = lambda tag: f"{{{W_NS}}}{tag}"
     a = lambda tag: f"{{{A_NS}}}{tag}"
     plain_text = "\n".join("".join(t.text or "" for t in p.iter(w("t"))) for p in root.iter(w("p")))
+    def has_tajawal_run(expected_text: str) -> bool:
+        for run in root.iter(w("r")):
+            run_text = "".join(t.text or "" for t in run.iter(w("t")))
+            if run_text != expected_text:
+                continue
+            rpr = run.find(w("rPr"))
+            fonts = rpr.find(w("rFonts")) if rpr is not None else None
+            if fonts is not None and fonts.get(f"{{{W_NS}}}cs") == "Tajawal":
+                return True
+        return False
+
+    assert has_tajawal_run("تقرير اختبار مباشر"), "cover title should use Tajawal"
+    assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
     assert f"على أساس {valuation_basis} في تاريخ التقييم" in plain_text, "contextual valuation basis was not filled"
     assert any(
         valuation_date in line and line.strip().startswith("تاريخ التقييم")
@@ -236,13 +271,28 @@ def main() -> None:
         (int(node.get("cx") or "0"), int(node.get("cy") or "0"))
         for node in root.iter(wp("extent"))
     ]
-    assert max(cx for cx, _cy in extents) <= int(7.5 * EMU_PER_INCH), "valuation images should fit within page content margins"
-    assert max(cx for cx, _cy in extents) >= int(6.0 * EMU_PER_INCH), "valuation images should still use most of the content width"
+    valuation_width = max(cx for cx, _cy in extents)
+    expected_valuation_width = int(11906 * 635 * VALUATION_IMAGE_PAGE_WIDTH_RATIO)
+    assert valuation_width <= expected_valuation_width + 1, "valuation images should fit within 90% page width"
+    assert valuation_width >= expected_valuation_width - 1, "valuation images should use 90% page width"
+    valuation_indents = []
+    for para in root.iter(w("p")):
+        if any(int(node.get("cx") or "0") == valuation_width for node in para.iter(wp("extent"))):
+            ppr = para.find(w("pPr"))
+            ind = ppr.find(w("ind")) if ppr is not None else None
+            if ind is not None:
+                valuation_indents.append(ind)
+    assert valuation_indents, "valuation image paragraph should have RTL indentation"
+    assert any(ind.get(f"{{{W_NS}}}right") == "-1770" for ind in valuation_indents), "valuation image should compensate the active section right margin"
+    assert any(ind.get(f"{{{W_NS}}}left") == "-607" for ind in valuation_indents), "valuation image should keep a wider left-side margin without cropping"
     titles = [node.text for node in root.iter(w("t")) if node.text == IMAGE_PAGE_TITLE]
     assert len(titles) == 2, "asset photo annex title should repeat for every asset image page"
     tables = list(root.iter(w("tbl")))
     assert len(tables) == 2, "expected two asset image table pages only"
     for table in tables:
+        spacing = table.find(w("tblPr")).find(w("tblCellSpacing"))
+        assert spacing is not None, "asset image table should define cell spacing"
+        assert spacing.get(f"{{{W_NS}}}w") == str(ASSET_IMAGE_GAP_DXA), "asset image gap should be 1px"
         for row in table.iter(w("tr")):
             assert len(list(row.iter(w("tc")))) == IMAGES_PER_ROW, "every image row must have three cells"
     print("OK: merge smoke test passed")

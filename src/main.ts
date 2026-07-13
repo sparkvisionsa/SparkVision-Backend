@@ -56,7 +56,10 @@ async function bootstrap() {
     const path = String(req.originalUrl || req.url || "")
       .split("?")[0]
       .toLowerCase();
-    if (path.includes("/inspectorfiles/") && path.includes("/download")) {
+    if (
+      (path.includes("/inspectorfiles/") && path.includes("/download")) ||
+      path.endsWith("/asset-image-files/download")
+    ) {
       req.headers["x-no-compression"] = "true";
     }
     next();

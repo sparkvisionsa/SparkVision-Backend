@@ -9,8 +9,8 @@ import {
 } from "@nestjs/common";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { PassThrough } from "node:stream";
-import { once } from "node:events";
+import { PassThrough, Readable } from "node:stream";
+import ZipStream from "zip-stream";
 import { tryCoerceToObjectId, tryParseObjectId } from "@/common/object-id.util";
 import { AnyBulkWriteOperation, type Db, Filter, GridFSBucket, ObjectId } from "mongodb";
 import { getMongoDb } from "@/server/mongodb";
@@ -1928,178 +1928,17 @@ function uniqueZipPath(path: string, used: Set<string>) {
   return fallback;
 }
 
-function buildCrc32Table() {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n += 1) {
-    let c = n;
-    for (let k = 0; k < 8; k += 1) {
-      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-}
-
-const ZIP_CRC32_TABLE = buildCrc32Table();
-const ZIP_UTF8_DATA_DESCRIPTOR_FLAG = 0x0808;
-const ZIP_STORE_METHOD = 0;
-const ZIP_MAX_UINT32 = 0xffffffff;
-
-function updateZipCrc32(crc: number, chunk: Buffer) {
-  let next = crc >>> 0;
-  for (let index = 0; index < chunk.length; index += 1) {
-    next = ZIP_CRC32_TABLE[(next ^ chunk[index]!) & 0xff]! ^ (next >>> 8);
-  }
-  return next >>> 0;
-}
-
-function zipDosDateTime(value?: Date) {
-  const d = value instanceof Date && Number.isFinite(value.getTime()) ? value : new Date();
-  const year = Math.max(1980, Math.min(2107, d.getFullYear()));
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
-  const hours = d.getHours();
-  const minutes = d.getMinutes();
-  const seconds = Math.floor(d.getSeconds() / 2);
-  return {
-    time: ((hours << 11) | (minutes << 5) | seconds) & 0xffff,
-    date: (((year - 1980) << 9) | (month << 5) | day) & 0xffff,
-  };
-}
-
-async function writeZipBuffer(stream: PassThrough, buffer: Buffer) {
-  if (buffer.length === 0) return;
-  if (!stream.write(buffer)) {
-    await once(stream, "drain");
-  }
-}
-
-type ZipCentralDirectoryEntry = {
-  pathBuffer: Buffer;
-  crc32: number;
-  compressedSize: number;
-  uncompressedSize: number;
-  localHeaderOffset: number;
-  time: number;
-  date: number;
-  externalAttributes: number;
-};
-
-async function writeStoredZipEntry(
-  out: PassThrough,
-  centralDirectory: ZipCentralDirectoryEntry[],
-  state: { offset: number },
-  params: {
-    zipPath: string;
-    modifiedAt?: Date;
-    directory?: boolean;
-    source?: NodeJS.ReadableStream;
-  },
+function addZipStreamEntry(
+  archive: ZipStream,
+  source: NodeJS.ReadableStream | Buffer | null,
+  options: { name: string; type?: "file" | "directory"; date?: Date },
 ) {
-  const normalizedPath = params.directory
-    ? `${params.zipPath.replace(/\/+$/, "")}/`
-    : params.zipPath.replace(/\/+$/, "");
-  const pathBuffer = Buffer.from(normalizedPath, "utf8");
-  if (pathBuffer.length === 0 || pathBuffer.length > 0xffff) return;
-
-  const { time, date } = zipDosDateTime(params.modifiedAt);
-  const localHeaderOffset = state.offset;
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50, 0);
-  local.writeUInt16LE(20, 4);
-  local.writeUInt16LE(ZIP_UTF8_DATA_DESCRIPTOR_FLAG, 6);
-  local.writeUInt16LE(ZIP_STORE_METHOD, 8);
-  local.writeUInt16LE(time, 10);
-  local.writeUInt16LE(date, 12);
-  local.writeUInt32LE(0, 14);
-  local.writeUInt32LE(0, 18);
-  local.writeUInt32LE(0, 22);
-  local.writeUInt16LE(pathBuffer.length, 26);
-  local.writeUInt16LE(0, 28);
-  await writeZipBuffer(out, local);
-  await writeZipBuffer(out, pathBuffer);
-  state.offset += local.length + pathBuffer.length;
-
-  let crc = 0xffffffff;
-  let size = 0;
-  if (!params.directory && params.source) {
-    for await (const rawChunk of params.source as AsyncIterable<Buffer | Uint8Array>) {
-      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-      if (chunk.length === 0) continue;
-      crc = updateZipCrc32(crc, chunk);
-      size += chunk.length;
-      if (size > ZIP_MAX_UINT32) {
-        throw new BadRequestException("حجم ملف داخل الأرشيف يتجاوز الحد المدعوم.");
-      }
-      await writeZipBuffer(out, chunk);
-      state.offset += chunk.length;
-    }
-  }
-
-  const finalCrc = (crc ^ 0xffffffff) >>> 0;
-  const descriptor = Buffer.alloc(16);
-  descriptor.writeUInt32LE(0x08074b50, 0);
-  descriptor.writeUInt32LE(finalCrc, 4);
-  descriptor.writeUInt32LE(size >>> 0, 8);
-  descriptor.writeUInt32LE(size >>> 0, 12);
-  await writeZipBuffer(out, descriptor);
-  state.offset += descriptor.length;
-
-  centralDirectory.push({
-    pathBuffer,
-    crc32: finalCrc,
-    compressedSize: size,
-    uncompressedSize: size,
-    localHeaderOffset,
-    time,
-    date,
-    externalAttributes: params.directory ? 0x10 : 0,
+  return new Promise<void>((resolve, reject) => {
+    archive.entry(source, { ...options, store: true }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
   });
-}
-
-async function finishZip(
-  out: PassThrough,
-  centralDirectory: ZipCentralDirectoryEntry[],
-  state: { offset: number },
-) {
-  const centralStart = state.offset;
-  for (const entry of centralDirectory) {
-    const header = Buffer.alloc(46);
-    header.writeUInt32LE(0x02014b50, 0);
-    header.writeUInt16LE(20, 4);
-    header.writeUInt16LE(20, 6);
-    header.writeUInt16LE(ZIP_UTF8_DATA_DESCRIPTOR_FLAG, 8);
-    header.writeUInt16LE(ZIP_STORE_METHOD, 10);
-    header.writeUInt16LE(entry.time, 12);
-    header.writeUInt16LE(entry.date, 14);
-    header.writeUInt32LE(entry.crc32 >>> 0, 16);
-    header.writeUInt32LE(entry.compressedSize >>> 0, 20);
-    header.writeUInt32LE(entry.uncompressedSize >>> 0, 24);
-    header.writeUInt16LE(entry.pathBuffer.length, 28);
-    header.writeUInt16LE(0, 30);
-    header.writeUInt16LE(0, 32);
-    header.writeUInt16LE(0, 34);
-    header.writeUInt16LE(0, 36);
-    header.writeUInt32LE(entry.externalAttributes >>> 0, 38);
-    header.writeUInt32LE(entry.localHeaderOffset >>> 0, 42);
-    await writeZipBuffer(out, header);
-    await writeZipBuffer(out, entry.pathBuffer);
-    state.offset += header.length + entry.pathBuffer.length;
-  }
-
-  const centralSize = state.offset - centralStart;
-  const end = Buffer.alloc(22);
-  const entryCount = Math.min(centralDirectory.length, 0xffff);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(entryCount, 8);
-  end.writeUInt16LE(entryCount, 10);
-  end.writeUInt32LE(centralSize >>> 0, 12);
-  end.writeUInt32LE(centralStart >>> 0, 16);
-  end.writeUInt16LE(0, 20);
-  await writeZipBuffer(out, end);
-  state.offset += end.length;
 }
 
 function imageExtensionFromMimeType(mimeType: string): string | undefined {
@@ -2202,6 +2041,23 @@ interface MvUploadProjectFilesOptions {
 
 /** تدفقات GridFS المتزامنة لكل طلب رفع؛ تقليل التسلسل يحسّن زمن الطلب الكبير. */
 const MV_GRIDFS_PARALLEL_UPLOAD_LIMIT = 24;
+const MV_ASSET_DOWNLOAD_JOB_TTL_MS = 60 * 60 * 1000;
+
+export type MvAssetImagesDownloadProgress = {
+  id: string;
+  projectId: string;
+  phase: "preparing" | "folders" | "images" | "finalizing" | "completed" | "failed";
+  folderTotal: number;
+  foldersCompleted: number;
+  imageTotal: number;
+  imagesCompleted: number;
+  bytesTotal: number;
+  bytesProcessed: number;
+  percent: number;
+  currentFileName: string | null;
+  error: string | null;
+  updatedAt: number;
+};
 
 async function runWithConcurrency<T>(
   tasks: ReadonlyArray<() => Promise<T>>,
@@ -2569,11 +2425,80 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
   }
 }
 
+const assetImageBackfillJobs = new Map<string, Promise<void>>();
+const assetImageBackfillCompletedAt = new Map<string, number>();
+const ASSET_IMAGE_BACKFILL_COOLDOWN_MS = 5 * 60_000;
+
+function runAssetImageBackfill(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  projectId: ObjectId,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  const key = projectId.toString();
+  const current = assetImageBackfillJobs.get(key);
+  if (current) return current;
+  const lastCompletedAt = assetImageBackfillCompletedAt.get(key) ?? 0;
+  if (!options.force && Date.now() - lastCompletedAt < ASSET_IMAGE_BACKFILL_COOLDOWN_MS) {
+    return Promise.resolve();
+  }
+  let job: Promise<void>;
+  job = backfillPicAssetGridFsImagesAsAssetFiles(db, projectId)
+    .then(() => {
+      assetImageBackfillCompletedAt.set(key, Date.now());
+    })
+    .catch((error) => {
+      console.warn(
+        `[machine-valuation] asset image backfill failed for ${key}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    })
+    .finally(() => {
+      if (assetImageBackfillJobs.get(key) === job) assetImageBackfillJobs.delete(key);
+    });
+  assetImageBackfillJobs.set(key, job);
+  return job;
+}
+
 @Injectable()
 export class MachineValuationService implements OnModuleInit {
   private readonly logger = new Logger(MachineValuationService.name);
+  private readonly assetImagesDownloadJobs = new Map<string, MvAssetImagesDownloadProgress>();
 
   constructor(private readonly inspectorSpaces: DigitalOceanSpacesService) {}
+
+  private updateAssetImagesDownloadJob(
+    id: string | undefined,
+    patch: Partial<MvAssetImagesDownloadProgress>,
+  ) {
+    if (!id) return;
+    const current = this.assetImagesDownloadJobs.get(id);
+    if (!current) return;
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    this.assetImagesDownloadJobs.set(id, next);
+  }
+
+  private trimAssetImagesDownloadJobs() {
+    const cutoff = Date.now() - MV_ASSET_DOWNLOAD_JOB_TTL_MS;
+    for (const [id, job] of this.assetImagesDownloadJobs) {
+      if (job.updatedAt < cutoff) this.assetImagesDownloadJobs.delete(id);
+    }
+  }
+
+  async getAssetImagesDownloadProgress(
+    projectId: string,
+    downloadId: string,
+    ctx: MvAccessContext,
+  ) {
+    const db = await getMongoDb();
+    const pid = toId(projectId);
+    await this.loadProjectForAccess(db, pid, ctx);
+    this.trimAssetImagesDownloadJobs();
+    const job = this.assetImagesDownloadJobs.get(downloadId);
+    if (!job || job.projectId !== pid.toString()) {
+      throw new NotFoundException("Download progress not found");
+    }
+    return { ...job };
+  }
 
   /**
    * إزالة الحقل/الفهارس القديمة ‎subProjectId‎ من وثائق مجلدات الصور في ‎assets‎ (لم يعد مستخدماً).
@@ -2919,6 +2844,38 @@ export class MachineValuationService implements OnModuleInit {
     const sp = db.collection(MV_SUBPROJECTS_COLLECTION);
     const photoAssets = db.collection<AssetDoc>(ASSETS_COLLECTION);
     const itCol = db.collection<MvItemDoc>(MV_ITEMS_COLLECTION);
+    await db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .createIndex({
+        "metadata.projectId": 1,
+        "metadata.scope": 1,
+        "metadata.displayOrder": 1,
+        "metadata.relativePath": 1,
+        uploadDate: 1,
+      })
+      .catch(() => undefined);
+    await db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .createIndex({ "metadata.projectId": 1, "metadata.scope": 1, _id: 1 })
+      .catch(() => undefined);
+    await db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .createIndex({
+        "metadata.projectId": 1,
+        "metadata.scope": 1,
+        "metadata.picAssetId": 1,
+        "metadata.displayOrder": 1,
+      })
+      .catch(() => undefined);
+    await db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .createIndex({
+        "metadata.projectId": 1,
+        "metadata.scope": 1,
+        "metadata.folderPath": 1,
+        "metadata.displayOrder": 1,
+      })
+      .catch(() => undefined);
     await this.migratePhotoFolderAssetsRemoveSubProjectIdField(db);
     await photoAssets.createIndex({ projectId: 1, parent: 1 }).catch(() => undefined);
     await itCol.createIndex({ projectId: 1 }).catch(() => undefined);
@@ -3153,25 +3110,11 @@ export class MachineValuationService implements OnModuleInit {
     throw new NotFoundException("Project not found");
   }
 
-  private async assertInspectorAccessToFolderId(
-    db: Awaited<ReturnType<typeof getMongoDb>>,
-    projectId: ObjectId,
-    folderId: ObjectId,
-    ctx: MvAccessContext,
-  ) {
-    if (ctx.userRole !== "inspector") return;
-    const mvList = await db
-      .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
-      .find({ projectId })
-      .toArray();
-    const itemList = await db
-      .collection<MvItemDoc>(MV_ITEMS_COLLECTION)
-      .find({ projectId })
-      .toArray();
-    const picList = await db
-      .collection<AssetDoc>(ASSETS_COLLECTION)
-      .find({ projectId, ...MV_PHOTO_FOLDER_FILTER })
-      .toArray();
+  private inspectorAllowedFolderIds(
+    mvList: MvSubProjectMongoDoc[],
+    itemList: MvSubProjectMongoDoc[],
+    picList: AssetDoc[],
+  ): Set<string> {
     const fromMv: FolderTreeEntry[] = mvList.map((m) => {
       const p = getParentIdFromDoc(m);
       return {
@@ -3208,12 +3151,36 @@ export class MachineValuationService implements OnModuleInit {
         parent: p.parent!.toString(),
       }));
     const combined = [...fromMv, ...fromItems, ...fromPics];
-    const allowed = new Set(
+    return new Set(
       filterFolderEntriesForInspector(
         combined,
         DEFAULT_PHOTOS_SUBFOLDER_NAME,
       ).map((e) => e._id),
     );
+  }
+
+  private async assertInspectorAccessToFolderId(
+    db: Awaited<ReturnType<typeof getMongoDb>>,
+    projectId: ObjectId,
+    folderId: ObjectId,
+    ctx: MvAccessContext,
+  ) {
+    if (ctx.userRole !== "inspector") return;
+    const [mvList, itemList, picList] = await Promise.all([
+      db
+        .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
+        .find({ projectId })
+        .toArray(),
+      db
+        .collection<MvItemDoc>(MV_ITEMS_COLLECTION)
+        .find({ projectId })
+        .toArray(),
+      db
+        .collection<AssetDoc>(ASSETS_COLLECTION)
+        .find({ projectId, ...MV_PHOTO_FOLDER_FILTER })
+        .toArray(),
+    ]);
+    const allowed = this.inspectorAllowedFolderIds(mvList, itemList, picList);
     if (!allowed.has(folderId.toString())) {
       throw new NotFoundException("Sub-project not found");
     }
@@ -5223,6 +5190,131 @@ export class MachineValuationService implements OnModuleInit {
     };
   }
 
+  async listSubProjectDetails(projectId: string, rawIds: string[], ctx: MvAccessContext) {
+    const db = await getMongoDb();
+    const pid = toId(projectId);
+    await this.loadProjectForAccess(db, pid, ctx);
+
+    const ids = Array.from(new Set(rawIds))
+      .filter((id) => ObjectId.isValid(id))
+      .slice(0, 50)
+      .map((id) => new ObjectId(id));
+    if (ids.length === 0) return { items: [] };
+
+    let subRows: MvSubProjectMongoDoc[];
+    let itemRows: MvSubProjectMongoDoc[];
+    let picOnlyRows: AssetDoc[];
+    let inspectorPicSnapshot: AssetDoc[] | null = null;
+
+    if (ctx.userRole === "inspector") {
+      // حساب الصلاحيات مرة واحدة للدفعة بدل إعادة قراءة شجرة المشروع لكل معرّف.
+      const [allSubRows, allItemRows, allPicRows] = await Promise.all([
+        db
+          .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
+          .find({ projectId: pid })
+          .toArray(),
+        db
+          .collection<MvItemDoc>(MV_ITEMS_COLLECTION)
+          .find({ projectId: pid })
+          .toArray(),
+        db
+          .collection<AssetDoc>(ASSETS_COLLECTION)
+          .find({ projectId: pid, ...MV_PHOTO_FOLDER_FILTER })
+          .toArray(),
+      ]);
+      const allowed = this.inspectorAllowedFolderIds(allSubRows, allItemRows, allPicRows);
+      if (ids.some((sid) => !allowed.has(sid.toString()))) {
+        throw new NotFoundException("Sub-project not found");
+      }
+      const requested = new Set(ids.map((sid) => sid.toString()));
+      subRows = allSubRows.filter((row) => requested.has(row._id.toString()));
+      itemRows = allItemRows.filter((row) => requested.has(row._id.toString()));
+      picOnlyRows = allPicRows.filter((row) => requested.has(row._id.toString()));
+      inspectorPicSnapshot = allPicRows;
+    } else {
+      [subRows, itemRows, picOnlyRows] = await Promise.all([
+        db
+          .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
+          .find({ projectId: pid, _id: { $in: ids } })
+          .toArray(),
+        db
+          .collection<MvItemDoc>(MV_ITEMS_COLLECTION)
+          .find({ projectId: pid, _id: { $in: ids } })
+          .toArray(),
+        db
+          .collection<AssetDoc>(ASSETS_COLLECTION)
+          .find({ projectId: pid, _id: { $in: ids }, ...MV_PHOTO_FOLDER_FILTER })
+          .toArray(),
+      ]);
+    }
+
+    const baseById = new Map<string, MvSubProjectMongoDoc>();
+    for (const row of itemRows) baseById.set(row._id.toString(), row as MvSubProjectMongoDoc);
+    for (const row of subRows) baseById.set(row._id.toString(), row as MvSubProjectMongoDoc);
+
+    const pairClauses: Record<string, unknown>[] = [];
+    for (const row of baseById.values()) {
+      const parent = getParentIdFromDoc(row);
+      if (parent && row.name) pairClauses.push({ parent, name: row.name });
+    }
+    const pairKey = (parent: unknown, name: unknown) => `${String(parent ?? "")}\u0000${String(name ?? "")}`;
+    const requestedPairKeys = new Set(
+      Array.from(baseById.values()).map((row) => pairKey(getParentIdFromDoc(row), row.name)),
+    );
+    const pairedPics = pairClauses.length > 0
+      ? inspectorPicSnapshot
+        ? inspectorPicSnapshot.filter((pic) => requestedPairKeys.has(pairKey(pic.parent, pic.name)))
+        : await db
+            .collection<AssetDoc>(ASSETS_COLLECTION)
+            .find({
+              projectId: pid,
+              ...MV_PHOTO_FOLDER_FILTER,
+              $or: pairClauses,
+            } as Filter<AssetDoc>)
+            .toArray()
+      : [];
+    const picByPair = new Map(
+      pairedPics.map((pic) => [pairKey(pic.parent, pic.name), pic as PicAssetMongoDoc]),
+    );
+    const picOnlyById = new Map(
+      picOnlyRows.map((pic) => [pic._id.toString(), pic as PicAssetMongoDoc]),
+    );
+
+    const items: Record<string, unknown>[] = [];
+    for (const sid of ids) {
+      const key = sid.toString();
+      const base = baseById.get(key);
+      if (base) {
+        const parent = getParentIdFromDoc(base);
+        const pic = parent ? picByPair.get(pairKey(parent, base.name)) ?? null : null;
+        const fallback = { _id: sid, projectId: pid };
+        items.push({
+          ...serializeMvSubProject(base, fallback),
+          picAsset: pic ? serializePicAsset(pic, fallback) : null,
+        });
+        continue;
+      }
+
+      const picOnly = picOnlyById.get(key);
+      if (!picOnly) continue;
+      const created = picOnly.createdAt ?? picOnly.importedAt ?? picOnly.updatedAt;
+      items.push({
+        _id: picOnly._id.toString(),
+        projectId: picOnly.projectId?.toString?.() ?? pid.toString(),
+        parent: picOnly.parent != null ? String(picOnly.parent) : "",
+        name: picOnly.name ?? "",
+        createdAt:
+          created instanceof Date && !Number.isNaN(created.getTime())
+            ? created.toISOString()
+            : mvProjectDateToIso(picOnly.updatedAt),
+        updatedAt: mvProjectDateToIso(picOnly.updatedAt),
+        picAsset: serializePicAsset(picOnly, { _id: sid, projectId: pid }),
+      });
+    }
+
+    return { items };
+  }
+
   async getSubProject(projectId: string, subId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const pid = toId(projectId);
@@ -6293,35 +6385,135 @@ export class MachineValuationService implements OnModuleInit {
     return { ok: true };
   }
 
-  async listProjectAssetImageFiles(projectId: string, ctx: MvAccessContext) {
+  async listProjectAssetImageFiles(
+    projectId: string,
+    ctx: MvAccessContext,
+  ): Promise<ReturnType<typeof mapStoredFileDoc>[]>;
+  async listProjectAssetImageFiles(
+    projectId: string,
+    ctx: MvAccessContext,
+    mode: "skip-backfill",
+  ): Promise<ReturnType<typeof mapStoredFileDoc>[]>;
+  async listProjectAssetImageFiles(
+    projectId: string,
+    ctx: MvAccessContext,
+    page: { cursor?: string; limit?: number },
+  ): Promise<{
+    items: ReturnType<typeof mapStoredFileDoc>[];
+    nextCursor: string | null;
+    hasMore: boolean;
+    total: number;
+  }>;
+  async listProjectAssetImageFiles(
+    projectId: string,
+    ctx: MvAccessContext,
+    page?: { cursor?: string; limit?: number } | "skip-backfill",
+  ) {
     const db = await getMongoDb();
     const pid = toId(projectId);
     await this.loadProjectForAccess(db, pid, ctx);
-    await backfillPicAssetGridFsImagesAsAssetFiles(db, pid);
+    // العقد القديم يبقى كاملاً. أمّا pagination فتقرأ snapshot ثابتًا وسريعًا؛
+    // صور PicAsset القديمة تصل للواجهة عبر subproject-details بلا تعديل المجموعة أثناء التصفح.
+    if (page == null) await runAssetImageBackfill(db, pid);
 
-    const files = await db
-      .collection<{
-        _id: ObjectId;
-        filename?: string;
-        length?: number;
-        uploadDate?: Date;
-        metadata?: MvStoredFileMetadata;
-      }>(MV_FILES_FILES_COLLECTION)
-      .find({
-        "metadata.projectId": pid,
-        "metadata.scope": "asset-images",
-      })
-      .toArray();
+    type AssetFileRow = {
+      _id: ObjectId;
+      filename?: string;
+      length?: number;
+      uploadDate?: Date;
+      metadata?: MvStoredFileMetadata;
+    };
+    const collection = db.collection<AssetFileRow>(MV_FILES_FILES_COLLECTION);
+    const filter = {
+      "metadata.projectId": pid,
+      "metadata.scope": "asset-images",
+    };
+
+    if (page && page !== "skip-backfill") {
+      const limit = Number.isFinite(page.limit)
+        ? Math.min(250, Math.max(20, Math.trunc(page.limit!)))
+        : 100;
+      const cursorText = String(page.cursor ?? "0").trim();
+      if (!/^\d{1,7}$/.test(cursorText)) {
+        throw new BadRequestException("cursor غير صالح.");
+      }
+      const offset = Number(cursorText);
+      const [files, total] = await Promise.all([
+        collection
+          .aggregate<AssetFileRow>([
+            { $match: filter },
+            {
+              $set: {
+                __mvOrderMissing: {
+                  $cond: [{ $isNumber: "$metadata.displayOrder" }, 0, 1],
+                },
+                __mvPath: {
+                  $ifNull: ["$metadata.relativePath", { $ifNull: ["$filename", ""] }],
+                },
+              },
+            },
+            {
+              $sort: {
+                __mvOrderMissing: 1,
+                "metadata.displayOrder": 1,
+                __mvPath: 1,
+                uploadDate: 1,
+                _id: 1,
+              },
+            },
+            { $skip: offset },
+            { $limit: limit },
+          ], { allowDiskUse: true })
+          .toArray(),
+        collection.countDocuments(filter),
+      ]);
+      const nextOffset = offset + files.length;
+      const hasMore = nextOffset < total;
+      return {
+        items: files.map((file) => mapStoredFileDoc(file)),
+        nextCursor: hasMore ? String(nextOffset) : null,
+        hasMore,
+        total,
+      };
+    }
+
+    const files = await collection.find(filter).toArray();
 
     files.sort(compareAssetImageGridDocs);
     return files.map((file) => mapStoredFileDoc(file));
   }
 
-  async getProjectAssetImagesZip(projectId: string, ctx: MvAccessContext) {
+  async getProjectAssetImagesZip(
+    projectId: string,
+    ctx: MvAccessContext,
+    requestedDownloadId?: string,
+  ) {
     const db = await getMongoDb();
     const pid = toId(projectId);
     const project = await this.loadProjectForAccess(db, pid, ctx);
-    await backfillPicAssetGridFsImagesAsAssetFiles(db, pid);
+    const downloadId =
+      typeof requestedDownloadId === "string" && /^[a-zA-Z0-9-]{8,80}$/.test(requestedDownloadId)
+        ? requestedDownloadId
+        : undefined;
+    if (downloadId) {
+      this.trimAssetImagesDownloadJobs();
+      this.assetImagesDownloadJobs.set(downloadId, {
+        id: downloadId,
+        projectId: pid.toString(),
+        phase: "preparing",
+        folderTotal: 0,
+        foldersCompleted: 0,
+        imageTotal: 0,
+        imagesCompleted: 0,
+        bytesTotal: 0,
+        bytesProcessed: 0,
+        percent: 1,
+        currentFileName: null,
+        error: null,
+        updatedAt: Date.now(),
+      });
+    }
+    await runAssetImageBackfill(db, pid, { force: true });
 
     const photosRoot = await this.ensurePhotosRootFolder(db, pid);
     const [itemFolders, picFolders, assetFiles] = await Promise.all([
@@ -6462,22 +6654,59 @@ export class MachineValuationService implements OnModuleInit {
       `${rootFolderName}-${project.name || projectId}.zip`,
       "asset-images.zip",
     );
-    const out = new PassThrough();
+    const sortedDirectoryPaths = [...directoryPaths].sort((a, b) =>
+      a.localeCompare(b, "ar", { numeric: true }),
+    );
+    const bytesTotal = imageFiles.reduce((sum, file) => sum + Math.max(0, file.length ?? 0), 0);
+    this.updateAssetImagesDownloadJob(downloadId, {
+      folderTotal: sortedDirectoryPaths.length,
+      imageTotal: imageFiles.length,
+      bytesTotal,
+      phase: "folders",
+      percent: 3,
+    });
+
+    const out = new PassThrough({ highWaterMark: 1024 * 1024 });
+    const archive = new ZipStream({ forceZip64: true, store: true });
+    archive.pipe(out);
+    out.on("close", () => {
+      if (!out.writableEnded) {
+        archive.destroy();
+        const currentJob = downloadId ? this.assetImagesDownloadJobs.get(downloadId) : undefined;
+        if (currentJob?.phase !== "failed") {
+          this.updateAssetImagesDownloadJob(downloadId, {
+            phase: "failed",
+            currentFileName: null,
+            error: "تم إلغاء التنزيل أو انقطع الاتصال.",
+          });
+        }
+      }
+    });
 
     void (async () => {
-      const centralDirectory: ZipCentralDirectoryEntry[] = [];
-      const state = { offset: 0 };
       const usedZipPaths = new Set<string>();
+      let foldersCompleted = 0;
+      let imagesCompleted = 0;
+      let bytesProcessed = 0;
       try {
-        for (const dir of [...directoryPaths].sort((a, b) => a.localeCompare(b, "ar", { numeric: true }))) {
+        for (const dir of sortedDirectoryPaths) {
           const normalized = uniqueZipPath(`${dir.replace(/\/+$/, "")}/`, usedZipPaths);
-          await writeStoredZipEntry(out, centralDirectory, state, {
-            zipPath: normalized,
-            directory: true,
-            modifiedAt: new Date(),
+          await addZipStreamEntry(archive, null, {
+            name: normalized,
+            type: "directory",
+            date: new Date(),
+          });
+          foldersCompleted += 1;
+          this.updateAssetImagesDownloadJob(downloadId, {
+            foldersCompleted,
+            percent: Math.min(
+              10,
+              3 + Math.round((foldersCompleted / Math.max(1, sortedDirectoryPaths.length)) * 7),
+            ),
           });
         }
 
+        this.updateAssetImagesDownloadJob(downloadId, { phase: "images", percent: 10 });
         for (const file of imageFiles) {
           const meta = file.metadata;
           const rawName =
@@ -6504,22 +6733,67 @@ export class MachineValuationService implements OnModuleInit {
             if (parts[0] === rootFolderName) parts.shift();
             zipPath = joinZipPath([rootFolderName, ...parts]);
           }
+
           const stream = await this.openStoredProjectFileStream(db, file);
-          await writeStoredZipEntry(out, centralDirectory, state, {
-            zipPath: uniqueZipPath(zipPath, usedZipPaths),
-            source: stream,
-            modifiedAt: meta?.updatedAt instanceof Date ? meta.updatedAt : file.uploadDate,
+          const meter = new PassThrough({ highWaterMark: 1024 * 1024 });
+          stream.on("error", (error) => meter.destroy(error));
+          meter.on("data", (chunk: Buffer) => {
+            bytesProcessed += chunk.length;
+            const ratio = bytesTotal > 0
+              ? bytesProcessed / bytesTotal
+              : imagesCompleted / Math.max(1, imageFiles.length);
+            this.updateAssetImagesDownloadJob(downloadId, {
+              bytesProcessed,
+              percent: Math.min(98, 10 + Math.round(Math.min(1, ratio) * 88)),
+            });
           });
+          stream.pipe(meter);
+          this.updateAssetImagesDownloadJob(downloadId, { currentFileName: fileName });
+          await addZipStreamEntry(archive, meter, {
+            name: uniqueZipPath(zipPath, usedZipPaths),
+            type: "file",
+            date: meta?.updatedAt instanceof Date ? meta.updatedAt : file.uploadDate,
+          });
+          imagesCompleted += 1;
+          this.updateAssetImagesDownloadJob(downloadId, { imagesCompleted });
         }
 
-        await finishZip(out, centralDirectory, state);
-        out.end();
+        this.updateAssetImagesDownloadJob(downloadId, {
+          phase: "finalizing",
+          currentFileName: null,
+          percent: 99,
+        });
+        archive.once("end", () => {
+          this.updateAssetImagesDownloadJob(downloadId, {
+            phase: "completed",
+            foldersCompleted: sortedDirectoryPaths.length,
+            imagesCompleted: imageFiles.length,
+            bytesProcessed: bytesTotal,
+            currentFileName: null,
+            percent: 100,
+          });
+        });
+        archive.finalize();
       } catch (error) {
-        out.destroy(error instanceof Error ? error : new Error(String(error)));
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Asset images ZIP failed: ${message}`);
+        this.updateAssetImagesDownloadJob(downloadId, {
+          phase: "failed",
+          currentFileName: null,
+          error: message,
+        });
+        archive.destroy(error instanceof Error ? error : new Error(message));
+        out.destroy(error instanceof Error ? error : new Error(message));
       }
     })();
 
-    return { stream: out, fileName: zipFileName, imageCount: imageFiles.length };
+    return {
+      stream: out,
+      fileName: zipFileName,
+      imageCount: imageFiles.length,
+      folderCount: sortedDirectoryPaths.length,
+      downloadId,
+    };
   }
 
   /** يُحدِّث ‎displayOrder‎ لجميع صور مسار واحد وفقًا للترتيب المطلوب. */
@@ -6603,7 +6877,7 @@ export class MachineValuationService implements OnModuleInit {
       ),
     );
 
-    return this.listProjectAssetImageFiles(projectId, ctx);
+    return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
   }
 
   /**
@@ -6699,7 +6973,7 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("معرف موضع الإدراج غير صالح.");
       }
       if (insertBeforeOid.equals(oidMoving)) {
-        return this.listProjectAssetImageFiles(projectId, ctx);
+        return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
       }
       const anchor = await col.findOne({
         _id: insertBeforeOid,
@@ -6851,7 +7125,7 @@ export class MachineValuationService implements OnModuleInit {
       );
     }
 
-    return this.listProjectAssetImageFiles(projectId, ctx);
+    return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
   }
 
   async updateProjectAssetImageReportSelection(
@@ -6898,7 +7172,7 @@ export class MachineValuationService implements OnModuleInit {
       throw new BadRequestException("بعض الصور غير موجودة أو لا تنتمي لهذا المشروع.");
     }
 
-    return this.listProjectAssetImageFiles(projectId, ctx);
+    return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
   }
 
   private async uniqueRelativePathForAssetImageFolder(
@@ -7171,15 +7445,44 @@ export class MachineValuationService implements OnModuleInit {
       metadata?: MvStoredFileMetadata;
     },
   ): Promise<NodeJS.ReadableStream> {
-    if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
-      try {
-        const object = await this.inspectorSpaces.getObjectStream(file.metadata.spacesKey.trim());
-        return object.stream;
-      } catch {
-        throw new NotFoundException("File not found");
+    const spacesKey =
+      file.metadata?.storage === "digitalocean" ? file.metadata.spacesKey?.trim() : undefined;
+    const bucket = spacesKey ? null : this.getFilesBucket(db);
+    const maxAttempts = 4;
+    const self = this;
+
+    async function* readWithResume(): AsyncGenerator<Buffer> {
+      let offset = 0;
+      let attempt = 0;
+      for (;;) {
+        attempt += 1;
+        let source: NodeJS.ReadableStream;
+        try {
+          if (spacesKey) {
+            const object = await self.inspectorSpaces.getObjectStream(
+              spacesKey,
+              offset > 0 ? { rangeHeader: `bytes=${offset}-` } : undefined,
+            );
+            source = object.stream;
+          } else {
+            source = bucket!.openDownloadStream(file._id, offset > 0 ? { start: offset } : undefined);
+          }
+
+          for await (const rawChunk of source as AsyncIterable<Buffer | Uint8Array>) {
+            const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+            if (chunk.length === 0) continue;
+            offset += chunk.length;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          if (attempt >= maxAttempts) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+        }
       }
     }
-    return this.getFilesBucket(db).openDownloadStream(file._id);
+
+    return Readable.from(readWithResume(), { highWaterMark: 1024 * 1024 });
   }
 
   async getProjectFileDownload(projectId: string, fileId: string, ctx: MvAccessContext) {

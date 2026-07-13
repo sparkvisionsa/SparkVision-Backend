@@ -387,6 +387,26 @@ export class MachineValuationController {
     return result;
   }
 
+  @Get("projects/:pid/subproject-details")
+  async listSubProjectDetails(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("pid") projectId: string,
+    @Query("ids") idsRaw?: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const ids = String(idsRaw ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (ids.length > 50) throw new BadRequestException("الحد الأقصى للدفعة 50 مجلدًا.");
+    if (ids.some((id) => !/^[a-f0-9]{24}$/i.test(id))) {
+      throw new BadRequestException("تحتوي الدفعة على معرف مجلد غير صالح.");
+    }
+    return this.mvService.listSubProjectDetails(projectId, ids, toMvAccess(context));
+  }
+
   @Get("projects/:pid/subprojects/:sid")
   async getSubProject(
     @Req() req: Request,
@@ -480,9 +500,18 @@ export class MachineValuationController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Param("pid") projectId: string,
+    @Query("cursor") cursor?: string,
+    @Query("limit") limitRaw?: string,
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
+    const wantsPage = cursor != null || limitRaw != null;
+    if (wantsPage) {
+      return this.mvService.listProjectAssetImageFiles(projectId, toMvAccess(context), {
+        cursor,
+        limit: Number(limitRaw),
+      });
+    }
     return this.mvService.listProjectAssetImageFiles(projectId, toMvAccess(context));
   }
 
@@ -490,20 +519,34 @@ export class MachineValuationController {
   async downloadProjectAssetImageFiles(
     @Req() req: Request,
     @Param("pid") projectId: string,
+    @Query("downloadId") downloadId: string | undefined,
     @Res() res: Response,
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    const download = await this.mvService.getProjectAssetImagesZip(projectId, toMvAccess(context));
+    const download = await this.mvService.getProjectAssetImagesZip(
+      projectId,
+      toMvAccess(context),
+      downloadId,
+    );
     res.setHeader("Content-Type", "application/zip");
     res.setHeader(
       "Content-Disposition",
       `attachment; filename*=UTF-8''${encodeURIComponent(download.fileName)}`,
     );
     res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("X-Asset-Folder-Count", String(download.folderCount));
+    res.setHeader("X-Asset-Image-Count", String(download.imageCount));
 
     return new Promise<void>((resolve, reject) => {
-      download.stream.on("error", (error) => {
+      const cleanup = () => {
+        download.stream.removeListener("error", onStreamError);
+        res.removeListener("finish", onFinish);
+        res.removeListener("close", onResponseClose);
+      };
+      const onStreamError = (error: Error) => {
+        cleanup();
         if (!res.headersSent) {
           res.status(500);
         }
@@ -511,10 +554,38 @@ export class MachineValuationController {
           res.end();
         }
         reject(error);
-      });
-      res.on("finish", resolve);
+      };
+      const onFinish = () => {
+        cleanup();
+        resolve();
+      };
+      const onResponseClose = () => {
+        if (!res.writableEnded) {
+          download.stream.destroy(new Error("Asset images download client disconnected"));
+        }
+      };
+      download.stream.once("error", onStreamError);
+      res.once("finish", onFinish);
+      res.once("close", onResponseClose);
       download.stream.pipe(res);
     });
+  }
+
+  @Get("projects/:pid/asset-image-files/download-progress/:downloadId")
+  async getProjectAssetImageDownloadProgress(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("pid") projectId: string,
+    @Param("downloadId") downloadId: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "no-store");
+    return this.mvService.getAssetImagesDownloadProgress(
+      projectId,
+      downloadId,
+      toMvAccess(context),
+    );
   }
 
   @Post("projects/:pid/asset-image-files")
