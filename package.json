@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:auth-tracking": "node --import tsx --test tests/auth-tracking.test.ts",
     "migrate:auth-tracking": "node scripts/migrate-auth-tracking.mjs",
+    "migrate:asset-images-to-spaces": "node scripts/migrate-asset-images-to-spaces.mjs",
     "optimize:indexes": "node scripts/optimize-source-indexes.mjs"
   },
   "dependencies": {

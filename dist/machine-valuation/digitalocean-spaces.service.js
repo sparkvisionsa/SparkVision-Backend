@@ -105,6 +105,7 @@ let DigitalOceanSpacesService = DigitalOceanSpacesService_1 = class DigitalOcean
         const secretAccessKey = env("DO_SPACES_SECRET_ACCESS_KEY") || env("DO_SPACES_SECRET_KEY");
         this.bucket = env("DO_SPACES_BUCKET") || env("DO_SPACES_BUCKET_NAME");
         this.prefix = sanitizeSpacesKeySegment(env("DO_SPACES_INSPECTOR_PREFIX") || "mv-inspector", "mv-inspector");
+        this.assetImagesPrefix = sanitizeSpacesKeySegment(env("DO_SPACES_ASSET_IMAGES_PREFIX") || "mv-asset-images", "mv-asset-images");
         const originEndpoint = trimTrailingSlash(env("DO_SPACES_ORIGIN_ENDPOINT"));
         const endpoint = trimTrailingSlash(env("DO_SPACES_ENDPOINT") || deriveEndpointFromOrigin(originEndpoint, this.bucket));
         const region = env("DO_SPACES_REGION") || deriveRegionFromEndpoint(endpoint);
@@ -136,6 +137,15 @@ let DigitalOceanSpacesService = DigitalOceanSpacesService_1 = class DigitalOcean
         const fileSegment = sanitizeSpacesKeySegment(fileName, "file");
         return [this.prefix, projectSegment, entrySegment, fileSegment].filter(Boolean).join("/");
     }
+    buildAssetImageKey(projectId, assetId, imageId, fileName) {
+        const projectSegment = sanitizeSpacesKeySegment(projectId, "project");
+        const assetSegment = sanitizeSpacesKeySegment(assetId, "asset");
+        const imageSegment = sanitizeSpacesKeySegment(imageId, "image");
+        const fileSegment = sanitizeSpacesKeySegment(fileName, "image");
+        return [this.assetImagesPrefix, projectSegment, assetSegment, imageSegment, fileSegment]
+            .filter(Boolean)
+            .join("/");
+    }
     publicUrlForKey(key) {
         if (!this.originEndpoint)
             return "";
@@ -150,6 +160,19 @@ let DigitalOceanSpacesService = DigitalOceanSpacesService_1 = class DigitalOcean
             Body: params.buffer,
             ContentType: params.contentType || "application/octet-stream",
             ContentLength: params.buffer.length,
+        }));
+        return { key, url: this.publicUrlForKey(key) };
+    }
+    async uploadAssetImage(params) {
+        const client = this.requireClient();
+        const key = this.buildAssetImageKey(params.projectId, params.assetId, params.imageId, params.fileName);
+        await client.send(new client_s3_1.PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: params.buffer,
+            ContentType: params.contentType || "application/octet-stream",
+            ContentLength: params.buffer.length,
+            ACL: "public-read",
         }));
         return { key, url: this.publicUrlForKey(key) };
     }

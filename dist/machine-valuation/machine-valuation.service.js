@@ -2377,6 +2377,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             .catch(() => undefined);
         await this.migratePhotoFolderAssetsRemoveSubProjectIdField(db);
         await photoAssets.createIndex({ projectId: 1, parent: 1 }).catch(() => undefined);
+        await photoAssets.createIndex({ projectId: 1, isAssetFolder: 1 }).catch(() => undefined);
+        await sp.createIndex({ projectId: 1 }).catch(() => undefined);
+        await db.collection(collections_2.MV_SHEETS_COLLECTION).createIndex({ projectId: 1 }).catch(() => undefined);
         await itCol.createIndex({ projectId: 1 }).catch(() => undefined);
         const toRename = await sp
             .find({ parentSubProjectId: { $exists: true } })
@@ -3217,34 +3220,20 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             userId: 1,
             workflowStatus: 1,
             reportType: 1,
-            locations: 1,
-            contacts: 1,
-            inspectionAssignments: 1,
             reportData: {
                 valuationMethod: 1,
-                reportReference: 1,
-                reportTitle: 1,
                 valuationPurpose: 1,
                 valuePremise: 1,
                 valuationBasis: 1,
+                reportTitle: 1,
                 reportIssueDate: 1,
-                agreementDate: 1,
                 inspectionDate: 1,
                 valuationDate: 1,
-                clientName: 1,
-                clientEmail: 1,
-                clientPhone: 1,
-                clientLegalType: 1,
-                clientActivity: 1,
-                clientRepresentativeName: 1,
-                intendedUsers: 1,
-                intendedUse: 1,
                 inspectionLocation: 1,
-                inspectionMapUrl: 1,
+                clientName: 1,
                 finalValue: 1,
                 reportTemplateId: 1,
             },
-            valuationAccountingWorkspace: { images: 1 },
         };
         let projects;
         if (ctx.isSuperAdmin) {
@@ -3271,7 +3260,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const projectIds = projects.map((p) => p._id);
         const matchInProjects = { $match: { projectId: { $in: projectIds } } };
         const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } };
-        const [counts, itemCounts, sheetAgg, picAssetAgg] = await Promise.all([
+        const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg] = await Promise.all([
             db
                 .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
                 .aggregate([matchInProjects, groupByProject])
@@ -3305,7 +3294,13 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                         _id: "$projectId",
                         picAssetCount: { $sum: 1 },
                         imageCount: {
-                            $sum: { $size: { $ifNull: ["$images", []] } },
+                            $sum: {
+                                $cond: [
+                                    { $gte: [{ $ifNull: ["$imageCount", -1] }, 0] },
+                                    { $max: [0, { $floor: "$imageCount" }] },
+                                    { $size: { $ifNull: ["$images", []] } },
+                                ],
+                            },
                         },
                     },
                 },
@@ -3313,6 +3308,23 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 .toArray()
                 .catch((err) => {
                 this.logger.warn(`listProjects: pic asset aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
+                return [];
+            }),
+            col
+                .aggregate([
+                { $match: { _id: { $in: projectIds } } },
+                {
+                    $project: {
+                        _id: 1,
+                        valuationAccountImageCount: {
+                            $size: { $ifNull: ["$valuationAccountingWorkspace.images", []] },
+                        },
+                    },
+                },
+            ])
+                .toArray()
+                .catch((err) => {
+                this.logger.warn(`listProjects: valuation image aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
                 return [];
             }),
         ]);
@@ -3334,6 +3346,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 imageCount: toSafeNonNegativeInt(c.imageCount),
             },
         ]));
+        const valuationImageMap = new Map(valuationImageAgg
+            .filter((row) => row._id != null)
+            .map((row) => [row._id.toString(), toSafeNonNegativeInt(row.valuationAccountImageCount)]));
         const creatorIds = Array.from(new Set(projects
             .map((project) => (0, object_id_util_1.tryCoerceToObjectId)(project.userId))
             .filter((value) => value != null)));
@@ -3364,7 +3379,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             const reportDataSummary = pickReportDataProgressSummary(p.reportData);
             const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
             const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
-            const valuationAccountImageCount = (0, mv_project_progress_util_1.countValuationAccountImages)(p.valuationAccountingWorkspace);
+            const valuationAccountImageCount = toSafeNonNegativeInt(valuationImageMap.get(idStr));
             return {
                 _id: idStr,
                 name: String(p.name ?? ""),
@@ -3393,10 +3408,6 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 }),
                 workflowStatus: projectWorkflowStatus(p),
                 reportType: projectReportType(p),
-                reportData: reportDataSummary,
-                locations: sanitizeProjectLocations(p.locations, false),
-                contacts: sanitizeProjectContacts(p.contacts, false),
-                inspectionAssignments: sanitizeInspectionAssignments(p.inspectionAssignments, sanitizeProjectLocations(p.locations, false)).map(serializeInspectionAssignment),
                 createdByUserId: (() => {
                     const id = (0, object_id_util_1.tryCoerceToObjectId)(p.userId);
                     return id?.toString() ?? (typeof p.userId === "string" ? p.userId : null);
@@ -5645,7 +5656,16 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const picAssetScopeFilter = (picOid) => picOid
             ? { "metadata.picAssetId": picOid }
             : { "metadata.picAssetId": { $exists: false } };
-        if (targetPicOid && !crossFolderMove) {
+        const siblingDocsForFolder = async (folderNorm, picOid) => col
+            .find({
+            "metadata.projectId": pid,
+            "metadata.scope": "asset-images",
+            ...picAssetScopeFilter(picOid),
+            ...assetImageFolderMongoFilter(folderNorm),
+            _id: { $ne: oidMoving },
+        })
+            .toArray();
+        if (targetPicOid) {
             const picFolder = await db.collection(collections_3.ASSETS_COLLECTION).findOne({
                 _id: targetPicOid,
                 projectId: pid,
@@ -5656,6 +5676,76 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             }
             const photosRoot = await this.ensurePhotosRootFolder(db, pid);
             await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picFolder);
+        }
+        if (targetPicOid) {
+            if (!this.inspectorSpaces.isReady()) {
+                throw new common_1.BadRequestException("DigitalOcean Spaces غير مهيأ لرفع صور الأصول.");
+            }
+            const existingSpacesKey = moveDoc.metadata?.storage === "digitalocean" ? moveDoc.metadata.spacesKey?.trim() : "";
+            let imageUrl;
+            let imageKey;
+            if (existingSpacesKey) {
+                imageUrl = this.inspectorSpaces.publicUrlForKey(existingSpacesKey);
+                imageKey = existingSpacesKey;
+            }
+            else {
+                const bucket = this.getFilesBucket(db);
+                const chunks = [];
+                for await (const chunk of bucket.openDownloadStream(oidMoving)) {
+                    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                }
+                const data = Buffer.concat(chunks);
+                const imageId = new mongodb_1.ObjectId();
+                let uploaded;
+                try {
+                    uploaded = await this.inspectorSpaces.uploadAssetImage({
+                        projectId,
+                        assetId: targetPicOid.toString(),
+                        imageId: imageId.toString(),
+                        fileName: oldBasename,
+                        buffer: data,
+                        contentType: moveDoc.metadata?.mimeType || "application/octet-stream",
+                    });
+                }
+                catch (err) {
+                    this.logger.error(`placeProjectAssetImageFile Spaces: ${err instanceof Error ? err.message : String(err)}`);
+                    throw new common_1.BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
+                }
+                imageUrl = uploaded.url;
+                imageKey = uploaded.key;
+            }
+            const now = new Date();
+            await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: targetPicOid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, {
+                $push: {
+                    images: {
+                        _id: new mongodb_1.ObjectId(),
+                        url: imageUrl,
+                        publicId: imageKey,
+                        createdAt: now,
+                        mediaType: "image",
+                        mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
+                        includeInReport: moveDoc.metadata?.includeInReport !== false,
+                    },
+                },
+                $set: { updatedAt: now },
+            });
+            if (existingSpacesKey) {
+                await col.deleteOne({ _id: oidMoving });
+            }
+            else {
+                await this.getFilesBucket(db).delete(oidMoving);
+            }
+            if (sourcePicOid) {
+                const restSource = (await siblingDocsForFolder(sourceFolderNormalized, sourcePicOid)).sort(compareAssetImageGridDocs);
+                await Promise.all(restSource.map((d, i) => col.updateOne({ _id: d._id }, {
+                    $set: {
+                        "metadata.displayOrder": i,
+                        "metadata.folderPath": sourceFolderNormalized,
+                        "metadata.updatedAt": now,
+                    },
+                })));
+            }
+            return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
         }
         let insertBeforeOid = null;
         if (insertBeforeTrim) {
@@ -5680,21 +5770,11 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 throw new common_1.BadRequestException("موضع الإدراج يجب أن يكون ضمن المجلد المستهدف.");
             }
             const anchorPicOid = anchor.metadata.picAssetId ?? null;
-            if ((targetPicOid && !anchorPicOid?.equals(targetPicOid)) ||
-                (!targetPicOid && anchorPicOid)) {
+            if (anchorPicOid) {
                 throw new common_1.BadRequestException("موضع الإدراج لا ينتمي لنفس مجلد صور الأصول.");
             }
         }
-        const siblingDocsForFolder = async (folderNorm, picOid) => col
-            .find({
-            "metadata.projectId": pid,
-            "metadata.scope": "asset-images",
-            ...picAssetScopeFilter(picOid),
-            ...assetImageFolderMongoFilter(folderNorm),
-            _id: { $ne: oidMoving },
-        })
-            .toArray();
-        const siblingsSorted = (await siblingDocsForFolder(targetFolderNormalized, targetPicOid)).sort(compareAssetImageGridDocs);
+        const siblingsSorted = (await siblingDocsForFolder(targetFolderNormalized, null)).sort(compareAssetImageGridDocs);
         let idsOrdered;
         if (insertBeforeOid) {
             const idxBefore = siblingsSorted.findIndex((d) => d._id.equals(insertBeforeOid));
@@ -5716,28 +5796,13 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 folderPathNorm: targetFolderNormalized,
                 preferredBasename: oldBasename,
             });
-            if (targetPicOid) {
-                const picFolder = await db.collection(collections_3.ASSETS_COLLECTION).findOne({
-                    _id: targetPicOid,
-                    projectId: pid,
-                    ...MV_PHOTO_FOLDER_FILTER,
-                });
-                if (!picFolder) {
-                    throw new common_1.BadRequestException("مجلد الأصل المستهدف غير موجود أو غير صالح.");
-                }
-                const photosRoot = await this.ensurePhotosRootFolder(db, pid);
-                await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picFolder);
-            }
             const setMeta = {
                 "metadata.relativePath": uniq.relativePath,
                 "metadata.folderPath": uniq.folderPath,
                 "metadata.updatedAt": now,
             };
             const unsetMeta = {};
-            if (targetPicOid) {
-                setMeta["metadata.picAssetId"] = targetPicOid;
-            }
-            else if (sourcePicOid) {
+            if (sourcePicOid) {
                 unsetMeta["metadata.picAssetId"] = "";
             }
             const updatePayload = { $set: setMeta };
@@ -5745,19 +5810,8 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 updatePayload.$unset = unsetMeta;
             await col.updateOne({ _id: oidMoving, "metadata.projectId": pid, "metadata.scope": "asset-images" }, updatePayload);
         }
-        if (!crossFolderMove && sourcePicOid?.toString() !== targetPicOid?.toString()) {
-            const setMeta = { "metadata.updatedAt": now };
-            const unsetMeta = {};
-            if (targetPicOid) {
-                setMeta["metadata.picAssetId"] = targetPicOid;
-            }
-            else {
-                unsetMeta["metadata.picAssetId"] = "";
-            }
-            const updatePayload = { $set: setMeta };
-            if (Object.keys(unsetMeta).length > 0)
-                updatePayload.$unset = unsetMeta;
-            await col.updateOne({ _id: oidMoving, "metadata.projectId": pid, "metadata.scope": "asset-images" }, updatePayload);
+        if (!crossFolderMove && sourcePicOid) {
+            await col.updateOne({ _id: oidMoving, "metadata.projectId": pid, "metadata.scope": "asset-images" }, { $set: { "metadata.updatedAt": now }, $unset: { "metadata.picAssetId": "" } });
         }
         await Promise.all(idsOrdered.map((fid, i) => col.updateOne({ _id: fid, "metadata.projectId": pid, "metadata.scope": "asset-images" }, {
             $set: {
@@ -5896,6 +5950,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             if (options.scope !== "asset-images" || options.imageOnly !== true) {
                 throw new common_1.BadRequestException("الأصل يقبل صور الأصول فقط.");
             }
+            if (!this.inspectorSpaces.isReady()) {
+                throw new common_1.BadRequestException("DigitalOcean Spaces غير مهيأ لرفع صور الأصول.");
+            }
             const photosRoot = await this.ensurePhotosRootFolder(db, pid);
             await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picAssetFolder);
         }
@@ -5945,6 +6002,50 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 includeInReport: true,
                 ...(typeof assignedOrder === "number" ? { displayOrder: assignedOrder } : {}),
             };
+            if (folderIsPicAsset && sid) {
+                const imageId = new mongodb_1.ObjectId();
+                let uploaded;
+                try {
+                    uploaded = await this.inspectorSpaces.uploadAssetImage({
+                        projectId,
+                        assetId: sid.toString(),
+                        imageId: imageId.toString(),
+                        fileName,
+                        buffer: data,
+                        contentType: file.mimetype || "application/octet-stream",
+                    });
+                }
+                catch (err) {
+                    this.logger.error(`uploadProjectFiles Spaces (asset image): ${err instanceof Error ? err.message : String(err)}`);
+                    throw new common_1.BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
+                }
+                await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, {
+                    $push: {
+                        images: {
+                            _id: imageId,
+                            url: uploaded.url,
+                            publicId: uploaded.key,
+                            createdAt: now,
+                            mediaType: "image",
+                            mimeType: metadata.mimeType,
+                            includeInReport: true,
+                        },
+                    },
+                    $set: { updatedAt: now },
+                });
+                return mapStoredFileDoc({
+                    _id: imageId,
+                    filename: fileName,
+                    length: data.length,
+                    uploadDate: now,
+                    metadata: {
+                        ...metadata,
+                        storage: "digitalocean",
+                        spacesKey: uploaded.key,
+                        sourceUrl: uploaded.url,
+                    },
+                });
+            }
             const useSpaces = options.preferDigitalOcean === true &&
                 !sid &&
                 !folderIsPicAsset &&

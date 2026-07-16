@@ -105,6 +105,7 @@ export class DigitalOceanSpacesService {
   private readonly bucket: string;
   private readonly originEndpoint: string;
   private readonly prefix: string;
+  private readonly assetImagesPrefix: string;
 
   constructor() {
     const accessKeyId = env("DO_SPACES_ACCESS_KEY_ID");
@@ -114,6 +115,10 @@ export class DigitalOceanSpacesService {
     this.prefix = sanitizeSpacesKeySegment(
       env("DO_SPACES_INSPECTOR_PREFIX") || "mv-inspector",
       "mv-inspector",
+    );
+    this.assetImagesPrefix = sanitizeSpacesKeySegment(
+      env("DO_SPACES_ASSET_IMAGES_PREFIX") || "mv-asset-images",
+      "mv-asset-images",
     );
 
     const originEndpoint = trimTrailingSlash(env("DO_SPACES_ORIGIN_ENDPOINT"));
@@ -157,6 +162,16 @@ export class DigitalOceanSpacesService {
     return [this.prefix, projectSegment, entrySegment, fileSegment].filter(Boolean).join("/");
   }
 
+  buildAssetImageKey(projectId: string, assetId: string, imageId: string, fileName: string): string {
+    const projectSegment = sanitizeSpacesKeySegment(projectId, "project");
+    const assetSegment = sanitizeSpacesKeySegment(assetId, "asset");
+    const imageSegment = sanitizeSpacesKeySegment(imageId, "image");
+    const fileSegment = sanitizeSpacesKeySegment(fileName, "image");
+    return [this.assetImagesPrefix, projectSegment, assetSegment, imageSegment, fileSegment]
+      .filter(Boolean)
+      .join("/");
+  }
+
   publicUrlForKey(key: string): string {
     if (!this.originEndpoint) return "";
     return `${this.originEndpoint}/${encodeSpacesKey(key)}`;
@@ -178,6 +193,36 @@ export class DigitalOceanSpacesService {
         Body: params.buffer,
         ContentType: params.contentType || "application/octet-stream",
         ContentLength: params.buffer.length,
+      }),
+    );
+    return { key, url: this.publicUrlForKey(key) };
+  }
+
+  async uploadAssetImage(params: {
+    projectId: string;
+    assetId: string;
+    imageId: string;
+    fileName: string;
+    buffer: Buffer;
+    contentType: string;
+  }): Promise<{ key: string; url: string }> {
+    const client = this.requireClient();
+    const key = this.buildAssetImageKey(
+      params.projectId,
+      params.assetId,
+      params.imageId,
+      params.fileName,
+    );
+    await client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: params.buffer,
+        ContentType: params.contentType || "application/octet-stream",
+        ContentLength: params.buffer.length,
+        /** يجب أن يكون الرابط قابلًا للوصول العلني مباشرةً — يُستخدم كما هو داخل ‎assets.images‎
+         * من تطبيق خارجي يعرض الصور مباشرة دون المرور بخادمنا. */
+        ACL: "public-read",
       }),
     );
     return { key, url: this.publicUrlForKey(key) };

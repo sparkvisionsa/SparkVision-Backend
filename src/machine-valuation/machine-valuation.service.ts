@@ -76,7 +76,7 @@ import { ASSETS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/
 import type { AssetDoc } from "@/assets/types";
 import { sanitizeTextInput } from "@/assets/asset-import.utils";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
-import { computeMvProjectProgressPct, countValuationAccountImages } from "./mv-project-progress.util";
+import { computeMvProjectProgressPct } from "./mv-project-progress.util";
 
 const MV_PHOTO_FOLDER_FILTER = { isAssetFolder: true as const };
 const EXTERNAL_ASSET_IMAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -2878,6 +2878,9 @@ export class MachineValuationService implements OnModuleInit {
       .catch(() => undefined);
     await this.migratePhotoFolderAssetsRemoveSubProjectIdField(db);
     await photoAssets.createIndex({ projectId: 1, parent: 1 }).catch(() => undefined);
+    await photoAssets.createIndex({ projectId: 1, isAssetFolder: 1 }).catch(() => undefined);
+    await sp.createIndex({ projectId: 1 }).catch(() => undefined);
+    await db.collection(MV_SHEETS_COLLECTION).createIndex({ projectId: 1 }).catch(() => undefined);
     await itCol.createIndex({ projectId: 1 }).catch(() => undefined);
     const toRename = await sp
       .find({ parentSubProjectId: { $exists: true } } as Filter<Record<string, unknown>>)
@@ -3900,7 +3903,7 @@ export class MachineValuationService implements OnModuleInit {
 
     const db = await getMongoDb();
     const col = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
-    /** تقليل حجم نقل المستندات — الحقول المستخدمة في الاستجابة فقط */
+    /** قائمة خفيفة — بدون مواقع/جهات اتصال/تعيينات (تُجلب عند فتح المشروع). */
     const projectListProject = {
       name: 1,
       companyId: 1,
@@ -3910,34 +3913,20 @@ export class MachineValuationService implements OnModuleInit {
       userId: 1,
       workflowStatus: 1,
       reportType: 1,
-      locations: 1,
-      contacts: 1,
-      inspectionAssignments: 1,
       reportData: {
         valuationMethod: 1,
-        reportReference: 1,
-        reportTitle: 1,
         valuationPurpose: 1,
         valuePremise: 1,
         valuationBasis: 1,
+        reportTitle: 1,
         reportIssueDate: 1,
-        agreementDate: 1,
         inspectionDate: 1,
         valuationDate: 1,
-        clientName: 1,
-        clientEmail: 1,
-        clientPhone: 1,
-        clientLegalType: 1,
-        clientActivity: 1,
-        clientRepresentativeName: 1,
-        intendedUsers: 1,
-        intendedUse: 1,
         inspectionLocation: 1,
-        inspectionMapUrl: 1,
+        clientName: 1,
         finalValue: 1,
         reportTemplateId: 1,
       },
-      valuationAccountingWorkspace: { images: 1 },
     } as const;
 
     let projects: MvProjectMongoDoc[];
@@ -3966,7 +3955,7 @@ export class MachineValuationService implements OnModuleInit {
     const matchInProjects = { $match: { projectId: { $in: projectIds } } } as const;
     const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } } as const;
 
-    const [counts, itemCounts, sheetAgg, picAssetAgg] = await Promise.all([
+    const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg] = await Promise.all([
       db
         .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
         .aggregate<{ _id: ObjectId | null; count: number }>([matchInProjects, groupByProject])
@@ -4006,7 +3995,13 @@ export class MachineValuationService implements OnModuleInit {
               _id: "$projectId",
               picAssetCount: { $sum: 1 },
               imageCount: {
-                $sum: { $size: { $ifNull: ["$images", []] } },
+                $sum: {
+                  $cond: [
+                    { $gte: [{ $ifNull: ["$imageCount", -1] }, 0] },
+                    { $max: [0, { $floor: "$imageCount" }] },
+                    { $size: { $ifNull: ["$images", []] } },
+                  ],
+                },
               },
             },
           },
@@ -4017,6 +4012,25 @@ export class MachineValuationService implements OnModuleInit {
             `listProjects: pic asset aggregate failed: ${err instanceof Error ? err.message : String(err)}`,
           );
           return [] as { _id: ObjectId | null; picAssetCount: number; imageCount: number }[];
+        }),
+      col
+        .aggregate<{ _id: ObjectId; valuationAccountImageCount: number }>([
+          { $match: { _id: { $in: projectIds } } },
+          {
+            $project: {
+              _id: 1,
+              valuationAccountImageCount: {
+                $size: { $ifNull: ["$valuationAccountingWorkspace.images", []] },
+              },
+            },
+          },
+        ])
+        .toArray()
+        .catch((err) => {
+          this.logger.warn(
+            `listProjects: valuation image aggregate failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return [] as { _id: ObjectId; valuationAccountImageCount: number }[];
         }),
     ]);
 
@@ -4047,6 +4061,17 @@ export class MachineValuationService implements OnModuleInit {
                 imageCount: toSafeNonNegativeInt(c.imageCount),
               },
             ] as [string, { picAssetCount: number; imageCount: number }],
+        ),
+    );
+    const valuationImageMap = new Map(
+      valuationImageAgg
+        .filter((row) => row._id != null)
+        .map(
+          (row) =>
+            [row._id.toString(), toSafeNonNegativeInt(row.valuationAccountImageCount)] as [
+              string,
+              number,
+            ],
         ),
     );
 
@@ -4086,7 +4111,7 @@ export class MachineValuationService implements OnModuleInit {
         const reportDataSummary = pickReportDataProgressSummary(p.reportData);
         const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
         const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
-        const valuationAccountImageCount = countValuationAccountImages(p.valuationAccountingWorkspace);
+        const valuationAccountImageCount = toSafeNonNegativeInt(valuationImageMap.get(idStr));
 
         return {
           _id: idStr,
@@ -4116,13 +4141,6 @@ export class MachineValuationService implements OnModuleInit {
           }),
           workflowStatus: projectWorkflowStatus(p),
           reportType: projectReportType(p),
-          reportData: reportDataSummary,
-          locations: sanitizeProjectLocations(p.locations, false),
-          contacts: sanitizeProjectContacts(p.contacts, false),
-          inspectionAssignments: sanitizeInspectionAssignments(
-            p.inspectionAssignments,
-            sanitizeProjectLocations(p.locations, false),
-          ).map(serializeInspectionAssignment),
           createdByUserId: (() => {
             const id = tryCoerceToObjectId(p.userId);
             return id?.toString() ?? (typeof p.userId === "string" ? p.userId : null);
@@ -6948,7 +6966,18 @@ export class MachineValuationService implements OnModuleInit {
         ? { "metadata.picAssetId": picOid }
         : { "metadata.picAssetId": { $exists: false } };
 
-    if (targetPicOid && !crossFolderMove) {
+    const siblingDocsForFolder = async (folderNorm: string, picOid: ObjectId | null) =>
+      col
+        .find({
+          "metadata.projectId": pid,
+          "metadata.scope": "asset-images",
+          ...picAssetScopeFilter(picOid),
+          ...assetImageFolderMongoFilter(folderNorm),
+          _id: { $ne: oidMoving },
+        })
+        .toArray();
+
+    if (targetPicOid) {
       const picFolder = await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
         _id: targetPicOid,
         projectId: pid,
@@ -6964,6 +6993,99 @@ export class MachineValuationService implements OnModuleInit {
         photosRoot._id,
         picFolder as PicAssetMongoDoc,
       );
+    }
+
+    /**
+     * وضع الملف داخل مجلد أصل (‎targetPicOid‎): ننقل المحتوى إلى ‎assets.images‎ (رابط DigitalOcean)
+     * ونحذف السجل من ‎mv_files.files‎ — نفس تمثيل الصور التي تُرفع مباشرةً من صفحة صور الأصول،
+     * بحيث لا تبقى صورة مرتبطة بأصل داخل ‎mv_files‎ فقط دون ظهورها في مصفوفة ‎images‎.
+     */
+    if (targetPicOid) {
+      if (!this.inspectorSpaces.isReady()) {
+        throw new BadRequestException("DigitalOcean Spaces غير مهيأ لرفع صور الأصول.");
+      }
+
+      const existingSpacesKey =
+        moveDoc.metadata?.storage === "digitalocean" ? moveDoc.metadata.spacesKey?.trim() : "";
+      let imageUrl: string;
+      let imageKey: string;
+      if (existingSpacesKey) {
+        imageUrl = this.inspectorSpaces.publicUrlForKey(existingSpacesKey);
+        imageKey = existingSpacesKey;
+      } else {
+        const bucket = this.getFilesBucket(db);
+        const chunks: Buffer[] = [];
+        for await (const chunk of bucket.openDownloadStream(oidMoving) as AsyncIterable<Buffer | Uint8Array>) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        const data = Buffer.concat(chunks);
+        const imageId = new ObjectId();
+        let uploaded: { key: string; url: string };
+        try {
+          uploaded = await this.inspectorSpaces.uploadAssetImage({
+            projectId,
+            assetId: targetPicOid.toString(),
+            imageId: imageId.toString(),
+            fileName: oldBasename,
+            buffer: data,
+            contentType: moveDoc.metadata?.mimeType || "application/octet-stream",
+          });
+        } catch (err) {
+          this.logger.error(
+            `placeProjectAssetImageFile Spaces: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw new BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
+        }
+        imageUrl = uploaded.url;
+        imageKey = uploaded.key;
+      }
+
+      const now = new Date();
+      await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
+        { _id: targetPicOid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
+        {
+          $push: {
+            images: {
+              _id: new ObjectId(),
+              url: imageUrl,
+              publicId: imageKey,
+              createdAt: now,
+              mediaType: "image",
+              mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
+              includeInReport: moveDoc.metadata?.includeInReport !== false,
+            },
+          },
+          $set: { updatedAt: now },
+        },
+      );
+
+      if (existingSpacesKey) {
+        await col.deleteOne({ _id: oidMoving });
+      } else {
+        await this.getFilesBucket(db).delete(oidMoving);
+      }
+
+      if (sourcePicOid) {
+        const restSource = (await siblingDocsForFolder(sourceFolderNormalized, sourcePicOid)).sort(
+          compareAssetImageGridDocs,
+        );
+        await Promise.all(
+          restSource.map((d, i) =>
+            col.updateOne(
+              { _id: d._id },
+              {
+                $set: {
+                  "metadata.displayOrder": i,
+                  "metadata.folderPath": sourceFolderNormalized,
+                  "metadata.updatedAt": now,
+                },
+              },
+            ),
+          ),
+        );
+      }
+
+      return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
     }
 
     let insertBeforeOid: ObjectId | null = null;
@@ -6995,26 +7117,13 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("موضع الإدراج يجب أن يكون ضمن المجلد المستهدف.");
       }
       const anchorPicOid = anchor.metadata.picAssetId ?? null;
-      if (
-        (targetPicOid && !anchorPicOid?.equals(targetPicOid)) ||
-        (!targetPicOid && anchorPicOid)
-      ) {
+      if (anchorPicOid) {
         throw new BadRequestException("موضع الإدراج لا ينتمي لنفس مجلد صور الأصول.");
       }
     }
 
-    const siblingDocsForFolder = async (folderNorm: string, picOid: ObjectId | null) =>
-      col
-        .find({
-          "metadata.projectId": pid,
-          "metadata.scope": "asset-images",
-          ...picAssetScopeFilter(picOid),
-          ...assetImageFolderMongoFilter(folderNorm),
-          _id: { $ne: oidMoving },
-        })
-        .toArray();
-
-    const siblingsSorted = (await siblingDocsForFolder(targetFolderNormalized, targetPicOid)).sort(compareAssetImageGridDocs);
+    /** targetPicOid دائمًا null هنا — حالة الانتقال إلى مجلد أصل يُعالَج ويُنهى مسبقًا أعلاه. */
+    const siblingsSorted = (await siblingDocsForFolder(targetFolderNormalized, null)).sort(compareAssetImageGridDocs);
 
     let idsOrdered: ObjectId[];
     if (insertBeforeOid) {
@@ -7038,32 +7147,13 @@ export class MachineValuationService implements OnModuleInit {
         folderPathNorm: targetFolderNormalized,
         preferredBasename: oldBasename,
       });
-      if (targetPicOid) {
-        const picFolder = await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
-          _id: targetPicOid,
-          projectId: pid,
-          ...MV_PHOTO_FOLDER_FILTER,
-        });
-        if (!picFolder) {
-          throw new BadRequestException("مجلد الأصل المستهدف غير موجود أو غير صالح.");
-        }
-        const photosRoot = await this.ensurePhotosRootFolder(db, pid);
-        await this.assertPicAssetFolderCanReceiveImages(
-          db,
-          pid,
-          photosRoot._id,
-          picFolder as PicAssetMongoDoc,
-        );
-      }
       const setMeta: Record<string, unknown> = {
         "metadata.relativePath": uniq.relativePath,
         "metadata.folderPath": uniq.folderPath,
         "metadata.updatedAt": now,
       };
       const unsetMeta: Record<string, ""> = {};
-      if (targetPicOid) {
-        setMeta["metadata.picAssetId"] = targetPicOid;
-      } else if (sourcePicOid) {
+      if (sourcePicOid) {
         unsetMeta["metadata.picAssetId"] = "";
       }
       const updatePayload: Record<string, unknown> = { $set: setMeta };
@@ -7074,23 +7164,12 @@ export class MachineValuationService implements OnModuleInit {
       );
     }
 
-    if (!crossFolderMove && sourcePicOid?.toString() !== targetPicOid?.toString()) {
-      const setMeta: Record<string, unknown> = { "metadata.updatedAt": now };
-      const unsetMeta: Record<string, ""> = {};
-      if (targetPicOid) {
-        setMeta["metadata.picAssetId"] = targetPicOid;
-      } else {
-        unsetMeta["metadata.picAssetId"] = "";
-      }
-      const updatePayload: Record<string, unknown> = { $set: setMeta };
-      if (Object.keys(unsetMeta).length > 0) updatePayload.$unset = unsetMeta;
+    if (!crossFolderMove && sourcePicOid) {
       await col.updateOne(
         { _id: oidMoving, "metadata.projectId": pid, "metadata.scope": "asset-images" },
-        updatePayload,
+        { $set: { "metadata.updatedAt": now }, $unset: { "metadata.picAssetId": "" } },
       );
     }
-
-    /** لا نعدّل مصفوفة ‎images‎ في ‎assets‎ — الربط يتم عبر ‎metadata.picAssetId‎ في ‎GridFS‎ فقط ليتوافق مع أصول التطبيق. */
 
     await Promise.all(
       idsOrdered.map((fid, i) =>
@@ -7295,6 +7374,9 @@ export class MachineValuationService implements OnModuleInit {
       if (options.scope !== "asset-images" || options.imageOnly !== true) {
         throw new BadRequestException("الأصل يقبل صور الأصول فقط.");
       }
+      if (!this.inspectorSpaces.isReady()) {
+        throw new BadRequestException("DigitalOcean Spaces غير مهيأ لرفع صور الأصول.");
+      }
       const photosRoot = await this.ensurePhotosRootFolder(db, pid);
       await this.assertPicAssetFolderCanReceiveImages(db, pid, photosRoot._id, picAssetFolder);
     }
@@ -7352,6 +7434,59 @@ export class MachineValuationService implements OnModuleInit {
             ...(typeof assignedOrder === "number" ? { displayOrder: assignedOrder } : {}),
           };
 
+          if (folderIsPicAsset && sid) {
+            const imageId = new ObjectId();
+            let uploaded: { key: string; url: string };
+            try {
+              uploaded = await this.inspectorSpaces.uploadAssetImage({
+                projectId,
+                assetId: sid.toString(),
+                imageId: imageId.toString(),
+                fileName,
+                buffer: data,
+                contentType: file.mimetype || "application/octet-stream",
+              });
+            } catch (err) {
+              this.logger.error(
+                `uploadProjectFiles Spaces (asset image): ${err instanceof Error ? err.message : String(err)}`,
+              );
+              throw new BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
+            }
+
+            await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
+              { _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
+              {
+                $push: {
+                  images: {
+                    _id: imageId,
+                    url: uploaded.url,
+                    publicId: uploaded.key,
+                    createdAt: now,
+                    mediaType: "image",
+                    mimeType: metadata.mimeType,
+                    includeInReport: true,
+                  },
+                },
+                $set: { updatedAt: now },
+              },
+            );
+
+            return mapStoredFileDoc({
+              _id: imageId,
+              filename: fileName,
+              length: data.length,
+              uploadDate: now,
+              metadata: {
+                ...metadata,
+                storage: "digitalocean",
+                spacesKey: uploaded.key,
+                /** لا يوجد سجل حقيقي في ‎mv_files‎ لهذه الصورة — الواجهة تعتمد على ‎sourceUrl‎
+                 * لعرضها فورًا بدل محاولة تنزيلها عبر ‎/files/:id/download‎ غير الموجود. */
+                sourceUrl: uploaded.url,
+              },
+            });
+          }
+
           const useSpaces =
             options.preferDigitalOcean === true &&
             !sid &&
@@ -7408,8 +7543,6 @@ export class MachineValuationService implements OnModuleInit {
             uploadStream.on("finish", () => resolve(uploadStream.id as ObjectId));
             uploadStream.end(data);
           });
-
-          /** لا نُدرِج معرف ‎GridFS‎ داخل ‎assets.images‎ — يفسد هيكل كائنات الوسائط من التطبيق. */
 
           return mapStoredFileDoc({
             _id: fileId,
