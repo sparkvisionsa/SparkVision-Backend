@@ -449,27 +449,63 @@ def find_ancestor(el: etree._Element | None, tag: str) -> etree._Element | None:
     return None
 
 
+def _rpr_from_run(run: etree._Element | None) -> etree._Element | None:
+    if run is None or run.tag != w("r"):
+        return None
+    for child in run:
+        if child.tag == w("rPr"):
+            return deepcopy(child)
+    return None
+
+
 def copy_rpr_near(start: etree._Element) -> etree._Element | None:
+    """Prefer the nearest surrounding run style so inline bookmarks (عنوانغ / عنواناصل)
+    match the sentence they sit in instead of a distant first-run or cover style.
+    """
     para = find_ancestor(start, w("p"))
     run = start.getparent()
     while run is not None and run is not para:
         if run.tag == w("r"):
-            for child in run:
-                if child.tag == w("rPr"):
-                    return deepcopy(child)
+            own = _rpr_from_run(run)
+            if own is not None:
+                return own
             break
         run = run.getparent()
-    if para is not None:
-        ppr = para.find(w("pPr"))
-        if ppr is not None:
-            rpr = ppr.find(w("rPr"))
-            if rpr is not None:
-                return deepcopy(rpr)
-        for run_el in para.findall(w("r")):
-            for child in run_el:
-                if child.tag == w("rPr"):
-                    return deepcopy(child)
-            break
+    if para is None:
+        return None
+
+    # Nearest previous / next sibling run with rPr (typical body sentence context)
+    node: etree._Element | None = start
+    while node is not None and node is not para:
+        prev = node.getprevious()
+        while prev is not None:
+            if prev.tag == w("r"):
+                found = _rpr_from_run(prev)
+                if found is not None:
+                    return found
+            prev = prev.getprevious()
+        node = node.getparent()
+
+    node = start
+    while node is not None and node is not para:
+        nxt = node.getnext()
+        while nxt is not None:
+            if nxt.tag == w("r"):
+                found = _rpr_from_run(nxt)
+                if found is not None:
+                    return found
+            nxt = nxt.getnext()
+        node = node.getparent()
+
+    ppr = para.find(w("pPr"))
+    if ppr is not None:
+        rpr = ppr.find(w("rPr"))
+        if rpr is not None:
+            return deepcopy(rpr)
+    for run_el in para.findall(w("r")):
+        found = _rpr_from_run(run_el)
+        if found is not None:
+            return found
     return None
 
 
@@ -655,12 +691,15 @@ def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | 
 
 
 def cover_bookmark_font_size(bookmark_name: str) -> int | None:
-    """Word stores font size in half-points (14pt => 28)."""
+    """Word stores font size in half-points (14pt => 28, 11pt => 22).
+
+    غلاف التقرير فقط: «عنوان» و«غلاف» بحجم 14pt.
+    «عنوانغ» و«عنواناصل» تظهر داخل فقرات التقرير فترث تنسيق الكلام المحيط
+    (عادة ~11pt) دون فرض Tajawal/توسيط الغلاف.
+    """
     norm = normalize_bookmark_name(bookmark_name)
     if norm in {
         normalize_bookmark_name("عنوان"),
-        normalize_bookmark_name("عنوانغ"),
-        normalize_bookmark_name("عنواناصل"),
         normalize_bookmark_name("غلاف"),
     }:
         return 28
@@ -674,11 +713,10 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
     size = cover_bookmark_font_size(bookmark_name)
     is_regular_cover_title = norm in {
         normalize_bookmark_name("عنوان"),
-        normalize_bookmark_name("عنوانغ"),
-        normalize_bookmark_name("عنواناصل"),
         normalize_bookmark_name("غلاف"),
     }
     if size is None:
+        # عناوين داخل النص (عنوانغ / عنواناصل …): أبقِ rPr المجاور كما هو ليتناسق مع الفقرة
         return rpr
     para = find_ancestor(start, w("p"))
     if para is not None:

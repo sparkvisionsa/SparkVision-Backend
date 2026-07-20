@@ -9,8 +9,8 @@ import { MachineValuationService } from "./machine-valuation.service";
 import type { MvAccessContext } from "./types";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
 import {
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES,
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS,
   loadCompanyWordTemplateBufferFromGridFs,
   resolveCompanyReportDefaults,
 } from "@/server/auth-tracking/service";
@@ -334,14 +334,34 @@ function bufferFromStream(stream: NodeJS.ReadableStream): Promise<Buffer> {
 
 const COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX = "/uploads/company-report-templates/";
 
-function resolveBundledWordTemplatePath(uploadUrl: string): string | null {
-  const trimmed = uploadUrl.trim();
-  if (trimmed !== PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL) return null;
-  const candidates = [
-    path.resolve(process.cwd(), "public", "files", PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME),
-    path.resolve(process.cwd(), "..", "Spark-Vision", "public", "files", PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME),
+function bundledWordTemplateSearchDirs(): string[] {
+  const cwd = process.cwd();
+  const dirs = [
+    path.resolve(cwd, "assets"),
+    path.resolve(cwd, "public", "files"),
+    path.resolve(cwd, "..", "Spark-Vision", "public", "files"),
+    // من dist/machine-valuation → جذر الـ backend
+    path.resolve(__dirname, "..", "..", "assets"),
+    path.resolve(__dirname, "..", "..", "public", "files"),
+    path.resolve(__dirname, "..", "..", "..", "Spark-Vision", "public", "files"),
   ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+  return [...new Set(dirs)];
+}
+
+function findBundledWordTemplateOnDisk(): string | null {
+  for (const dir of bundledWordTemplateSearchDirs()) {
+    for (const fileName of PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES) {
+      const candidate = path.resolve(dir, fileName);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveBundledWordTemplatePath(uploadUrl?: string | null): string | null {
+  const trimmed = (uploadUrl ?? "").trim();
+  if (trimmed && !PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(trimmed)) return null;
+  return findBundledWordTemplateOnDisk();
 }
 
 function resolveCompanyWordTemplatePath(uploadUrl: string): string | null {
@@ -396,11 +416,9 @@ function formatFinalValueAmount(value: unknown): string {
   return new Intl.NumberFormat("ar-SA", { maximumFractionDigits: 0 }).format(amount);
 }
 
-function formatFinalValue(value: unknown, currency?: string | null): string {
-  const formatted = formatFinalValueAmount(value);
-  if (!formatted) return "";
-  const suffix = currency?.trim() ? ` ${currency.trim()}` : " ر.س";
-  return `${formatted}${suffix}`;
+function formatFinalValue(value: unknown, _currency?: string | null): string {
+  // القالب يحتوي عادة على «ر.س.» بجانب إشارة «قيمة» — نملأ الرقم فقط لتفادي التكرار
+  return formatFinalValueAmount(value);
 }
 
 function sanitizeForXml(text: string): string {
@@ -500,7 +518,7 @@ export class WordTemplateMergeService {
 
     if (!templateBuffer) {
       throw new BadRequestException(
-        "لم يُعثر على ملف قالب Word على السيرفر. أعد رفع قالب Word من إعدادات الشركة (لوحة مدير الشركة) ثم أعد المحاولة.",
+        "لم يُعثر على قالب Word المضمّن أو المرفوع. تأكد من وجود assets/mv-word-template.docx على السيرفر، أو ارفع قالباً من إعدادات الشركة ثم أعد المحاولة.",
       );
     }
 
@@ -608,10 +626,21 @@ export class WordTemplateMergeService {
       if (fromGrid?.byteLength) return fromGrid;
     }
 
-    // 2) ملف القرص المحلي (مفيد للتطوير وللسيرفر إن وُجد المجلد)
+    // 2) ملف القرص المحلي من إعدادات الشركة (مفيد للتطوير وللسيرفر إن وُجد المجلد)
     const filePath = wordTemplate?.fileUrl ? resolveCompanyWordTemplatePath(wordTemplate.fileUrl) : null;
     if (filePath && fs.existsSync(filePath)) {
       return fs.promises.readFile(filePath);
+    }
+
+    // 3) القالب المضمّن في المشروع — يعمل محلياً وفي الـ deployment دون إعادة رفع
+    const bundledPath = findBundledWordTemplateOnDisk();
+    if (bundledPath) {
+      if (wordTemplate?.fileUrl && !PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(wordTemplate.fileUrl.trim())) {
+        this.logger.warn(
+          `Company Word template missing (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}); falling back to bundled ${path.basename(bundledPath)} for company ${String(companyId)}`,
+        );
+      }
+      return fs.promises.readFile(bundledPath);
     }
 
     if (wordTemplate?.fileUrl) {

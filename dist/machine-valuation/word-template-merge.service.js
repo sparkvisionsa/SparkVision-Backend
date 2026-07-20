@@ -298,15 +298,33 @@ function bufferFromStream(stream) {
     });
 }
 const COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-function resolveBundledWordTemplatePath(uploadUrl) {
-    const trimmed = uploadUrl.trim();
-    if (trimmed !== service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL)
-        return null;
-    const candidates = [
-        path.resolve(process.cwd(), "public", "files", service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME),
-        path.resolve(process.cwd(), "..", "Spark-Vision", "public", "files", service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME),
+function bundledWordTemplateSearchDirs() {
+    const cwd = process.cwd();
+    const dirs = [
+        path.resolve(cwd, "assets"),
+        path.resolve(cwd, "public", "files"),
+        path.resolve(cwd, "..", "Spark-Vision", "public", "files"),
+        path.resolve(__dirname, "..", "..", "assets"),
+        path.resolve(__dirname, "..", "..", "public", "files"),
+        path.resolve(__dirname, "..", "..", "..", "Spark-Vision", "public", "files"),
     ];
-    return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+    return [...new Set(dirs)];
+}
+function findBundledWordTemplateOnDisk() {
+    for (const dir of bundledWordTemplateSearchDirs()) {
+        for (const fileName of service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES) {
+            const candidate = path.resolve(dir, fileName);
+            if (fs.existsSync(candidate))
+                return candidate;
+        }
+    }
+    return null;
+}
+function resolveBundledWordTemplatePath(uploadUrl) {
+    const trimmed = (uploadUrl ?? "").trim();
+    if (trimmed && !service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(trimmed))
+        return null;
+    return findBundledWordTemplateOnDisk();
 }
 function resolveCompanyWordTemplatePath(uploadUrl) {
     const trimmed = uploadUrl.trim();
@@ -362,12 +380,8 @@ function formatFinalValueAmount(value) {
         return "";
     return new Intl.NumberFormat("ar-SA", { maximumFractionDigits: 0 }).format(amount);
 }
-function formatFinalValue(value, currency) {
-    const formatted = formatFinalValueAmount(value);
-    if (!formatted)
-        return "";
-    const suffix = currency?.trim() ? ` ${currency.trim()}` : " ر.س";
-    return `${formatted}${suffix}`;
+function formatFinalValue(value, _currency) {
+    return formatFinalValueAmount(value);
 }
 function sanitizeForXml(text) {
     return text
@@ -439,7 +453,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             templateBuffer = await this.loadCompanyWordTemplateBuffer(project, ctx);
         }
         if (!templateBuffer) {
-            throw new common_1.BadRequestException("لم يُرفع قالب Word للمشروع أو للشركة.");
+            throw new common_1.BadRequestException("لم يُعثر على قالب Word المضمّن أو المرفوع. تأكد من وجود assets/mv-word-template.docx على السيرفر، أو ارفع قالباً من إعدادات الشركة ثم أعد المحاولة.");
         }
         let assetImagesBase64 = [...(body.assetImagesBase64 ?? [])];
         const valuationImagesBase64 = [...(body.valuationImagesBase64 ?? [])];
@@ -514,10 +528,27 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             adminPhone: adminUser?.phone,
             adminUsername: adminUser?.username,
         }).wordTemplate;
+        const gridFsId = typeof wordTemplate?.gridFsFileId === "string" ? wordTemplate.gridFsFileId.trim() : "";
+        if (gridFsId) {
+            const fromGrid = await (0, service_1.loadCompanyWordTemplateBufferFromGridFs)(gridFsId);
+            if (fromGrid?.byteLength)
+                return fromGrid;
+        }
         const filePath = wordTemplate?.fileUrl ? resolveCompanyWordTemplatePath(wordTemplate.fileUrl) : null;
-        if (!filePath || !fs.existsSync(filePath))
-            return null;
-        return fs.promises.readFile(filePath);
+        if (filePath && fs.existsSync(filePath)) {
+            return fs.promises.readFile(filePath);
+        }
+        const bundledPath = findBundledWordTemplateOnDisk();
+        if (bundledPath) {
+            if (wordTemplate?.fileUrl && !service_1.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(wordTemplate.fileUrl.trim())) {
+                this.logger.warn(`Company Word template missing (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}); falling back to bundled ${path.basename(bundledPath)} for company ${String(companyId)}`);
+            }
+            return fs.promises.readFile(bundledPath);
+        }
+        if (wordTemplate?.fileUrl) {
+            this.logger.warn(`Company Word template metadata exists (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}) but file is missing on disk/GridFS for company ${String(companyId)}`);
+        }
+        return null;
     }
     async loadStoredAssetImagesBase64(projectId, ctx) {
         try {

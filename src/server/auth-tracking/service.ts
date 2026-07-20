@@ -1726,8 +1726,20 @@ const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS = 40_000_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "mv-word-template.docx";
+/** الاسم العربي القديم — يُقبل كمسار بديل للتعرّف على نفس القالب */
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME =
+  "نموذج تقرير الاسناد والتصفية انفاذ.docx";
 export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME}`;
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME}`;
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = [
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME,
+] as const;
+export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = new Set([
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
+  PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL,
+]);
 export const PRO_OPTION_BUNDLED_WORD_TEMPLATE: CompanyReportWordTemplate = {
   fileName: PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
   fileUrl: PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
@@ -1800,7 +1812,7 @@ function isReportDefaultsWordTemplateUrl(value: unknown): value is string {
     typeof value === "string" &&
     ((value.trim().startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX) &&
       value.trim().toLowerCase().endsWith(".docx")) ||
-      value.trim() === PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL)
+      PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(value.trim()))
   );
 }
 
@@ -2312,9 +2324,8 @@ export function resolveCompanyReportDefaults(
   const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
   const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
   const wordTemplateStored = sanitizeCompanyReportWordTemplate(stored?.wordTemplate);
-  const wordTemplateDefault = shouldUseProOptionBundledWordTemplate(context)
-    ? PRO_OPTION_BUNDLED_WORD_TEMPLATE
-    : null;
+  // قالب مضمّن لجميع الشركات — لا يشترط رفعاً يدوياً محلياً أو في الـ deployment
+  const wordTemplateDefault = PRO_OPTION_BUNDLED_WORD_TEMPLATE;
   return {
     scope: {
       complianceStatement:

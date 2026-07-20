@@ -47,9 +47,52 @@ DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
       <w:r><w:bookmarkEnd w:id="16"/></w:r>
     </w:p>
     <w:p>
-      <w:r><w:bookmarkStart w:id="17" w:name="عنوانغ"/></w:r>
-      <w:r><w:t>old cover title</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="17"/></w:r>
+      <w:r>
+        <w:rPr>
+          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+        <w:t>تم إعداد التقرير بعنوان </w:t>
+      </w:r>
+      <w:bookmarkStart w:id="17" w:name="عنوانغ"/>
+      <w:bookmarkEnd w:id="17"/>
+      <w:r>
+        <w:rPr>
+          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+        <w:t> وفق المعايير المعتمدة.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:rPr>
+          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+        <w:t>العنوان الأصلي: </w:t>
+      </w:r>
+      <w:bookmarkStart w:id="18" w:name="عنواناصل"/>
+      <w:r>
+        <w:rPr>
+          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+        <w:t>old original title</w:t>
+      </w:r>
+      <w:bookmarkEnd w:id="18"/>
+      <w:r>
+        <w:rPr>
+          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+          <w:sz w:val="22"/>
+          <w:szCs w:val="22"/>
+        </w:rPr>
+        <w:t>.</w:t>
+      </w:r>
     </w:p>
     <w:p>
       <w:r><w:bookmarkStart w:id="1" w:name="تاريخاصدار"/></w:r>
@@ -264,20 +307,21 @@ def main() -> None:
     assert has_tajawal_run("تقرير اختبار مباشر"), "cover title should use Tajawal"
     assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
     title_runs = matching_runs("تقرير اختبار مباشر")
-    assert len(title_runs) == 2, "report title should fill cover and body bookmarks"
-    tajawal_title_runs = [
+    assert len(title_runs) >= 1, "report title should fill cover bookmark"
+    # «عنوان» على الغلاف فقط يفرض Tajawal 14pt؛ «عنوانغ» يرث تنسيق الفقرة
+    cover_title_runs = [
         run
         for run in title_runs
         if run.find(w("rPr")) is not None
         and run.find(w("rPr")).find(w("rFonts")) is not None
         and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
+        and run.find(w("rPr")).find(w("sz")) is not None
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
     ]
-    assert len(tajawal_title_runs) == 2, "عنوان and عنوانغ should use the centered Tajawal cover style"
-    for title_run in tajawal_title_runs:
+    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 14pt"
+    for title_run in cover_title_runs:
         rpr = title_run.find(w("rPr"))
         assert rpr is not None and rpr.find(w("b")) is None, "cover title should not be bold"
-        sz = rpr.find(w("sz"))
-        assert sz is not None and sz.get(f"{{{W_NS}}}val") == "28", "cover title should be 14pt"
         title_para = title_run
         while title_para is not None and title_para.tag != w("p"):
             title_para = title_para.getparent()
@@ -290,6 +334,38 @@ def main() -> None:
         assert title_para_fonts is not None and title_para_fonts.get(f"{{{W_NS}}}cs") == "Tajawal", "cover paragraph must enforce Tajawal"
         title_para_sz = title_para_rpr.find(w("sz")) if title_para_rpr is not None else None
         assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "28", "cover paragraph should be 14pt"
+    # عنوانغ / عنواناصل داخل التقرير: يرثان ~11pt ونوع خط الفقرة المحيطة
+    inline_body_runs = [
+        run
+        for run in title_runs
+        if run.find(w("rPr")) is not None
+        and run.find(w("rPr")).find(w("sz")) is not None
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "22"
+        and run.find(w("rPr")).find(w("rFonts")) is not None
+        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Arial"
+    ]
+    assert len(inline_body_runs) >= 1, "عنوانغ should inherit surrounding 11pt Arial body style"
+    for body_run in inline_body_runs:
+        body_para = body_run
+        while body_para is not None and body_para.tag != w("p"):
+            body_para = body_para.getparent()
+        body_ppr = body_para.find(w("pPr")) if body_para is not None else None
+        body_jc = body_ppr.find(w("jc")) if body_ppr is not None else None
+        assert body_jc is None or body_jc.get(f"{{{W_NS}}}val") != "center", (
+            "inline title bookmarks must not force cover centering"
+        )
+    forced_cover_style_count = sum(
+        1
+        for run in title_runs
+        if run.find(w("rPr")) is not None
+        and run.find(w("rPr")).find(w("sz")) is not None
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
+        and run.find(w("rPr")).find(w("rFonts")) is not None
+        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
+    )
+    assert forced_cover_style_count == len(cover_title_runs), (
+        "عنوانغ/عنواناصل must not receive forced cover 14pt Tajawal styling"
+    )
     client_runs = matching_runs("شركة الاختبار")
     assert any(
         run.find(w("rPr")) is not None

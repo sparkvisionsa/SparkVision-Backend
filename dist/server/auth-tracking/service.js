@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = exports.HttpError = void 0;
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = exports.HttpError = void 0;
 exports.assertCsrf = assertCsrf;
 exports.enforceGuestAccess = enforceGuestAccess;
 exports.recordActivities = recordActivities;
@@ -11,6 +11,7 @@ exports.loginUser = loginUser;
 exports.logoutUser = logoutUser;
 exports.getUserProfile = getUserProfile;
 exports.updateUserProfile = updateUserProfile;
+exports.loadCompanyWordTemplateBufferFromGridFs = loadCompanyWordTemplateBufferFromGridFs;
 exports.shouldUseProOptionBundledWordTemplate = shouldUseProOptionBundledWordTemplate;
 exports.resolveCompanyReportDefaults = resolveCompanyReportDefaults;
 exports.createCompanyBySuperAdmin = createCompanyBySuperAdmin;
@@ -38,10 +39,11 @@ exports.getAdminAnalytics = getAdminAnalytics;
 exports.getAdminSourceRecordStats = getAdminSourceRecordStats;
 exports.listAdminActivities = listAdminActivities;
 exports.submitTrackingActions = submitTrackingActions;
+const mongodb_1 = require("mongodb");
 const promises_1 = require("node:fs/promises");
 const node_path_1 = require("node:path");
 const zod_1 = require("zod");
-const mongodb_1 = require("../mongodb");
+const mongodb_2 = require("../mongodb");
 const harajScrape_1 = require("../models/harajScrape");
 const syarah_1 = require("../models/syarah");
 const yallaMotor_1 = require("../models/yallaMotor");
@@ -848,14 +850,14 @@ function assertCsrf(request) {
     }
 }
 async function writeSessionPatch(sessionId, patch) {
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { sessions } = (0, collections_1.getAuthCollections)(db);
     await sessions.updateOne({ _id: sessionId }, {
         $set: patch,
     });
 }
 async function resolveGuestAccessStatus(identityId, config) {
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { guestAttempts, blockedEntities } = (0, collections_1.getAuthCollections)(db);
     const [attemptDoc, blockedIdentity] = await Promise.all([
         guestAttempts.findOne({ identityId }),
@@ -886,7 +888,7 @@ async function enforceGuestAccess(request, options) {
             guest: await resolveGuestAccessStatus(context.identityId, context.config),
         };
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { guestAttempts } = (0, collections_1.getAuthCollections)(db);
     const usedAttempts = context.guestAttempts?.attemptCount ?? 0;
     const limit = context.config.guestAttemptLimit;
@@ -938,7 +940,7 @@ async function recordActivities(sessionId, identityId, userId, actions, requestM
     await (0, collections_1.ensureAuthTrackingInitialized)();
     if (!actions.length)
         return { inserted: 0 };
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { activities } = (0, collections_1.getAuthCollections)(db);
     const userIdStr = userId === null || userId === undefined
         ? null
@@ -1113,7 +1115,7 @@ async function loginUser(request, body) {
     if (!limiter.allowed) {
         throw new HttpError(429, "rate_limited", "Too many login attempts.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, sessions, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const loginIdentifier = (payload.phone ?? payload.username ?? "").trim();
     const user = await findUserByLoginIdentifier(users, loginIdentifier);
@@ -1254,7 +1256,7 @@ async function updateUserProfile(request, body) {
     }
     const payload = parsed.data;
     const now = new Date();
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, companies } = (0, collections_1.getAuthCollections)(db);
     const email = normalizeOptionalText(payload.email ?? undefined);
     const phone = normalizeOptionalText(payload.phone ?? undefined);
@@ -1373,8 +1375,18 @@ const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS = 40_000_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "mv-word-template.docx";
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = `/files/${exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME}`;
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = `/files/${exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME}`;
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = [
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME,
+];
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = new Set([
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL,
+]);
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = {
     fileName: exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
     fileUrl: exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
@@ -1442,7 +1454,7 @@ function isReportDefaultsWordTemplateUrl(value) {
     return (typeof value === "string" &&
         ((value.trim().startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX) &&
             value.trim().toLowerCase().endsWith(".docx")) ||
-            value.trim() === exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL));
+            exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(value.trim())));
 }
 function parseReportDefaultsWordTemplateDataUrl(value) {
     const match = value.match(/^data:(application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/octet-stream|application\/zip);base64,([a-z0-9+/=\s]+)$/i);
@@ -1492,6 +1504,62 @@ async function persistCompanyReportLetterheadImage(companyId, field, value) {
     await (0, promises_1.writeFile)((0, node_path_1.join)(dir, filename), parsed.buffer);
     return `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
 }
+const COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET = "company_report_templates";
+async function saveCompanyWordTemplateToGridFs(companyId, fileName, buffer) {
+    const db = await (0, mongodb_2.getMongoDb)();
+    const bucket = new mongodb_1.GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
+    const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+    try {
+        const old = await db
+            .collection(`${COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET}.files`)
+            .find({ "metadata.companyId": safeCompanyId })
+            .project({ _id: 1 })
+            .toArray();
+        for (const doc of old) {
+            try {
+                await bucket.delete(doc._id);
+            }
+            catch {
+            }
+        }
+    }
+    catch {
+    }
+    return new Promise((resolve, reject) => {
+        const upload = bucket.openUploadStream(fileName || "word-template.docx", {
+            metadata: {
+                companyId: safeCompanyId,
+                scope: "company-word-template",
+                uploadedAt: new Date().toISOString(),
+            },
+            contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+        upload.on("error", reject);
+        upload.on("finish", () => resolve(String(upload.id)));
+        upload.end(buffer);
+    });
+}
+async function loadCompanyWordTemplateBufferFromGridFs(gridFsFileId) {
+    const oid = (0, object_id_util_1.tryParseObjectId)(gridFsFileId.trim());
+    if (!oid)
+        return null;
+    const db = await (0, mongodb_2.getMongoDb)();
+    const bucket = new mongodb_1.GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
+    try {
+        const stream = bucket.openDownloadStream(oid);
+        const chunks = [];
+        await new Promise((resolve, reject) => {
+            stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            stream.on("error", reject);
+            stream.on("end", () => resolve());
+        });
+        const buffer = Buffer.concat(chunks);
+        return buffer.byteLength > 0 ? buffer : null;
+    }
+    catch {
+        return null;
+    }
+}
 async function persistCompanyReportWordTemplate(companyId, value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         return null;
@@ -1505,6 +1573,9 @@ async function persistCompanyReportWordTemplate(companyId, value) {
             .filter(Boolean)
         : [];
     const fileDataUrl = typeof data.fileDataUrl === "string" ? data.fileDataUrl.trim() : "";
+    const existingGridFsId = typeof data.gridFsFileId === "string" && (0, object_id_util_1.tryParseObjectId)(data.gridFsFileId.trim())
+        ? data.gridFsFileId.trim()
+        : "";
     if (!fileDataUrl) {
         if (!isReportDefaultsWordTemplateUrl(data.fileUrl))
             return null;
@@ -1514,6 +1585,7 @@ async function persistCompanyReportWordTemplate(companyId, value) {
             uploadedAt,
             sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
             bookmarkNames,
+            ...(existingGridFsId ? { gridFsFileId: existingGridFsId } : {}),
         };
     }
     if (fileDataUrl.length > REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS) {
@@ -1528,12 +1600,19 @@ async function persistCompanyReportWordTemplate(companyId, value) {
     await (0, promises_1.mkdir)(dir, { recursive: true });
     const filename = `word-template-${Date.now()}-${(0, crypto_1.randomId)()}.docx`;
     await (0, promises_1.writeFile)((0, node_path_1.join)(dir, filename), buffer);
+    let gridFsFileId = existingGridFsId;
+    try {
+        gridFsFileId = await saveCompanyWordTemplateToGridFs(companyId, fileName, buffer);
+    }
+    catch {
+    }
     return {
         fileName,
         fileUrl: `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`,
         uploadedAt,
         sizeBytes: buffer.byteLength,
         bookmarkNames,
+        ...(gridFsFileId ? { gridFsFileId } : {}),
     };
 }
 async function persistCompanyReportDefaultsAssets(raw, companyId) {
@@ -1645,12 +1724,16 @@ function sanitizeCompanyReportWordTemplate(value) {
             .map((name) => sanitizeReportDefaultsText(name, 120))
             .filter(Boolean)
         : [];
+    const gridFsFileId = typeof data.gridFsFileId === "string" && (0, object_id_util_1.tryParseObjectId)(data.gridFsFileId.trim())
+        ? data.gridFsFileId.trim()
+        : undefined;
     return {
         fileName: sanitizeReportDefaultsText(data.fileName, 240) || "word-template.docx",
         fileUrl,
         uploadedAt: sanitizeReportDefaultsText(data.uploadedAt, 40),
         sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
         bookmarkNames,
+        ...(gridFsFileId ? { gridFsFileId } : {}),
     };
 }
 function sanitizeCompanyAiTemplateObject(value, maxChars) {
@@ -1813,9 +1896,7 @@ function resolveCompanyReportDefaults(stored, context) {
     const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
     const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
     const wordTemplateStored = sanitizeCompanyReportWordTemplate(stored?.wordTemplate);
-    const wordTemplateDefault = shouldUseProOptionBundledWordTemplate(context)
-        ? exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE
-        : null;
+    const wordTemplateDefault = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE;
     return {
         scope: {
             complianceStatement: scopeStored.complianceStatement?.trim() || seeds.scope?.complianceStatement || "",
@@ -1925,6 +2006,9 @@ const wordTemplateSchema = zod_1.z
         zod_1.z.literal(""),
         zod_1.z.null(),
     ])
+        .optional(),
+    gridFsFileId: zod_1.z
+        .union([zod_1.z.string().max(40), zod_1.z.literal(""), zod_1.z.null()])
         .optional(),
     fileDataUrl: zod_1.z
         .union([
@@ -2164,7 +2248,7 @@ async function createCompanyBySuperAdmin(request, body) {
     if (!parsed.success) {
         throw new HttpError(400, "invalid_payload", "Invalid company payload.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, companies, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const payload = parsed.data;
     const phone = requirePhoneIdentifier(payload.phone);
@@ -2268,7 +2352,7 @@ async function createCompanyBySuperAdmin(request, body) {
 async function listCompaniesForSuperAdmin(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies, users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const rows = await companies.find().sort({ createdAt: -1 }).limit(500).toArray();
     const companyIds = rows.map((c) => c._id);
@@ -2334,7 +2418,7 @@ async function listCompaniesForSuperAdmin(request) {
 async function listCompanyUsersForCompanyAdmin(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertCompanyAdminUser(context);
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const company = await companies.findOne({ _id: companyId });
@@ -2400,7 +2484,7 @@ async function resolveCompanyAdminReportIdentity(db, companyId, company) {
 async function getCompanyReportDefaultsForMember(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertCompanyMemberUser(context);
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const company = await companies.findOne({ _id: companyId });
@@ -2452,7 +2536,7 @@ async function getCompanyReportDefaultsForMember(request) {
 async function getCompanyReportDefaultsForCompanyAdmin(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertCompanyAdminUser(context);
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const company = await companies.findOne({ _id: companyId });
@@ -2482,7 +2566,7 @@ async function updateCompanyReportDefaultsByCompanyAdmin(request, body) {
             issues: flat,
         });
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const defaultsWithStoredAssets = await persistCompanyReportDefaultsAssets(parsed.data, companyId.toString());
@@ -2513,7 +2597,7 @@ async function updateCompanyBrandingByCompanyAdmin(request, body) {
             issues: flat,
         });
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const now = new Date();
@@ -2548,7 +2632,7 @@ async function updateCompanyMemberReportSignatureByCompanyAdmin(request, body) {
     if (!targetOid) {
         throw new HttpError(400, "invalid_user_id", "Invalid user id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const link = await userCompanyMemberships.findOne({ companyId, userId: targetOid });
@@ -2600,7 +2684,7 @@ async function createCompanyUserByCompanyAdmin(request, body) {
             issues: flat,
         });
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, companies, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const payload = parsed.data;
     const phone = requirePhoneIdentifier(payload.phone);
@@ -2785,7 +2869,7 @@ async function updateCompanyUserByCompanyAdmin(request, userId, body) {
     if (!targetOid) {
         throw new HttpError(400, "invalid_id", "Invalid user id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const companyId = context.company._id;
     const link = await userCompanyMemberships.findOne({ companyId, userId: targetOid });
@@ -2893,7 +2977,7 @@ async function deleteCompanyUserByCompanyAdmin(request, userId) {
     if (memberOid.equals(context.user._id)) {
         throw new HttpError(400, "invalid_action", "Cannot delete your own account.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, userCompanyMemberships, companies } = (0, collections_1.getAuthCollections)(db);
     const link = await userCompanyMemberships.findOne({
         userId: memberOid,
@@ -2976,7 +3060,7 @@ async function deleteCompanyUserByCompanyAdmin(request, userId) {
 async function forceLogoutUserSessions(userIds) {
     if (userIds.length === 0)
         return;
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { sessions } = (0, collections_1.getAuthCollections)(db);
     const now = new Date();
     await sessions.updateMany({ userId: { $in: userIds }, isActive: true }, {
@@ -3003,7 +3087,7 @@ async function getCompanyDetailForSuperAdmin(request, companyId) {
     if (!companyOid) {
         throw new HttpError(400, "invalid_id", "Invalid company id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const company = await companies.findOne({ _id: companyOid });
     if (!company) {
@@ -3090,7 +3174,7 @@ async function updateCompanyBySuperAdmin(request, companyId, body) {
     if (!parsed.success) {
         throw new HttpError(400, "invalid_payload", "Invalid update payload.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const companyOid = (0, object_id_util_1.tryParseObjectId)(companyId);
     if (!companyOid) {
@@ -3185,7 +3269,7 @@ async function deleteCompanyBySuperAdmin(request, companyId) {
     if (!companyOid) {
         throw new HttpError(400, "invalid_id", "Invalid company id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies, users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const company = await companies.findOne({ _id: companyOid });
     if (!company) {
@@ -3225,7 +3309,7 @@ async function deleteCompanyMemberBySuperAdmin(request, companyId, userId) {
     if (!companyOid || !memberOid) {
         throw new HttpError(400, "invalid_id", "Invalid company or user id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, userProfiles, userCompanyMemberships } = (0, collections_1.getAuthCollections)(db);
     const link = await userCompanyMemberships.findOne({
         userId: memberOid,
@@ -3298,7 +3382,7 @@ async function setActiveCompanyForUser(request, body) {
     if (!oid) {
         throw new HttpError(400, "invalid_id", "Invalid company id.");
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { companies, userCompanyMemberships, sessions } = (0, collections_1.getAuthCollections)(db);
     if (context.user.role === "super_admin") {
         const co = await companies.findOne({ _id: oid });
@@ -3346,7 +3430,7 @@ async function updateAdminConfigPayload(request, body) {
     }
     const updates = parsed.data;
     const now = new Date();
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { adminConfig } = (0, collections_1.getAuthCollections)(db);
     await adminConfig.updateOne({ _id: "system" }, {
         $set: {
@@ -3375,7 +3459,7 @@ async function updateAdminConfigPayload(request, body) {
 async function listAdminUsers(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { sessions, users, guestAttempts, blockedEntities } = (0, collections_1.getAuthCollections)(db);
     const [identitySessionStats, userDocs, guestDocs, blockedDocs] = await Promise.all([
         sessions
@@ -3648,7 +3732,7 @@ async function updateAdminUserState(request, body) {
         throw new HttpError(400, "invalid_payload", "Invalid user action payload.");
     }
     const payload = parsed.data;
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { users, sessions, blockedEntities } = (0, collections_1.getAuthCollections)(db);
     if (payload.targetType === "user") {
         const targetOid = (0, object_id_util_1.tryParseObjectId)(payload.targetId);
@@ -3771,7 +3855,7 @@ async function getAdminAnalytics(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
     const payload = await resolveCachedPayload(adminAnalyticsPayloadCache, ADMIN_ANALYTICS_CACHE_TTL_MS, async () => {
-        const db = await (0, mongodb_1.getMongoDb)();
+        const db = await (0, mongodb_2.getMongoDb)();
         const { users, sessions, activities, guestAttempts } = (0, collections_1.getAuthCollections)(db);
         const today = startOfDay();
         const weekStart = startOfWeek();
@@ -3984,7 +4068,7 @@ async function getAdminSourceRecordStats(request) {
     const context = await (0, context_1.resolveRequestContext)(request);
     assertAdminUser(context.user, context.isUserBlocked);
     const payload = await resolveCachedPayload(adminSourceRecordStatsPayloadCache, ADMIN_SOURCE_RECORD_STATS_CACHE_TTL_MS, async () => {
-        const db = await (0, mongodb_1.getMongoDb)();
+        const db = await (0, mongodb_2.getMongoDb)();
         const metricsCache = db.collection(ADMIN_METRICS_CACHE_COLLECTION);
         const persistedSnapshot = await metricsCache.findOne({
             _id: ADMIN_SOURCE_RECORD_STATS_CACHE_KEY,
@@ -4238,7 +4322,7 @@ async function listAdminActivities(request) {
             filter.timestamp.$lte = end;
         }
     }
-    const db = await (0, mongodb_1.getMongoDb)();
+    const db = await (0, mongodb_2.getMongoDb)();
     const { activities } = (0, collections_1.getAuthCollections)(db);
     const [items, total] = await Promise.all([
         activities
@@ -4343,7 +4427,7 @@ async function submitTrackingActions(request, body) {
     });
     const containsSearch = parsedActions.some((action) => action.actionType === "search");
     if (containsSearch && !context.user) {
-        const db = await (0, mongodb_1.getMongoDb)();
+        const db = await (0, mongodb_2.getMongoDb)();
         const { guestAttempts } = (0, collections_1.getAuthCollections)(db);
         await guestAttempts.updateOne({ identityId: context.identityId }, {
             $setOnInsert: {
