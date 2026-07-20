@@ -896,6 +896,10 @@ export class MachineValuationController {
       valuationImagesBase64?: string[];
       textValues?: Record<string, string>;
       textByBookmarkName?: Record<string, string>;
+      imageLayout?: {
+        imagesPerRow?: number;
+        imagesPerPage?: number;
+      };
     },
   ) {
     const context = await resolveRequestContext(req);

@@ -1110,17 +1110,80 @@ function coerceNumberishField(v) {
     }
     return null;
 }
+function assetImageOriginalFilename(rawUrl) {
+    try {
+        const path = new URL(rawUrl).pathname;
+        const name = path.split("/").filter(Boolean).at(-1)?.trim().toLowerCase() ?? "";
+        return name || null;
+    }
+    catch {
+        const name = rawUrl.split(/[?#]/, 1)[0]?.split("/").at(-1)?.trim().toLowerCase() ?? "";
+        return name || null;
+    }
+}
+function isDigitalOceanAssetImage(raw) {
+    const url = raw && typeof raw === "object" ? raw.url : null;
+    return typeof url === "string" && /(^|[/.])digitaloceanspaces\.com(?:[/:]|$)/i.test(url);
+}
+function dedupePicAssetImageMirrors(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const byFilename = new Map();
+    raw.forEach((item, index) => {
+        const url = item && typeof item === "object" ? item.url : null;
+        if (typeof url !== "string")
+            return;
+        const filename = assetImageOriginalFilename(url);
+        if (!filename)
+            return;
+        const indexes = byFilename.get(filename);
+        if (indexes)
+            indexes.push(index);
+        else
+            byFilename.set(filename, [index]);
+    });
+    const keep = new Set(raw.map((_, index) => index));
+    for (const indexes of byFilename.values()) {
+        if (indexes.length < 2)
+            continue;
+        const preferred = indexes.find((index) => isDigitalOceanAssetImage(raw[index])) ??
+            indexes[0];
+        if (!isDigitalOceanAssetImage(raw[preferred]))
+            continue;
+        for (const index of indexes) {
+            if (index !== preferred)
+                keep.delete(index);
+        }
+    }
+    return raw.filter((_, index) => keep.has(index));
+}
 function serializePicAssetImages(raw) {
     if (!Array.isArray(raw))
         return [];
     const out = [];
-    for (const item of raw) {
+    for (const item of dedupePicAssetImageMirrors(raw)) {
         if (item instanceof mongodb_1.ObjectId) {
             out.push({ fileId: item.toString() });
             continue;
         }
         if (typeof item === "string" && mongodb_1.ObjectId.isValid(item)) {
             out.push({ fileId: item });
+            continue;
+        }
+        if (item && typeof item === "object" && "fileId" in item && !("url" in item)) {
+            const fid = item.fileId;
+            const fileId = fid instanceof mongodb_1.ObjectId
+                ? fid.toString()
+                : typeof fid === "string" && mongodb_1.ObjectId.isValid(fid)
+                    ? fid
+                    : "";
+            if (!fileId)
+                continue;
+            const row = { fileId };
+            if (typeof item.includeInReport === "boolean") {
+                row.includeInReport = item.includeInReport;
+            }
+            out.push(row);
             continue;
         }
         if (item && typeof item === "object" && "url" in item) {
@@ -1225,8 +1288,23 @@ function normalizePicAssetMediaArrayForPatch(raw, field) {
         }
         if (item && typeof item === "object" && "fileId" in item) {
             const fid = item.fileId;
+            const includeInReport = item.includeInReport;
             if (typeof fid === "string" && mongodb_1.ObjectId.isValid(fid)) {
-                out.push(new mongodb_1.ObjectId(fid));
+                if (field === "images" && typeof includeInReport === "boolean") {
+                    out.push({ fileId: new mongodb_1.ObjectId(fid), includeInReport });
+                }
+                else {
+                    out.push(new mongodb_1.ObjectId(fid));
+                }
+                continue;
+            }
+            if (fid instanceof mongodb_1.ObjectId) {
+                if (field === "images" && typeof includeInReport === "boolean") {
+                    out.push({ fileId: fid, includeInReport });
+                }
+                else {
+                    out.push(fid);
+                }
                 continue;
             }
         }
@@ -1714,6 +1792,61 @@ function picAssetImageIncludeInReport(raw) {
         return false;
     return raw.includeInReport === true;
 }
+async function syncGridFsIncludeInReportFromPicImages(db, projectId, picAssetId, images) {
+    if (!Array.isArray(images) || images.length === 0)
+        return;
+    const col = db.collection(collections_2.MV_FILES_FILES_COLLECTION);
+    const now = new Date();
+    const ops = [];
+    for (const image of images) {
+        const includeInReport = picAssetImageIncludeInReport(image);
+        const fileId = picAssetImageFileObjectId(image);
+        if (fileId) {
+            ops.push({
+                updateOne: {
+                    filter: {
+                        _id: fileId,
+                        "metadata.projectId": projectId,
+                        "metadata.scope": "asset-images",
+                    },
+                    update: {
+                        $set: {
+                            "metadata.includeInReport": includeInReport,
+                            "metadata.updatedAt": now,
+                        },
+                    },
+                },
+            });
+            continue;
+        }
+        const external = picAssetExternalImageUrl(image);
+        if (!external)
+            continue;
+        ops.push({
+            updateMany: {
+                filter: {
+                    "metadata.projectId": projectId,
+                    "metadata.scope": "asset-images",
+                    "metadata.picAssetId": picAssetId,
+                    "metadata.sourceUrl": external.url,
+                },
+                update: {
+                    $set: {
+                        "metadata.includeInReport": includeInReport,
+                        "metadata.updatedAt": now,
+                    },
+                },
+            },
+        });
+    }
+    if (ops.length === 0)
+        return;
+    try {
+        await col.bulkWrite(ops, { ordered: false });
+    }
+    catch {
+    }
+}
 function picAssetImageDisplayOrder(raw, fallback) {
     if (!raw || typeof raw !== "object" || raw instanceof mongodb_1.ObjectId)
         return fallback;
@@ -1830,6 +1963,75 @@ function compareAssetImageGridDocs(a, b) {
     const dbt = b.uploadDate instanceof Date ? b.uploadDate.getTime() : 0;
     return da - dbt;
 }
+function stableAssetImageSourceUrl(sourceUrl) {
+    const raw = sourceUrl.trim();
+    if (!raw)
+        return "";
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+            return `${parsed.origin.toLowerCase()}${parsed.pathname}`.toLowerCase();
+        }
+    }
+    catch {
+    }
+    return raw.toLowerCase();
+}
+function assetImageFileDedupeKey(doc) {
+    const picAssetId = doc.metadata?.picAssetId?.toString?.() ?? "";
+    const sourceUrl = typeof doc.metadata?.sourceUrl === "string" ? stableAssetImageSourceUrl(doc.metadata.sourceUrl) : "";
+    if (sourceUrl)
+        return `${picAssetId}::url::${sourceUrl.toLowerCase()}`;
+    const relativePath = String(doc.metadata?.relativePath || doc.metadata?.originalFileName || "")
+        .replace(/\\/g, "/")
+        .trim()
+        .toLowerCase();
+    return `${picAssetId}::path::${relativePath}`;
+}
+function assetImageDedupeKeyMongoExpr() {
+    return {
+        $let: {
+            vars: {
+                picAssetId: { $toString: { $ifNull: ["$metadata.picAssetId", ""] } },
+                sourceUrl: {
+                    $toLower: {
+                        $arrayElemAt: [
+                            { $split: [{ $arrayElemAt: [{ $split: [{ $ifNull: ["$metadata.sourceUrl", ""] }, "#"] }, 0] }, "?"] },
+                            0,
+                        ],
+                    },
+                },
+                path: {
+                    $toLower: { $ifNull: ["$metadata.relativePath", { $ifNull: ["$filename", ""] }] },
+                },
+            },
+            in: {
+                $cond: [
+                    { $gt: [{ $strLenCP: "$$sourceUrl" }, 0] },
+                    { $concat: ["$$picAssetId", "::url::", "$$sourceUrl"] },
+                    { $concat: ["$$picAssetId", "::path::", "$$path"] },
+                ],
+            },
+        },
+    };
+}
+function dedupeAssetImageFileDocs(docs) {
+    const byKey = new Map();
+    for (const doc of docs) {
+        const key = assetImageFileDedupeKey(doc);
+        const current = byKey.get(key);
+        if (!current) {
+            byKey.set(key, doc);
+            continue;
+        }
+        const currentTime = current.uploadDate instanceof Date ? current.uploadDate.getTime() : 0;
+        const nextTime = doc.uploadDate instanceof Date ? doc.uploadDate.getTime() : 0;
+        const keepNext = nextTime < currentTime || (nextTime === currentTime && doc._id.toString() < current._id.toString());
+        if (keepNext)
+            byKey.set(key, doc);
+    }
+    return Array.from(byKey.values());
+}
 function mapStoredFileDoc(doc) {
     const uploadDate = doc.uploadDate instanceof Date ? doc.uploadDate : new Date();
     const updatedAt = doc.metadata?.updatedAt instanceof Date ? doc.metadata.updatedAt : uploadDate;
@@ -1882,7 +2084,6 @@ async function uploadExternalPicAssetImageToGridFs(db, projectId, ref) {
         "metadata.scope": "asset-images",
         "metadata.picAssetId": ref.picAssetId,
         "metadata.sourceUrl": ref.url,
-        "metadata.displayOrder": ref.displayOrder,
     });
     if (existing)
         return existing._id;
@@ -1915,6 +2116,79 @@ async function uploadExternalPicAssetImageToGridFs(db, projectId, ref) {
         uploadStream.end(fetched.data);
     });
 }
+const MV_ASSET_IMAGE_EXTERNAL_FETCH_CONCURRENCY = 12;
+async function reconcileExternalAssetImageGridFsDocs(db, projectId, externalRefs) {
+    const validSourceUrlsByPicAsset = new Map();
+    for (const ref of externalRefs) {
+        const key = ref.picAssetId.toString();
+        let set = validSourceUrlsByPicAsset.get(key);
+        if (!set) {
+            set = new Set();
+            validSourceUrlsByPicAsset.set(key, set);
+        }
+        set.add(ref.url);
+    }
+    const picAssetIds = Array.from(validSourceUrlsByPicAsset.keys()).map((id) => new mongodb_1.ObjectId(id));
+    if (picAssetIds.length === 0)
+        return;
+    const col = db.collection(collections_2.MV_FILES_FILES_COLLECTION);
+    const docs = await col
+        .find({
+        "metadata.projectId": projectId,
+        "metadata.scope": "asset-images",
+        "metadata.picAssetId": { $in: picAssetIds },
+        "metadata.sourceUrl": { $exists: true },
+    })
+        .project({
+        _id: 1,
+        uploadDate: 1,
+        "metadata.picAssetId": 1,
+        "metadata.sourceUrl": 1,
+    })
+        .toArray();
+    if (docs.length === 0)
+        return;
+    const groups = new Map();
+    for (const doc of docs) {
+        const picAssetId = doc.metadata?.picAssetId?.toString?.() ?? "";
+        const sourceUrl = String(doc.metadata?.sourceUrl ?? "");
+        const key = `${picAssetId}::${sourceUrl}`;
+        const group = groups.get(key);
+        if (group)
+            group.push(doc);
+        else
+            groups.set(key, [doc]);
+    }
+    const idsToDelete = [];
+    for (const [key, group] of groups) {
+        const [picAssetId, sourceUrl] = key.split("::");
+        const isStale = !validSourceUrlsByPicAsset.get(picAssetId)?.has(sourceUrl);
+        if (isStale) {
+            idsToDelete.push(...group.map((d) => d._id));
+            continue;
+        }
+        if (group.length > 1) {
+            const sorted = [...group].sort((a, b) => {
+                const ta = a.uploadDate instanceof Date ? a.uploadDate.getTime() : 0;
+                const tb = b.uploadDate instanceof Date ? b.uploadDate.getTime() : 0;
+                if (ta !== tb)
+                    return ta - tb;
+                return a._id.toString().localeCompare(b._id.toString());
+            });
+            idsToDelete.push(...sorted.slice(1).map((d) => d._id));
+        }
+    }
+    if (idsToDelete.length === 0)
+        return;
+    const bucket = new mongodb_1.GridFSBucket(db, { bucketName: collections_2.MV_FILES_BUCKET });
+    await runWithConcurrency(idsToDelete.map((id) => async () => {
+        try {
+            await bucket.delete(id);
+        }
+        catch {
+        }
+    }), MV_GRIDFS_PARALLEL_UPLOAD_LIMIT);
+}
 async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
     const picFolders = await db
         .collection(collections_3.ASSETS_COLLECTION)
@@ -1945,6 +2219,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
                     picAssetId: folder._id,
                     folderName,
                     imageIndex,
+                    includeInReport: picAssetImageIncludeInReport(image),
                 });
                 return;
             }
@@ -1962,12 +2237,15 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
             });
         });
     }
-    for (const ref of externalRefs) {
+    await runWithConcurrency(externalRefs.map((ref) => async () => {
         try {
             await uploadExternalPicAssetImageToGridFs(db, projectId, ref);
         }
         catch {
         }
+    }), MV_ASSET_IMAGE_EXTERNAL_FETCH_CONCURRENCY);
+    if (externalRefs.length > 0) {
+        await reconcileExternalAssetImageGridFsDocs(db, projectId, externalRefs);
     }
     if (refsByFileId.size === 0)
         return;
@@ -2002,6 +2280,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
             needsPathBackfill ||
             typeof doc.metadata?.originalFileName !== "string" ||
             doc.metadata?.includeInReport === undefined ||
+            doc.metadata?.includeInReport !== ref.includeInReport ||
             needsDisplayOrderBackfill;
         if (!needsMetadataBackfill)
             continue;
@@ -2020,7 +2299,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
             "metadata.relativePath": relativePath,
             "metadata.originalFileName": doc.metadata?.originalFileName || fileName,
             "metadata.updatedAt": now,
-            "metadata.includeInReport": doc.metadata?.includeInReport === true,
+            "metadata.includeInReport": ref.includeInReport === true,
         };
         if (needsDisplayOrderBackfill) {
             setMeta["metadata.displayOrder"] = ref.imageIndex;
@@ -4802,6 +5081,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const nextPic = (await pa.findOneAndUpdate({ _id: picId, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, { $set }, { returnDocument: "after" }));
         if (!nextPic)
             throw new common_1.NotFoundException("photo folder asset not found");
+        if (b.images !== undefined) {
+            await syncGridFsIncludeInReportFromPicImages(db, pid, picId, Array.isArray(nextPic.images) ? nextPic.images : []);
+        }
         const subForResponse = folderMeta ??
             (await sp.findOne({ _id: sid, projectId: pid })) ??
             (await db.collection(collections_2.MV_ITEMS_COLLECTION).findOne({ _id: sid, projectId: pid }));
@@ -5252,10 +5534,15 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 throw new common_1.BadRequestException("cursor غير صالح.");
             }
             const offset = Number(cursorText);
+            const dedupeStage = { $set: { __mvDedupeKey: assetImageDedupeKeyMongoExpr() } };
             const [files, total] = await Promise.all([
                 collection
                     .aggregate([
                     { $match: filter },
+                    dedupeStage,
+                    { $sort: { uploadDate: 1, _id: 1 } },
+                    { $group: { _id: "$__mvDedupeKey", doc: { $first: "$$ROOT" } } },
+                    { $replaceRoot: { newRoot: "$doc" } },
                     {
                         $set: {
                             __mvOrderMissing: {
@@ -5279,7 +5566,15 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                     { $limit: limit },
                 ], { allowDiskUse: true })
                     .toArray(),
-                collection.countDocuments(filter),
+                collection
+                    .aggregate([
+                    { $match: filter },
+                    dedupeStage,
+                    { $group: { _id: "$__mvDedupeKey" } },
+                    { $count: "total" },
+                ], { allowDiskUse: true })
+                    .toArray()
+                    .then((rows) => rows[0]?.total ?? 0),
             ]);
             const nextOffset = offset + files.length;
             const hasMore = nextOffset < total;
@@ -5290,7 +5585,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 total,
             };
         }
-        const files = await collection.find(filter).toArray();
+        const files = dedupeAssetImageFileDocs(await collection.find(filter).toArray());
         files.sort(compareAssetImageGridDocs);
         return files.map((file) => mapStoredFileDoc(file));
     }
@@ -5338,6 +5633,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             })
                 .toArray(),
         ]);
+        const dedupedAssetFiles = dedupeAssetImageFileDocs(assetFiles);
         const itemById = new Map(itemFolders.map((item) => [item._id.toString(), item]));
         const picById = new Map(picFolders.map((pic) => [pic._id.toString(), pic]));
         const itemPathCache = new Map();
@@ -5433,7 +5729,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             if (path && path.length > 0)
                 directoryPaths.add(joinZipPath([rootFolderName, ...path]));
         }
-        const imageFiles = assetFiles
+        const imageFiles = dedupedAssetFiles
             .filter((file) => isLikelyImageUpload(file.metadata?.originalFileName || file.filename || "file", file.metadata?.mimeType))
             .sort(compareAssetImageGridDocs);
         const zipFileName = sanitizeZipFileName(`${rootFolderName}-${project.name || projectId}.zip`, "asset-images.zip");
@@ -5859,8 +6155,8 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 "metadata.updatedAt": now,
             },
         });
-        if (result.matchedCount !== ids.length) {
-            throw new common_1.BadRequestException("بعض الصور غير موجودة أو لا تنتمي لهذا المشروع.");
+        if (result.matchedCount === 0 && ids.length > 0) {
+            this.logger.warn(`updateProjectAssetImageReportSelection: no GridFS matches for ${ids.length} id(s) in project ${projectId}`);
         }
         return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
     }

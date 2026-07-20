@@ -68,16 +68,25 @@ IMAGE_BOOKMARKS: dict[str, dict[str, Any]] = {
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
 IMAGE_PAGE_TITLE = ASSET_IMAGE_PAGE_TITLE
-IMAGES_PER_ROW = 3
-IMAGE_ROWS_PER_PAGE = 3
-IMAGES_PER_PAGE = IMAGES_PER_ROW * IMAGE_ROWS_PER_PAGE
+IMAGES_PER_ROW = 4
+IMAGES_PER_PAGE = 20
+IMAGE_ROWS_PER_PAGE = math.ceil(IMAGES_PER_PAGE / IMAGES_PER_ROW)
 EMU_PER_INCH = 914400
 PIXEL_DXA = 15
 PIXEL_EMU = int(EMU_PER_INCH / 96)
-ASSET_IMAGE_GAP_DXA = PIXEL_DXA
-ASSET_IMAGE_GAP_EMU = PIXEL_EMU
-VALUATION_IMAGE_PAGE_WIDTH_RATIO = 0.90
-VALUATION_IMAGE_RTL_RIGHT_MARGIN_RATIO = 0.03
+IMAGE_HORIZONTAL_MARGIN_PX = 3
+IMAGE_HORIZONTAL_MARGIN_DXA = PIXEL_DXA * IMAGE_HORIZONTAL_MARGIN_PX
+IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
+IMAGE_CONTENT_WIDTH_RATIO = 0.95
+ASSET_IMAGE_GAP_DXA = IMAGE_HORIZONTAL_MARGIN_DXA
+ASSET_IMAGE_GAP_EMU = IMAGE_HORIZONTAL_MARGIN_EMU
+# خلية صور الأصول لا تتجاوز عرضها ~2 بوصة في التقرير؛ 900px تكفي لطباعة حادة حتى عند 400dpi
+# (900/2 = 450dpi) بينما تقلّص زمن فك/إعادة ترميز الصورة وحجم ملف الـ docx الناتج جذرياً مقارنة
+# بإبقاء دقة كاميرا الهاتف الكاملة (غالباً 3000-4000px) لكل صورة — الفارق الرئيسي في بطء الدمج
+# مع مشاريع بها مئات الصور.
+ASSET_IMAGE_MAX_SQUARE_PX = 900
+# صور التقييم أقل عدداً لكنها تُعرض بعرض يصل لـ90% من الصفحة؛ سقف أعلى يحفظ الوضوح.
+VALUATION_IMAGE_MAX_DIMENSION_PX = 1800
 DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
@@ -406,6 +415,16 @@ def apply_contextual_text_fallbacks(root: etree._Element, text_values: dict[str,
     return filled
 
 
+def normalize_numeric_date_suffixes(root: etree._Element) -> None:
+    """Remove the Arabic Gregorian suffix after dates already rendered as DD/MM/YYYY."""
+    pattern = re.compile(r"(\d{2}/\d{2}/\d{4})\s*م\.?")
+    for para in root.iter(w("p")):
+        nodes, full_text = text_nodes_with_offsets(para)
+        matches = list(pattern.finditer(full_text))
+        for match in reversed(matches):
+            replace_text_range(nodes, match.start(), match.end(), match.group(1))
+
+
 def find_bookmark_pairs(root: etree._Element) -> list[tuple[str, str, etree._Element, etree._Element]]:
     ends: dict[str, etree._Element] = {}
     for el in root.iter(w("bookmarkEnd")):
@@ -579,6 +598,11 @@ def set_rpr_flag(rpr: etree._Element, tag: str) -> None:
     etree.SubElement(rpr, w(tag))
 
 
+def clear_rpr_flags(rpr: etree._Element, *tags: str) -> None:
+    for tag in tags:
+        remove_w_children(rpr, tag)
+
+
 def set_paragraph_cover_alignment(para: etree._Element) -> None:
     ppr = para.find(w("pPr"))
     if ppr is None:
@@ -586,6 +610,8 @@ def set_paragraph_cover_alignment(para: etree._Element) -> None:
         para.insert(0, ppr)
     remove_w_children(ppr, "jc")
     remove_w_children(ppr, "ind")
+    remove_w_children(ppr, "bidi")
+    bidi = etree.Element(w("bidi"))
     ind = etree.Element(w("ind"))
     ind.set(w("left"), "0")
     ind.set(w("right"), "0")
@@ -594,29 +620,70 @@ def set_paragraph_cover_alignment(para: etree._Element) -> None:
     rpr = ppr.find(w("rPr"))
     if rpr is not None:
         insert_at = list(ppr).index(rpr)
-        ppr.insert(insert_at, ind)
-        ppr.insert(insert_at + 1, jc)
+        ppr.insert(insert_at, bidi)
+        ppr.insert(insert_at + 1, ind)
+        ppr.insert(insert_at + 2, jc)
     else:
+        ppr.append(bidi)
         ppr.append(ind)
         ppr.append(jc)
 
 
+def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | None = None) -> None:
+    ppr = para.find(w("pPr"))
+    if ppr is None:
+        ppr = etree.Element(w("pPr"))
+        para.insert(0, ppr)
+    rpr = ppr.find(w("rPr"))
+    if rpr is None:
+        rpr = etree.SubElement(ppr, w("rPr"))
+    set_rpr_value(
+        rpr,
+        "rFonts",
+        {
+            "ascii": COVER_BOOKMARK_FONT_FAMILY,
+            "hAnsi": COVER_BOOKMARK_FONT_FAMILY,
+            "eastAsia": COVER_BOOKMARK_FONT_FAMILY,
+            "cs": COVER_BOOKMARK_FONT_FAMILY,
+            "hint": "cs",
+        },
+    )
+    set_rpr_value(rpr, "lang", {"val": "ar-SA", "bidi": "ar-SA"})
+    if font_size_half_points is not None:
+        set_rpr_value(rpr, "sz", {"val": str(font_size_half_points)})
+        set_rpr_value(rpr, "szCs", {"val": str(font_size_half_points)})
+
+
 def cover_bookmark_font_size(bookmark_name: str) -> int | None:
+    """Word stores font size in half-points (14pt => 28)."""
     norm = normalize_bookmark_name(bookmark_name)
-    if norm in {normalize_bookmark_name(name) for name in ("عنوان", "عنوانغ", "غلاف", "عنواناصل")}:
-        return 64
+    if norm in {
+        normalize_bookmark_name("عنوان"),
+        normalize_bookmark_name("عنوانغ"),
+        normalize_bookmark_name("عنواناصل"),
+        normalize_bookmark_name("غلاف"),
+    }:
+        return 28
     if norm in {normalize_bookmark_name(name) for name in ("عميلغلاف",)}:
-        return 56
+        return 40
     return None
 
 
 def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: etree._Element | None) -> etree._Element | None:
+    norm = normalize_bookmark_name(bookmark_name)
     size = cover_bookmark_font_size(bookmark_name)
+    is_regular_cover_title = norm in {
+        normalize_bookmark_name("عنوان"),
+        normalize_bookmark_name("عنوانغ"),
+        normalize_bookmark_name("عنواناصل"),
+        normalize_bookmark_name("غلاف"),
+    }
     if size is None:
         return rpr
     para = find_ancestor(start, w("p"))
     if para is not None:
         set_paragraph_cover_alignment(para)
+        set_paragraph_cover_font(para, size)
     styled = deepcopy(rpr) if rpr is not None else etree.Element(w("rPr"))
     set_rpr_value(
         styled,
@@ -629,10 +696,14 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
             "hint": "cs",
         },
     )
+    set_rpr_value(styled, "lang", {"val": "ar-SA", "bidi": "ar-SA"})
     set_rpr_value(styled, "sz", {"val": str(size)})
     set_rpr_value(styled, "szCs", {"val": str(size)})
-    set_rpr_flag(styled, "b")
-    set_rpr_flag(styled, "bCs")
+    if is_regular_cover_title:
+        clear_rpr_flags(styled, "b", "bCs")
+    else:
+        set_rpr_flag(styled, "b")
+        set_rpr_flag(styled, "bCs")
     set_rpr_flag(styled, "rtl")
     return styled
 
@@ -785,6 +856,7 @@ def apply_text_bookmarks(
 
     if text_values:
         filled += apply_contextual_text_fallbacks(root, text_values)
+    normalize_numeric_date_suffixes(root)
 
     out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
     return out, filled
@@ -1076,16 +1148,52 @@ def write_docx_zip(zin: zipfile.ZipFile, modified: dict[str, bytes]) -> bytes:
     return out_buf.getvalue()
 
 
-def crop_to_square_jpeg_bytes(img_bytes: bytes) -> bytes:
+def downscale_jpeg_bytes(img_bytes: bytes, max_dimension: int) -> bytes:
+    """يحدّ أبعاد الصورة الأطول لأقصى قيمة قبل تضمينها في Word — صور كاميرا الهاتف الأصلية
+    (غالباً 3000-4000px) لا تحتاج هذه الدقة لعرض بعرض صفحة تقرير؛ تقليصها يسرّع الدمج
+    ويقلّص حجم ملف الـ docx الناتج كثيراً بلا أي فرق بصري ملحوظ عند الطباعة أو العرض."""
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+        width, height = img.size
+        longest = max(width, height)
+        if longest > max_dimension > 0:
+            scale = max_dimension / longest
+            img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90)
+        return out.getvalue()
+    except Exception:
+        return img_bytes
+
+
+def crop_to_fill_jpeg_bytes(
+    img_bytes: bytes,
+    target_width: int,
+    target_height: int,
+) -> bytes:
     img = Image.open(io.BytesIO(img_bytes))
     img = img.convert("RGB")
     width, height = img.size
-    side = min(width, height)
-    left = (width - side) // 2
-    top = (height - side) // 2
-    cropped = img.crop((left, top, left + side, top + side))
+    target_ratio = max(1, target_width) / max(1, target_height)
+    source_ratio = width / max(1, height)
+    if source_ratio > target_ratio:
+        crop_width = max(1, int(height * target_ratio))
+        left = max(0, (width - crop_width) // 2)
+        cropped = img.crop((left, 0, left + crop_width, height))
+    else:
+        crop_height = max(1, int(width / target_ratio))
+        top = max(0, (height - crop_height) // 2)
+        cropped = img.crop((0, top, width, top + crop_height))
+    longest = max(cropped.size)
+    if longest > ASSET_IMAGE_MAX_SQUARE_PX:
+        scale = ASSET_IMAGE_MAX_SQUARE_PX / longest
+        cropped = cropped.resize(
+            (max(1, int(cropped.width * scale)), max(1, int(cropped.height * scale))),
+            Image.LANCZOS,
+        )
     out = io.BytesIO()
-    cropped.save(out, format="JPEG", quality=92, optimize=True)
+    cropped.save(out, format="JPEG", quality=90)
     return out.getvalue()
 
 
@@ -1254,6 +1362,17 @@ def set_docx_table_width(table, width_emu: int) -> None:
     tbl_pr.append(layout)
 
 
+def set_docx_table_indent(table, indent_emu: int) -> None:
+    tbl_pr = table._tbl.tblPr
+    existing = tbl_pr.find(docx_qn("w:tblInd"))
+    if existing is not None:
+        tbl_pr.remove(existing)
+    indent = make_docx_element("w:tblInd")
+    indent.set(docx_qn("w:w"), str(emu_to_twips(indent_emu)))
+    indent.set(docx_qn("w:type"), "dxa")
+    tbl_pr.append(indent)
+
+
 def detach_docx_body_element(elem) -> Any:
     parent = elem.getparent()
     if parent is not None:
@@ -1269,9 +1388,7 @@ def make_docx_title_element(doc, title: str):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(6)
-    run = p.add_run(title)
-    run.bold = True
-    run.font.size = Pt(16)
+    p.add_run(title)
     return detach_docx_body_element(p._element)
 
 
@@ -1369,21 +1486,20 @@ def document_valuation_image_layout_emu(
     doc,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
 ) -> tuple[int, int, int]:
-    """Use 90% of the physical page width with a small RTL-side margin."""
+    """Use 95% of the physical page width with equal physical side margins."""
     if section_metrics is None:
         page_width, _ = document_physical_page_box_emu(doc)
         left_margin, right_margin, _top_margin, _bottom_margin = document_section_margins_emu(doc)
     else:
         page_width, _page_height, left_margin, right_margin, _top_margin, _bottom_margin = section_metrics
     page_width = max(1, page_width)
-
-    target_width = max(1, int(page_width * VALUATION_IMAGE_PAGE_WIDTH_RATIO))
-    desired_right_margin = max(0, int(page_width * VALUATION_IMAGE_RTL_RIGHT_MARGIN_RATIO))
-    desired_left_margin = max(0, page_width - target_width - desired_right_margin)
-
-    left_indent = desired_left_margin - left_margin
-    right_indent = desired_right_margin - right_margin
-    return target_width, left_indent, right_indent
+    target_width = max(1, int(page_width * IMAGE_CONTENT_WIDTH_RATIO))
+    physical_side_margin = max(0, (page_width - target_width) // 2)
+    return (
+        target_width,
+        physical_side_margin - left_margin,
+        physical_side_margin - right_margin,
+    )
 
 
 def configure_rtl_valuation_image_paragraph(paragraph, indent_left: int, indent_right: int) -> None:
@@ -1426,11 +1542,21 @@ def document_content_box_emu(doc) -> tuple[int, int]:
     return content_width, content_height
 
 
-def document_cell_size_emu(doc) -> int:
-    content_width, content_height = document_content_box_emu(doc)
-    width_fit = max(1, (content_width - (IMAGES_PER_ROW - 1) * ASSET_IMAGE_GAP_EMU) // IMAGES_PER_ROW)
-    height_fit = max(1, (content_height - (IMAGE_ROWS_PER_PAGE - 1) * ASSET_IMAGE_GAP_EMU) // IMAGE_ROWS_PER_PAGE)
-    return max(int(1.8 * EMU_PER_INCH), min(width_fit, height_fit))
+def document_cell_dimensions_emu(
+    doc,
+    images_per_row: int,
+    image_rows_per_page: int,
+    section_metrics: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[int, int]:
+    _content_width, content_height = document_content_box_emu(doc)
+    if section_metrics is None:
+        page_width, _page_height = document_physical_page_box_emu(doc)
+    else:
+        page_width = section_metrics[0]
+    available_width = max(1, int(page_width * IMAGE_CONTENT_WIDTH_RATIO))
+    width_fit = max(1, (available_width - (images_per_row - 1) * ASSET_IMAGE_GAP_EMU) // images_per_row)
+    height_fit = max(1, (content_height - (image_rows_per_page - 1) * ASSET_IMAGE_GAP_EMU) // image_rows_per_page)
+    return width_fit, max(1, min(width_fit, height_fit))
 
 
 def scaled_image_size_for_width(img_bytes: bytes, target_width_emu: int, max_height_emu: int) -> tuple[int, int]:
@@ -1447,35 +1573,56 @@ def scaled_image_size_for_width(img_bytes: bytes, target_width_emu: int, max_hei
     return cx, cy
 
 
-def make_docx_image_table_element(doc, images: list[bytes]) -> tuple[Any, int]:
+def make_docx_image_table_element(
+    doc,
+    images: list[bytes],
+    images_per_row: int,
+    image_rows_per_page: int,
+    section_metrics: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[Any, int]:
     from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Emu, Pt
 
-    rows = max(1, math.ceil(len(images) / IMAGES_PER_ROW))
-    cell_emu = document_cell_size_emu(doc)
-    cell_dxa = max(1, int(cell_emu / EMU_PER_INCH * 1440))
+    rows = max(1, math.ceil(len(images) / images_per_row))
+    cell_width_emu, image_emu = document_cell_dimensions_emu(
+        doc,
+        images_per_row,
+        image_rows_per_page,
+        section_metrics,
+    )
+    cell_width_dxa = max(1, int(cell_width_emu / EMU_PER_INCH * 1440))
 
-    table = doc.add_table(rows=rows, cols=IMAGES_PER_ROW)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table = doc.add_table(rows=rows, cols=images_per_row)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
     table.autofit = False
     set_docx_table_borders_none(table)
     set_docx_table_cell_spacing(table, ASSET_IMAGE_GAP_DXA)
-    set_docx_table_width(table, cell_emu * IMAGES_PER_ROW + (IMAGES_PER_ROW - 1) * ASSET_IMAGE_GAP_EMU)
+    set_docx_table_width(
+        table,
+        cell_width_emu * images_per_row + (images_per_row - 1) * ASSET_IMAGE_GAP_EMU,
+    )
+    if section_metrics is None:
+        page_width, _page_height = document_physical_page_box_emu(doc)
+        left_margin, _right_margin, _top_margin, _bottom_margin = document_section_margins_emu(doc)
+    else:
+        page_width, _page_height, left_margin, _right_margin, _top_margin, _bottom_margin = section_metrics
+    physical_side_margin = max(0, int(page_width * (1 - IMAGE_CONTENT_WIDTH_RATIO) / 2))
+    set_docx_table_indent(table, physical_side_margin - left_margin)
 
     inserted = 0
     img_index = 0
     for row in table.rows:
-        row.height = Emu(cell_emu)
+        row.height = Emu(image_emu)
         row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         for cell in row.cells:
-            cell.width = Emu(cell_emu)
+            cell.width = Emu(cell_width_emu)
             tc_pr = cell._tc.get_or_add_tcPr()
             tc_w = tc_pr.find(docx_qn("w:tcW"))
             if tc_w is not None:
                 tc_pr.remove(tc_w)
             tc_w = make_docx_element("w:tcW")
-            tc_w.set(docx_qn("w:w"), str(cell_dxa))
+            tc_w.set(docx_qn("w:w"), str(cell_width_dxa))
             tc_w.set(docx_qn("w:type"), "dxa")
             tc_pr.append(tc_w)
             set_docx_cell_margins(cell, 0)
@@ -1487,8 +1634,18 @@ def make_docx_image_table_element(doc, images: list[bytes]) -> tuple[Any, int]:
             if img_index >= len(images):
                 continue
             try:
-                img_buf = io.BytesIO(crop_to_square_jpeg_bytes(images[img_index]))
-                para.add_run().add_picture(img_buf, width=Emu(cell_emu), height=Emu(cell_emu))
+                img_buf = io.BytesIO(
+                    crop_to_fill_jpeg_bytes(
+                        images[img_index],
+                        cell_width_emu,
+                        image_emu,
+                    )
+                )
+                para.add_run().add_picture(
+                    img_buf,
+                    width=Emu(cell_width_emu),
+                    height=Emu(image_emu),
+                )
                 inserted += 1
             except Exception as exc:
                 log(f"Skipped image {img_index + 1}: {exc}")
@@ -1504,6 +1661,7 @@ def make_docx_valuation_image_element(
 ) -> tuple[Any, int]:
     from docx.shared import Emu, Pt
 
+    img_bytes = downscale_jpeg_bytes(img_bytes, VALUATION_IMAGE_MAX_DIMENSION_PX)
     target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
     cx, cy = scaled_image_size_for_width_only(img_bytes, target_width)
 
@@ -1543,6 +1701,8 @@ def replace_image_bookmark_with_docx_elements(
     images: list[bytes],
     remove_placeholder: bool,
     layout: str = "asset_grid",
+    images_per_row: int = IMAGES_PER_ROW,
+    images_per_page: int = IMAGES_PER_PAGE,
 ) -> int:
     body = doc.element.body
     children = list(body)
@@ -1564,8 +1724,8 @@ def replace_image_bookmark_with_docx_elements(
 
     elements: list[Any] = []
     inserted = 0
+    section_metrics = first_section_metrics_at_or_after(children, target_idx)
     if layout == "valuation_pages":
-        section_metrics = first_section_metrics_at_or_after(children, target_idx)
         for image_idx, image in enumerate(images):
             if image_idx > 0:
                 elements.append(make_docx_page_break_element(doc))
@@ -1573,11 +1733,17 @@ def replace_image_bookmark_with_docx_elements(
             elements.append(image_elem)
             inserted += count
     else:
-        for page_idx in range(0, len(images), IMAGES_PER_PAGE):
+        image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
+        for page_idx in range(0, len(images), images_per_page):
             if page_idx > 0:
                 elements.append(make_docx_page_break_element(doc))
-            elements.append(make_docx_title_element(doc, IMAGE_PAGE_TITLE))
-            table_elem, count = make_docx_image_table_element(doc, images[page_idx : page_idx + IMAGES_PER_PAGE])
+            table_elem, count = make_docx_image_table_element(
+                doc,
+                images[page_idx : page_idx + images_per_page],
+                images_per_row,
+                image_rows_per_page,
+                section_metrics,
+            )
             elements.append(table_elem)
             inserted += count
 
@@ -1586,7 +1752,13 @@ def replace_image_bookmark_with_docx_elements(
     return inserted
 
 
-def apply_image_bookmarks_docx_api(docx_bytes: bytes, asset_images: list[bytes], valuation_images: list[bytes]) -> tuple[bytes, dict[str, int]]:
+def apply_image_bookmarks_docx_api(
+    docx_bytes: bytes,
+    asset_images: list[bytes],
+    valuation_images: list[bytes],
+    images_per_row: int = IMAGES_PER_ROW,
+    images_per_page: int = IMAGES_PER_PAGE,
+) -> tuple[bytes, dict[str, int]]:
     from docx import Document
 
     doc = Document(io.BytesIO(docx_bytes))
@@ -1597,6 +1769,8 @@ def apply_image_bookmarks_docx_api(docx_bytes: bytes, asset_images: list[bytes],
         asset_images,
         True,
         "asset_grid",
+        images_per_row,
+        images_per_page,
     )
     stats["valuation"] = replace_image_bookmark_with_docx_elements(
         doc,
@@ -1622,6 +1796,12 @@ def merge_package(payload: dict[str, Any]) -> bytes:
     name_to_text = build_name_to_text(text_values, payload.get("textByBookmarkName") or {})
     asset_images = [base64.b64decode(x) for x in (payload.get("assetImagesBase64") or [])]
     valuation_images = [base64.b64decode(x) for x in (payload.get("valuationImagesBase64") or [])]
+    image_layout = payload.get("imageLayout") if isinstance(payload.get("imageLayout"), dict) else {}
+    try:
+        images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
+    except (TypeError, ValueError):
+        images_per_row = IMAGES_PER_ROW
+    images_per_page = images_per_row * (5 if images_per_row >= 4 else 4)
 
     in_buf = io.BytesIO(template_bytes)
     modified: dict[str, bytes] = {}
@@ -1646,7 +1826,13 @@ def merge_package(payload: dict[str, Any]) -> bytes:
         result = write_docx_zip(zin, modified)
 
     if asset_images or valuation_images:
-        result, img_stats = apply_image_bookmarks_docx_api(result, asset_images, valuation_images)
+        result, img_stats = apply_image_bookmarks_docx_api(
+            result,
+            asset_images,
+            valuation_images,
+            images_per_row,
+            images_per_page,
+        )
     else:
         validate_docx_package(result)
 

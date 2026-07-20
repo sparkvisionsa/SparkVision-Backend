@@ -3,14 +3,17 @@
 import base64
 import io
 import json
+import re
 import zipfile
 from lxml import etree
 from merge_docx import (
     ASSET_IMAGE_GAP_DXA,
     EMU_PER_INCH,
+    IMAGE_CONTENT_WIDTH_RATIO,
+    IMAGE_HORIZONTAL_MARGIN_DXA,
     IMAGE_PAGE_TITLE,
+    IMAGES_PER_PAGE,
     IMAGES_PER_ROW,
-    VALUATION_IMAGE_PAGE_WIDTH_RATIO,
     merge_package,
     validate_part_xml,
 )
@@ -42,6 +45,11 @@ DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
       <w:r><w:bookmarkStart w:id="16" w:name="عميلغلاف"/></w:r>
       <w:r><w:t>old cover client</w:t></w:r>
       <w:r><w:bookmarkEnd w:id="16"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:bookmarkStart w:id="17" w:name="عنوانغ"/></w:r>
+      <w:r><w:t>old cover title</w:t></w:r>
+      <w:r><w:bookmarkEnd w:id="17"/></w:r>
     </w:p>
     <w:p>
       <w:r><w:bookmarkStart w:id="1" w:name="تاريخاصدار"/></w:r>
@@ -176,14 +184,14 @@ def make_template() -> bytes:
 def main() -> None:
     image_b64 = base64.b64encode(PNG_1X1).decode("ascii")
     valuation_basis = "القيمة السوقية"
-    valuation_date = "١١ يناير ٢٠٢٦"
-    inspection_date = "١٢ يناير ٢٠٢٦"
+    valuation_date = "14/06/2026"
+    inspection_date = "04/06/2026"
     payload = {
         "templateBase64": base64.b64encode(make_template()).decode("ascii"),
         "textValues": {
             "clientName": "شركة الاختبار",
-            "agreementDate": "١٠ يناير ٢٠٢٦",
-            "reportIssueDate": "١ يناير ٢٠٢٦",
+            "agreementDate": "27/06/2026",
+            "reportIssueDate": "08/06/2026",
             "valuationDate": valuation_date,
             "inspectionDate": inspection_date,
             "valuationBasis": valuation_basis,
@@ -197,6 +205,7 @@ def main() -> None:
         "textByBookmarkName": {},
         "assetImagesBase64": [image_b64 for _ in range(12)],
         "valuationImagesBase64": [image_b64 for _ in range(4)],
+        "imageLayout": {"imagesPerRow": 2, "imagesPerPage": 5},
     }
     out = merge_package(payload)
     with zipfile.ZipFile(io.BytesIO(out), "r") as z:
@@ -207,10 +216,11 @@ def main() -> None:
     validate_part_xml(doc, "word/document.xml")
     text = doc.decode("utf-8")
     assert "شركة الاختبار" in text, "client bookmark not filled"
-    assert "١ يناير ٢٠٢٦" in text, "date bookmark not filled"
-    assert "١٠ يناير ٢٠٢٦" in text, "compound agreement/date bookmark not filled"
-    assert "١١ يناير ٢٠٢٦" in text, "valuation date alias bookmark not filled"
-    assert "١٢ يناير ٢٠٢٦" in text, "inspection date alias bookmark not filled"
+    assert "08/06/2026" in text, "date bookmark not filled"
+    assert "27/06/2026" in text, "compound agreement/date bookmark not filled"
+    assert valuation_date in text, "valuation date alias bookmark not filled"
+    assert inspection_date in text, "inspection date alias bookmark not filled"
+    assert not re.search(r"\d{2}/\d{2}/\d{4}\s*م\.?", text), "numeric dates should not keep the Arabic Gregorian suffix"
     assert "١٢٣ ر.س" in text, "paragraph-level bookmark not filled"
     assert "الرياض" in text, "hyperlink-contained bookmark not filled"
     assert "غرض اختبار داخل مربع نص" in text, "textbox bookmark not filled"
@@ -236,11 +246,15 @@ def main() -> None:
     w = lambda tag: f"{{{W_NS}}}{tag}"
     a = lambda tag: f"{{{A_NS}}}{tag}"
     plain_text = "\n".join("".join(t.text or "" for t in p.iter(w("t"))) for p in root.iter(w("p")))
+    def matching_runs(expected_text: str):
+        return [
+            run
+            for run in root.iter(w("r"))
+            if "".join(t.text or "" for t in run.iter(w("t"))) == expected_text
+        ]
+
     def has_tajawal_run(expected_text: str) -> bool:
-        for run in root.iter(w("r")):
-            run_text = "".join(t.text or "" for t in run.iter(w("t")))
-            if run_text != expected_text:
-                continue
+        for run in matching_runs(expected_text):
             rpr = run.find(w("rPr"))
             fonts = rpr.find(w("rFonts")) if rpr is not None else None
             if fonts is not None and fonts.get(f"{{{W_NS}}}cs") == "Tajawal":
@@ -249,12 +263,46 @@ def main() -> None:
 
     assert has_tajawal_run("تقرير اختبار مباشر"), "cover title should use Tajawal"
     assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
+    title_runs = matching_runs("تقرير اختبار مباشر")
+    assert len(title_runs) == 2, "report title should fill cover and body bookmarks"
+    tajawal_title_runs = [
+        run
+        for run in title_runs
+        if run.find(w("rPr")) is not None
+        and run.find(w("rPr")).find(w("rFonts")) is not None
+        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
+    ]
+    assert len(tajawal_title_runs) == 2, "عنوان and عنوانغ should use the centered Tajawal cover style"
+    for title_run in tajawal_title_runs:
+        rpr = title_run.find(w("rPr"))
+        assert rpr is not None and rpr.find(w("b")) is None, "cover title should not be bold"
+        sz = rpr.find(w("sz"))
+        assert sz is not None and sz.get(f"{{{W_NS}}}val") == "28", "cover title should be 14pt"
+        title_para = title_run
+        while title_para is not None and title_para.tag != w("p"):
+            title_para = title_para.getparent()
+        assert title_para is not None, "cover title paragraph missing"
+        title_ppr = title_para.find(w("pPr"))
+        title_jc = title_ppr.find(w("jc")) if title_ppr is not None else None
+        assert title_jc is not None and title_jc.get(f"{{{W_NS}}}val") == "center", "cover title must be centered"
+        title_para_rpr = title_ppr.find(w("rPr")) if title_ppr is not None else None
+        title_para_fonts = title_para_rpr.find(w("rFonts")) if title_para_rpr is not None else None
+        assert title_para_fonts is not None and title_para_fonts.get(f"{{{W_NS}}}cs") == "Tajawal", "cover paragraph must enforce Tajawal"
+        title_para_sz = title_para_rpr.find(w("sz")) if title_para_rpr is not None else None
+        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "28", "cover paragraph should be 14pt"
+    client_runs = matching_runs("شركة الاختبار")
+    assert any(
+        run.find(w("rPr")) is not None
+        and run.find(w("rPr")).find(w("sz")) is not None
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "40"
+        for run in client_runs
+    ), "cover client should be 20pt"
     assert f"على أساس {valuation_basis} في تاريخ التقييم" in plain_text, "contextual valuation basis was not filled"
     assert any(
         valuation_date in line and line.strip().startswith("تاريخ التقييم")
         for line in plain_text.splitlines()
     ), "contextual valuation date line was not filled"
-    assert f"بتاريخ {inspection_date} م." in plain_text, "inspection date label fallback was not filled"
+    assert f"بتاريخ {inspection_date}" in plain_text, "inspection date label fallback was not filled"
     assert f"{valuation_date} {inspection_date}" not in plain_text, "adjacent date bookmarks should not duplicate dates"
     for ppr in root.iter(w("pPr")):
         tags = [child.tag for child in ppr]
@@ -272,9 +320,9 @@ def main() -> None:
         for node in root.iter(wp("extent"))
     ]
     valuation_width = max(cx for cx, _cy in extents)
-    expected_valuation_width = int(11906 * 635 * VALUATION_IMAGE_PAGE_WIDTH_RATIO)
-    assert valuation_width <= expected_valuation_width + 1, "valuation images should fit within 90% page width"
-    assert valuation_width >= expected_valuation_width - 1, "valuation images should use 90% page width"
+    page_width_twips = 11906
+    expected_valuation_width = int(page_width_twips * 635 * IMAGE_CONTENT_WIDTH_RATIO)
+    assert abs(valuation_width - expected_valuation_width) <= 1, "valuation image should use 95% of physical page width"
     valuation_indents = []
     for para in root.iter(w("p")):
         if any(int(node.get("cx") or "0") == valuation_width for node in para.iter(wp("extent"))):
@@ -283,18 +331,29 @@ def main() -> None:
             if ind is not None:
                 valuation_indents.append(ind)
     assert valuation_indents, "valuation image paragraph should have RTL indentation"
-    assert any(ind.get(f"{{{W_NS}}}right") == "-1770" for ind in valuation_indents), "valuation image should compensate the active section right margin"
-    assert any(ind.get(f"{{{W_NS}}}left") == "-607" for ind in valuation_indents), "valuation image should keep a wider left-side margin without cropping"
+    physical_side_emu = (page_width_twips * 635 - expected_valuation_width) // 2
+    expected_right_indent = str(round((physical_side_emu - 2127 * 635) / 635))
+    expected_left_indent = str(round((physical_side_emu - 1440 * 635) / 635))
+    assert all(ind.get(f"{{{W_NS}}}right") == expected_right_indent for ind in valuation_indents), "valuation image should override the section right margin"
+    assert all(ind.get(f"{{{W_NS}}}left") == expected_left_indent for ind in valuation_indents), "valuation image should override the section left margin"
     titles = [node.text for node in root.iter(w("t")) if node.text == IMAGE_PAGE_TITLE]
-    assert len(titles) == 2, "asset photo annex title should repeat for every asset image page"
+    assert not titles, "asset pages should not insert a duplicate annex title"
     tables = list(root.iter(w("tbl")))
-    assert len(tables) == 2, "expected two asset image table pages only"
+    assert len(tables) == 2, "two images per row should automatically use eight images per page"
+    assert IMAGES_PER_ROW == 4 and IMAGES_PER_PAGE == 20, "Word image layout defaults changed unexpectedly"
+    assert ASSET_IMAGE_GAP_DXA == 45, "asset image gap should be 3px"
     for table in tables:
         spacing = table.find(w("tblPr")).find(w("tblCellSpacing"))
         assert spacing is not None, "asset image table should define cell spacing"
-        assert spacing.get(f"{{{W_NS}}}w") == str(ASSET_IMAGE_GAP_DXA), "asset image gap should be 1px"
+        assert spacing.get(f"{{{W_NS}}}w") == str(ASSET_IMAGE_GAP_DXA), "asset image gap should be 3px"
+        table_width = table.find(w("tblPr")).find(w("tblW"))
+        assert table_width is not None
+        assert abs(int(table_width.get(f"{{{W_NS}}}w") or "0") - round(page_width_twips * IMAGE_CONTENT_WIDTH_RATIO)) <= 2, "asset table should use 95% of physical page width"
+        table_indent = table.find(w("tblPr")).find(w("tblInd"))
+        assert table_indent is not None
+        assert table_indent.get(f"{{{W_NS}}}w") == expected_left_indent, "asset table should be centered against the physical page"
         for row in table.iter(w("tr")):
-            assert len(list(row.iter(w("tc")))) == IMAGES_PER_ROW, "every image row must have three cells"
+            assert len(list(row.iter(w("tc")))) == 2, "custom row setting should produce two cells"
     print("OK: merge smoke test passed")
 
 

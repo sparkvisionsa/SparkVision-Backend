@@ -21,7 +21,26 @@ type MergePayload = {
   textByBookmarkName: Record<string, string>;
   assetImagesBase64: string[];
   valuationImagesBase64: string[];
+  imageLayout: {
+    imagesPerRow: number;
+    imagesPerPage: number;
+  };
 };
+
+function sanitizeImageLayout(value: unknown): MergePayload["imageLayout"] {
+  const input =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const imagesPerRow = Math.trunc(Number(input.imagesPerRow));
+  const safeImagesPerRow = Number.isFinite(imagesPerRow)
+    ? Math.max(1, Math.min(6, imagesPerRow))
+    : 4;
+  return {
+    imagesPerRow: safeImagesPerRow,
+    imagesPerPage: safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4),
+  };
+}
 
 function findPythonBin(): string {
   const venvPaths = [
@@ -83,56 +102,224 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
   };
 }
 
-async function runDocxMergeWorker(payload: MergePayload): Promise<MergeWorkerResult> {
+/**
+ * حجم تقديري لحمولة الدمج بلا استدعاء `JSON.stringify` على الحمولة كاملة — استدعاء واحد
+ * كهذا يبني سلسلة نصية واحدة ضخمة في الذاكرة، ومع مئات صور الأصول (Base64) تتجاوز حد
+ * أقصى طول سلسلة في V8 فيرمي الاستدعاء نفسه استثناء `RangeError: Invalid string length`
+ * قبل أن نتمكن حتى من قياس الطول — وهذا تحديداً ما كان يُفشل كل عمليات دمج/تنزيل Word
+ * لمشاريع بها عدد كبير من الصور.
+ */
+function estimateMergePayloadSize(payload: MergePayload): number {
+  let size = payload.templateBase64.length;
+  for (const img of payload.assetImagesBase64) size += img.length;
+  for (const img of payload.valuationImagesBase64) size += img.length;
+  return size;
+}
+
+function writeAsync(stream: NodeJS.WritableStream, chunk: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const python = findPythonBin();
-    const script = findMergeScriptPath();
-    const json = JSON.stringify(payload);
-    let payloadPath: string | null = null;
-    let args = [script];
-
-    if (json.length > 4_000_000) {
-      payloadPath = path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}.json`);
-      fs.writeFileSync(payloadPath, json, "utf8");
-      args = [script, payloadPath];
+    let settled = false;
+    const ok = stream.write(chunk, "utf8", (err) => {
+      if (err && !settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+    if (ok) {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+      return;
     }
+    stream.once("drain", () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    });
+  });
+}
 
-    const child = spawn(python, args, {
-      cwd: process.cwd(),
-      timeout: 180_000,
-      stdio: ["pipe", "pipe", "pipe"],
+/**
+ * يكتب حمولة الدمج كـ JSON مباشرة إلى `stream` تدريجياً — سلسلة/سلسلة، بدل بناء سلسلة
+ * JSON واحدة ضخمة عبر `JSON.stringify(payload)` (انظر `estimateMergePayloadSize`). كل
+ * استدعاء `JSON.stringify` هنا يُجرى على سلسلة واحدة (اسم حقل أو صورة واحدة) بعيداً كل
+ * البعد عن حد الطول الأقصى، بصرف النظر عن عدد الصور الإجمالي في الحمولة.
+ */
+async function streamMergePayloadJson(payload: MergePayload, stream: NodeJS.WritableStream): Promise<void> {
+  await writeAsync(stream, `{"templateBase64":${JSON.stringify(payload.templateBase64)}`);
+  await writeAsync(stream, `,"textValues":${JSON.stringify(payload.textValues)}`);
+  await writeAsync(stream, `,"textByBookmarkName":${JSON.stringify(payload.textByBookmarkName)}`);
+  await writeAsync(stream, `,"imageLayout":${JSON.stringify(payload.imageLayout)}`);
+
+  await writeAsync(stream, `,"assetImagesBase64":[`);
+  for (let i = 0; i < payload.assetImagesBase64.length; i++) {
+    await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.assetImagesBase64[i])}`);
+  }
+  await writeAsync(stream, `]`);
+
+  await writeAsync(stream, `,"valuationImagesBase64":[`);
+  for (let i = 0; i < payload.valuationImagesBase64.length; i++) {
+    await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.valuationImagesBase64[i])}`);
+  }
+  await writeAsync(stream, `]}`);
+}
+
+function closeWriteStream(stream: fs.WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.end((err: NodeJS.ErrnoException | null | undefined) => (err ? reject(err) : resolve()));
+  });
+}
+
+function spawnMergeOnce(payload: MergePayload): Promise<MergeWorkerResult> {
+  const python = findPythonBin();
+  const script = findMergeScriptPath();
+  const estimatedSize = estimateMergePayloadSize(payload);
+  const payloadPath =
+    estimatedSize > 4_000_000
+      ? path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+      : null;
+
+  const runChild = (args: string[]): Promise<MergeWorkerResult> =>
+    new Promise((resolve, reject) => {
+      const child = spawn(python, args, {
+        cwd: process.cwd(),
+        timeout: 180_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const chunks: Buffer[] = [];
+      const errChunks: Buffer[] = [];
+
+      child.stdout.on("data", (d: Buffer) => chunks.push(d));
+      child.stderr.on("data", (d: Buffer) => errChunks.push(d));
+      child.on("error", (err) => reject(new Error(`Python: ${err.message}`)));
+      child.on("close", (code) => {
+        const stderr = Buffer.concat(errChunks).toString("utf8");
+        if (stderr) console.log("[docx-worker]\n" + stderr);
+        if (code !== 0) {
+          reject(new Error(`docx-worker exited ${code}: ${stderr.slice(0, 500)}`));
+          return;
+        }
+        const buf = Buffer.concat(chunks);
+        if (buf.length < 100) {
+          reject(new Error("docx-worker returned empty output"));
+          return;
+        }
+        resolve({ buffer: buf, stats: parseWorkerStats(stderr) });
+      });
+
+      if (payloadPath) {
+        // الحمولة كاملة موجودة في الملف الممرَّر كوسيط — لا حاجة لبايثون لقراءة stdin.
+        child.stdin.end();
+      } else {
+        streamMergePayloadJson(payload, child.stdin)
+          .then(() => child.stdin.end())
+          .catch((err) => reject(new Error(`payload write failed: ${(err as Error).message}`)));
+      }
     });
 
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
+  if (!payloadPath) return runChild([script]);
 
+  // يجب إنهاء كتابة الملف بالكامل قبل تشغيل بايثون، تماماً كما كان الحال مع الكتابة
+  // المتزامنة السابقة (`fs.writeFileSync`) — الفرق الآن أن الكتابة تدريجية (سلسلة/سلسلة)
+  // فلا تُبنى سلسلة JSON واحدة ضخمة في الذاكرة أولاً.
+  const fileStream = fs.createWriteStream(payloadPath);
+  return streamMergePayloadJson(payload, fileStream)
+    .then(() => closeWriteStream(fileStream))
+    .then(() => runChild([script, payloadPath]))
+    .finally(() => fs.unlink(payloadPath, () => undefined));
+}
+
+/** يُطابق أخطاء بايثون الناتجة عن حزمة مفقودة (مثل ‎lxml‎/‎Pillow‎) لا خطأ في بيانات الدمج نفسها. */
+function isMissingPythonDependencyError(message: string): boolean {
+  return /ModuleNotFoundError|No module named|ImportError/i.test(message);
+}
+
+/**
+ * يُثبِّت متطلبات ‎docx-worker/requirements.txt‎ عبر ‎pip‎ التابع لنفس ثنائي بايثون
+ * المُستخدَم فعلياً في الدمج (‎findPythonBin‎) — بيئة الخادم قد تحتوي بيئة (venv) لم تُنشأ
+ * أو تُثبَّت متطلباتها فيها بعد (أو نُسخة بايثون النظام العامة بلا الحزم المطلوبة).
+ * يُنفَّذ مرة واحدة فقط لكل عملية تشغيل الخادم (نتيجة مُخزَّنة) حتى لا يُعاد تكرار محاولة
+ * فاشلة عند كل طلب دمج.
+ */
+let dependencyInstallPromise: Promise<boolean> | null = null;
+
+function installDocxWorkerDependencies(): Promise<boolean> {
+  if (dependencyInstallPromise) return dependencyInstallPromise;
+  dependencyInstallPromise = new Promise<boolean>((resolve) => {
+    const python = findPythonBin();
+    const workerDir = path.dirname(findMergeScriptPath());
+    const requirementsPath = path.join(workerDir, "requirements.txt");
+    if (!fs.existsSync(requirementsPath)) {
+      resolve(false);
+      return;
+    }
+    const child = spawn(
+      python,
+      ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", requirementsPath],
+      { cwd: workerDir, timeout: 180_000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const chunks: Buffer[] = [];
     child.stdout.on("data", (d: Buffer) => chunks.push(d));
-    child.stderr.on("data", (d: Buffer) => errChunks.push(d));
+    child.stderr.on("data", (d: Buffer) => chunks.push(d));
     child.on("error", (err) => {
-      if (payloadPath) fs.unlink(payloadPath, () => undefined);
-      reject(new Error(`Python: ${err.message}`));
+      console.error(`[docx-worker] pip install failed to start: ${err.message}`);
+      resolve(false);
     });
     child.on("close", (code) => {
-      if (payloadPath) fs.unlink(payloadPath, () => undefined);
-      const stderr = Buffer.concat(errChunks).toString("utf8");
-      if (stderr) console.log("[docx-worker]\n" + stderr);
-      if (code !== 0) {
-        reject(new Error(`docx-worker exited ${code}: ${stderr.slice(0, 500)}`));
-        return;
+      const output = Buffer.concat(chunks).toString("utf8");
+      if (code === 0) {
+        console.log(`[docx-worker] dependencies installed via pip (${python}):\n${output.slice(-2000)}`);
+        resolve(true);
+      } else {
+        console.error(`[docx-worker] pip install exited ${code}:\n${output.slice(-2000)}`);
+        resolve(false);
       }
-      const buf = Buffer.concat(chunks);
-      if (buf.length < 100) {
-        reject(new Error("docx-worker returned empty output"));
-        return;
-      }
-      resolve({ buffer: buf, stats: parseWorkerStats(stderr) });
     });
-
-    if (!payloadPath) {
-      child.stdin.write(json, "utf8");
-    }
-    child.stdin.end();
   });
+  return dependencyInstallPromise;
+}
+
+/**
+ * يشغّل عامل دمج Word، ويُحاول تلقائياً — مرة واحدة فقط — تثبيت متطلبات بايثون الناقصة
+ * (‎lxml‎/‎Pillow‎/…) وإعادة الدمج إن فشلت المحاولة الأولى بسبب حزمة غير مثبَّتة، بدل
+ * فشل كل عمليات تنزيل/تحديث ملفات Word حتى يتدخّل أحد يدوياً على الخادم.
+ */
+async function runDocxMergeWorker(payload: MergePayload): Promise<MergeWorkerResult> {
+  try {
+    return await spawnMergeOnce(payload);
+  } catch (err) {
+    const message = (err as Error).message || "";
+    if (!isMissingPythonDependencyError(message)) throw err;
+    console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
+    const installed = await installDocxWorkerDependencies();
+    if (!installed) throw err;
+    return spawnMergeOnce(payload);
+  }
+}
+
+/** يحدّ عدد تنزيلات صور الأصول المتوازية (GridFS/DigitalOcean) أثناء تجهيز دمج Word. */
+const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 12;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()));
+  return results;
 }
 
 function bufferFromStream(stream: NodeJS.ReadableStream): Promise<Buffer> {
@@ -174,21 +361,20 @@ function resolveCompanyWordTemplatePath(uploadUrl: string): string | null {
 
 function formatDateAr(value?: unknown): string {
   if (value == null) return "";
-  const raw =
+  const raw = typeof value === "string" ? value.trim() : "";
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const date =
     value instanceof Date
-      ? value.toISOString()
-      : typeof value === "string" || typeof value === "number"
-        ? String(value).trim()
-        : "";
-  if (!raw) return "";
-  const dateOnly = raw.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? raw;
-  const date = new Date(`${dateOnly}T12:00:00`);
+      ? value
+      : typeof value === "number"
+        ? new Date(value)
+        : iso
+          ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
+          : new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
-  return new Intl.DateTimeFormat("ar-SA", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(date);
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${day}/${month}/${date.getFullYear()}`;
 }
 
 function coerceFiniteNumber(value: unknown): number | null {
@@ -290,6 +476,10 @@ export class WordTemplateMergeService {
       valuationImagesBase64?: string[];
       textValues?: Record<string, string>;
       textByBookmarkName?: Record<string, string>;
+      imageLayout?: {
+        imagesPerRow?: number;
+        imagesPerPage?: number;
+      };
     },
     res: Response,
   ): Promise<void> {
@@ -313,22 +503,27 @@ export class WordTemplateMergeService {
 
     let assetImagesBase64: string[] = [...(body.assetImagesBase64 ?? [])];
     const valuationImagesBase64: string[] = [...(body.valuationImagesBase64 ?? [])];
+    const assetImageUrlsProvided = Array.isArray(body.assetImageUrls);
 
     if (assetImagesBase64.length === 0 && (body.assetImageUrls?.length ?? 0) > 0) {
-      const loaded = await Promise.all(
-        (body.assetImageUrls ?? []).map((url) => this.fetchImageBuffer(url, ctx)),
+      const loaded = await mapWithConcurrency(
+        body.assetImageUrls ?? [],
+        MV_MERGE_IMAGE_FETCH_CONCURRENCY,
+        (url) => this.fetchImageBuffer(url, ctx),
       );
       for (const buf of loaded) {
         if (buf) assetImagesBase64.push(buf.toString("base64"));
       }
     }
-    const storedAssetImagesBase64 = await this.loadStoredAssetImagesBase64(projectId, ctx);
-    if (storedAssetImagesBase64.length > assetImagesBase64.length) {
-      assetImagesBase64 = storedAssetImagesBase64;
+    // عند إرسال قائمة URLs (حتى لو فارغة) لا نرجع لكل صور المشروع — فقط المحددة للتقرير
+    if (assetImagesBase64.length === 0 && !assetImageUrlsProvided) {
+      assetImagesBase64 = await this.loadStoredAssetImagesBase64(projectId, ctx);
     }
     if (valuationImagesBase64.length === 0 && (body.valuationImageUrls?.length ?? 0) > 0) {
-      const loaded = await Promise.all(
-        (body.valuationImageUrls ?? []).map((url) => this.fetchImageBuffer(url, ctx)),
+      const loaded = await mapWithConcurrency(
+        body.valuationImageUrls ?? [],
+        MV_MERGE_IMAGE_FETCH_CONCURRENCY,
+        (url) => this.fetchImageBuffer(url, ctx),
       );
       for (const buf of loaded) {
         if (buf) valuationImagesBase64.push(buf.toString("base64"));
@@ -348,6 +543,7 @@ export class WordTemplateMergeService {
       textByBookmarkName,
       assetImagesBase64,
       valuationImagesBase64,
+      imageLayout: sanitizeImageLayout(body.imageLayout),
     };
 
     this.logger.log(
@@ -408,29 +604,26 @@ export class WordTemplateMergeService {
   private async loadStoredAssetImagesBase64(projectId: string, ctx: MvAccessContext): Promise<string[]> {
     try {
       const files = await this.mvService.listProjectAssetImageFiles(projectId, ctx);
-      const reportImages = files.filter(
-        (file) => {
-          const mimeType = String(file.mimeType || "").toLowerCase();
-          const extension = String(file.extension || "").toLowerCase();
-          return (
-            !mimeType.startsWith("video/") &&
-            (mimeType.startsWith("image/") || ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension))
-          );
-        },
-      );
-      const loaded = await Promise.all(
-        reportImages.map(async (file) => {
-          try {
-            const fileId = String(file._id || "").trim();
-            if (!fileId) return null;
-            const download = await this.mvService.getProjectFileDownload(projectId, fileId, ctx);
-            const buffer = await bufferFromStream(download.stream);
-            return buffer.byteLength > 0 ? buffer.toString("base64") : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const reportImages = files.filter((file) => {
+        const mimeType = String(file.mimeType || "").toLowerCase();
+        const extension = String(file.extension || "").toLowerCase();
+        const isImage =
+          !mimeType.startsWith("video/") &&
+          (mimeType.startsWith("image/") ||
+            ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension));
+        return isImage && file.includeInReport === true;
+      });
+      const loaded = await mapWithConcurrency(reportImages, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (file) => {
+        try {
+          const fileId = String(file._id || "").trim();
+          if (!fileId) return null;
+          const download = await this.mvService.getProjectFileDownload(projectId, fileId, ctx);
+          const buffer = await bufferFromStream(download.stream);
+          return buffer.byteLength > 0 ? buffer.toString("base64") : null;
+        } catch {
+          return null;
+        }
+      });
       return loaded.filter((item): item is string => Boolean(item));
     } catch (err) {
       this.logger.warn(`Could not load stored asset images for Word merge: ${(err as Error).message}`);

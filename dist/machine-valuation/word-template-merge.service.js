@@ -54,6 +54,19 @@ const machine_valuation_service_1 = require("./machine-valuation.service");
 const collections_1 = require("../server/auth-tracking/collections");
 const service_1 = require("../server/auth-tracking/service");
 const mongodb_2 = require("../server/mongodb");
+function sanitizeImageLayout(value) {
+    const input = value && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : {};
+    const imagesPerRow = Math.trunc(Number(input.imagesPerRow));
+    const safeImagesPerRow = Number.isFinite(imagesPerRow)
+        ? Math.max(1, Math.min(6, imagesPerRow))
+        : 4;
+    return {
+        imagesPerRow: safeImagesPerRow,
+        imagesPerPage: safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4),
+    };
+}
 function findPythonBin() {
     const venvPaths = [
         path.join(process.cwd(), "docx-worker", "venv", "bin", "python"),
@@ -104,18 +117,67 @@ function parseWorkerStats(stderr) {
         bookmarksFound: [],
     };
 }
-async function runDocxMergeWorker(payload) {
+function estimateMergePayloadSize(payload) {
+    let size = payload.templateBase64.length;
+    for (const img of payload.assetImagesBase64)
+        size += img.length;
+    for (const img of payload.valuationImagesBase64)
+        size += img.length;
+    return size;
+}
+function writeAsync(stream, chunk) {
     return new Promise((resolve, reject) => {
-        const python = findPythonBin();
-        const script = findMergeScriptPath();
-        const json = JSON.stringify(payload);
-        let payloadPath = null;
-        let args = [script];
-        if (json.length > 4_000_000) {
-            payloadPath = path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}.json`);
-            fs.writeFileSync(payloadPath, json, "utf8");
-            args = [script, payloadPath];
+        let settled = false;
+        const ok = stream.write(chunk, "utf8", (err) => {
+            if (err && !settled) {
+                settled = true;
+                reject(err);
+            }
+        });
+        if (ok) {
+            if (!settled) {
+                settled = true;
+                resolve();
+            }
+            return;
         }
+        stream.once("drain", () => {
+            if (!settled) {
+                settled = true;
+                resolve();
+            }
+        });
+    });
+}
+async function streamMergePayloadJson(payload, stream) {
+    await writeAsync(stream, `{"templateBase64":${JSON.stringify(payload.templateBase64)}`);
+    await writeAsync(stream, `,"textValues":${JSON.stringify(payload.textValues)}`);
+    await writeAsync(stream, `,"textByBookmarkName":${JSON.stringify(payload.textByBookmarkName)}`);
+    await writeAsync(stream, `,"imageLayout":${JSON.stringify(payload.imageLayout)}`);
+    await writeAsync(stream, `,"assetImagesBase64":[`);
+    for (let i = 0; i < payload.assetImagesBase64.length; i++) {
+        await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.assetImagesBase64[i])}`);
+    }
+    await writeAsync(stream, `]`);
+    await writeAsync(stream, `,"valuationImagesBase64":[`);
+    for (let i = 0; i < payload.valuationImagesBase64.length; i++) {
+        await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.valuationImagesBase64[i])}`);
+    }
+    await writeAsync(stream, `]}`);
+}
+function closeWriteStream(stream) {
+    return new Promise((resolve, reject) => {
+        stream.end((err) => (err ? reject(err) : resolve()));
+    });
+}
+function spawnMergeOnce(payload) {
+    const python = findPythonBin();
+    const script = findMergeScriptPath();
+    const estimatedSize = estimateMergePayloadSize(payload);
+    const payloadPath = estimatedSize > 4_000_000
+        ? path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+        : null;
+    const runChild = (args) => new Promise((resolve, reject) => {
         const child = (0, child_process_1.spawn)(python, args, {
             cwd: process.cwd(),
             timeout: 180_000,
@@ -125,14 +187,8 @@ async function runDocxMergeWorker(payload) {
         const errChunks = [];
         child.stdout.on("data", (d) => chunks.push(d));
         child.stderr.on("data", (d) => errChunks.push(d));
-        child.on("error", (err) => {
-            if (payloadPath)
-                fs.unlink(payloadPath, () => undefined);
-            reject(new Error(`Python: ${err.message}`));
-        });
+        child.on("error", (err) => reject(new Error(`Python: ${err.message}`)));
         child.on("close", (code) => {
-            if (payloadPath)
-                fs.unlink(payloadPath, () => undefined);
             const stderr = Buffer.concat(errChunks).toString("utf8");
             if (stderr)
                 console.log("[docx-worker]\n" + stderr);
@@ -147,11 +203,91 @@ async function runDocxMergeWorker(payload) {
             }
             resolve({ buffer: buf, stats: parseWorkerStats(stderr) });
         });
-        if (!payloadPath) {
-            child.stdin.write(json, "utf8");
+        if (payloadPath) {
+            child.stdin.end();
         }
-        child.stdin.end();
+        else {
+            streamMergePayloadJson(payload, child.stdin)
+                .then(() => child.stdin.end())
+                .catch((err) => reject(new Error(`payload write failed: ${err.message}`)));
+        }
     });
+    if (!payloadPath)
+        return runChild([script]);
+    const fileStream = fs.createWriteStream(payloadPath);
+    return streamMergePayloadJson(payload, fileStream)
+        .then(() => closeWriteStream(fileStream))
+        .then(() => runChild([script, payloadPath]))
+        .finally(() => fs.unlink(payloadPath, () => undefined));
+}
+function isMissingPythonDependencyError(message) {
+    return /ModuleNotFoundError|No module named|ImportError/i.test(message);
+}
+let dependencyInstallPromise = null;
+function installDocxWorkerDependencies() {
+    if (dependencyInstallPromise)
+        return dependencyInstallPromise;
+    dependencyInstallPromise = new Promise((resolve) => {
+        const python = findPythonBin();
+        const workerDir = path.dirname(findMergeScriptPath());
+        const requirementsPath = path.join(workerDir, "requirements.txt");
+        if (!fs.existsSync(requirementsPath)) {
+            resolve(false);
+            return;
+        }
+        const child = (0, child_process_1.spawn)(python, ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", requirementsPath], { cwd: workerDir, timeout: 180_000, stdio: ["ignore", "pipe", "pipe"] });
+        const chunks = [];
+        child.stdout.on("data", (d) => chunks.push(d));
+        child.stderr.on("data", (d) => chunks.push(d));
+        child.on("error", (err) => {
+            console.error(`[docx-worker] pip install failed to start: ${err.message}`);
+            resolve(false);
+        });
+        child.on("close", (code) => {
+            const output = Buffer.concat(chunks).toString("utf8");
+            if (code === 0) {
+                console.log(`[docx-worker] dependencies installed via pip (${python}):\n${output.slice(-2000)}`);
+                resolve(true);
+            }
+            else {
+                console.error(`[docx-worker] pip install exited ${code}:\n${output.slice(-2000)}`);
+                resolve(false);
+            }
+        });
+    });
+    return dependencyInstallPromise;
+}
+async function runDocxMergeWorker(payload) {
+    try {
+        return await spawnMergeOnce(payload);
+    }
+    catch (err) {
+        const message = err.message || "";
+        if (!isMissingPythonDependencyError(message))
+            throw err;
+        console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
+        const installed = await installDocxWorkerDependencies();
+        if (!installed)
+            throw err;
+        return spawnMergeOnce(payload);
+    }
+}
+const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 12;
+async function mapWithConcurrency(items, limit, fn) {
+    if (items.length === 0)
+        return [];
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    async function worker() {
+        for (;;) {
+            const i = nextIndex++;
+            if (i >= items.length)
+                return;
+            results[i] = await fn(items[i]);
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()));
+    return results;
 }
 function bufferFromStream(stream) {
     return new Promise((resolve, reject) => {
@@ -191,22 +327,20 @@ function resolveCompanyWordTemplatePath(uploadUrl) {
 function formatDateAr(value) {
     if (value == null)
         return "";
-    const raw = value instanceof Date
-        ? value.toISOString()
-        : typeof value === "string" || typeof value === "number"
-            ? String(value).trim()
-            : "";
-    if (!raw)
-        return "";
-    const dateOnly = raw.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? raw;
-    const date = new Date(`${dateOnly}T12:00:00`);
+    const raw = typeof value === "string" ? value.trim() : "";
+    const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const date = value instanceof Date
+        ? value
+        : typeof value === "number"
+            ? new Date(value)
+            : iso
+                ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
+                : new Date(raw);
     if (Number.isNaN(date.getTime()))
         return raw;
-    return new Intl.DateTimeFormat("ar-SA", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-    }).format(date);
+    const day = String(date.getDate()).padStart(2, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    return `${day}/${month}/${date.getFullYear()}`;
 }
 function coerceFiniteNumber(value) {
     if (typeof value === "number")
@@ -309,19 +443,19 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
         }
         let assetImagesBase64 = [...(body.assetImagesBase64 ?? [])];
         const valuationImagesBase64 = [...(body.valuationImagesBase64 ?? [])];
+        const assetImageUrlsProvided = Array.isArray(body.assetImageUrls);
         if (assetImagesBase64.length === 0 && (body.assetImageUrls?.length ?? 0) > 0) {
-            const loaded = await Promise.all((body.assetImageUrls ?? []).map((url) => this.fetchImageBuffer(url, ctx)));
+            const loaded = await mapWithConcurrency(body.assetImageUrls ?? [], MV_MERGE_IMAGE_FETCH_CONCURRENCY, (url) => this.fetchImageBuffer(url, ctx));
             for (const buf of loaded) {
                 if (buf)
                     assetImagesBase64.push(buf.toString("base64"));
             }
         }
-        const storedAssetImagesBase64 = await this.loadStoredAssetImagesBase64(projectId, ctx);
-        if (storedAssetImagesBase64.length > assetImagesBase64.length) {
-            assetImagesBase64 = storedAssetImagesBase64;
+        if (assetImagesBase64.length === 0 && !assetImageUrlsProvided) {
+            assetImagesBase64 = await this.loadStoredAssetImagesBase64(projectId, ctx);
         }
         if (valuationImagesBase64.length === 0 && (body.valuationImageUrls?.length ?? 0) > 0) {
-            const loaded = await Promise.all((body.valuationImageUrls ?? []).map((url) => this.fetchImageBuffer(url, ctx)));
+            const loaded = await mapWithConcurrency(body.valuationImageUrls ?? [], MV_MERGE_IMAGE_FETCH_CONCURRENCY, (url) => this.fetchImageBuffer(url, ctx));
             for (const buf of loaded) {
                 if (buf)
                     valuationImagesBase64.push(buf.toString("base64"));
@@ -339,6 +473,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             textByBookmarkName,
             assetImagesBase64,
             valuationImagesBase64,
+            imageLayout: sanitizeImageLayout(body.imageLayout),
         };
         this.logger.log(`Merging Word for ${projectId}: ${assetImagesBase64.length} asset, ${valuationImagesBase64.length} valuation images`);
         let mergeResult;
@@ -390,10 +525,12 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             const reportImages = files.filter((file) => {
                 const mimeType = String(file.mimeType || "").toLowerCase();
                 const extension = String(file.extension || "").toLowerCase();
-                return (!mimeType.startsWith("video/") &&
-                    (mimeType.startsWith("image/") || ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension)));
+                const isImage = !mimeType.startsWith("video/") &&
+                    (mimeType.startsWith("image/") ||
+                        ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension));
+                return isImage && file.includeInReport === true;
             });
-            const loaded = await Promise.all(reportImages.map(async (file) => {
+            const loaded = await mapWithConcurrency(reportImages, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (file) => {
                 try {
                     const fileId = String(file._id || "").trim();
                     if (!fileId)
@@ -405,7 +542,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
                 catch {
                     return null;
                 }
-            }));
+            });
             return loaded.filter((item) => Boolean(item));
         }
         catch (err) {

@@ -1239,8 +1239,59 @@ function coerceNumberishField(v: unknown): number | string | null {
 /**
  * ‎images‎ في ‎DB‎: ‎ObjectId[]‎ (GridFS قديم) أو كائنات وسائط كاملة ‎{ url, publicId, mediaType, … }‎ من التطبيق.
  */
+function assetImageOriginalFilename(rawUrl: string): string | null {
+  try {
+    const path = new URL(rawUrl).pathname;
+    const name = path.split("/").filter(Boolean).at(-1)?.trim().toLowerCase() ?? "";
+    return name || null;
+  } catch {
+    const name = rawUrl.split(/[?#]/, 1)[0]?.split("/").at(-1)?.trim().toLowerCase() ?? "";
+    return name || null;
+  }
+}
+
+function isDigitalOceanAssetImage(raw: unknown): boolean {
+  const url = raw && typeof raw === "object" ? (raw as { url?: unknown }).url : null;
+  return typeof url === "string" && /(^|[/.])digitaloceanspaces\.com(?:[/:]|$)/i.test(url);
+}
+
+/**
+ * أثناء ترحيل الصور من Cloudinary إلى Spaces أُضيفت أحياناً نسخة Spaces إلى
+ * ‎assets.images‎ بدلاً من استبدال نسخة Cloudinary. كلا الرابطين يحملان اسم
+ * الملف الأصلي نفسه، أي أنهما صورة واحدة وليستا صورتين للمستخدم. نقرأ نسخة
+ * DigitalOcean فقط (والأقدم عند وجود نسخ DO متعددة) حتى لا يصل التكرار للواجهة.
+ */
+function dedupePicAssetImageMirrors(raw: unknown): unknown[] {
+  if (!Array.isArray(raw)) return [];
+  const byFilename = new Map<string, number[]>();
+  raw.forEach((item, index) => {
+    const url = item && typeof item === "object" ? (item as { url?: unknown }).url : null;
+    if (typeof url !== "string") return;
+    const filename = assetImageOriginalFilename(url);
+    if (!filename) return;
+    const indexes = byFilename.get(filename);
+    if (indexes) indexes.push(index);
+    else byFilename.set(filename, [index]);
+  });
+
+  const keep = new Set(raw.map((_, index) => index));
+  for (const indexes of byFilename.values()) {
+    if (indexes.length < 2) continue;
+    const preferred =
+      indexes.find((index) => isDigitalOceanAssetImage(raw[index])) ??
+      indexes[0];
+    // لا ندمج ملفات متشابهة الاسم من نفس المصدر؛ الحذف خاص بنسخ الترحيل حيث
+    // توجد نسخة DigitalOcean مؤكدة للصورة.
+    if (!isDigitalOceanAssetImage(raw[preferred])) continue;
+    for (const index of indexes) {
+      if (index !== preferred) keep.delete(index);
+    }
+  }
+  return raw.filter((_, index) => keep.has(index));
+}
+
 function serializePicAssetImages(raw: unknown): Array<
-  | { fileId: string; url?: undefined; publicId?: string; _id?: string; createdAt?: string }
+  | { fileId: string; url?: undefined; publicId?: string; _id?: string; createdAt?: string; includeInReport?: boolean }
   | {
       url: string;
       fileId?: undefined;
@@ -1256,7 +1307,7 @@ function serializePicAssetImages(raw: unknown): Array<
 > {
   if (!Array.isArray(raw)) return [];
   const out: Array<
-    | { fileId: string; url?: undefined; publicId?: string; _id?: string; createdAt?: string }
+    | { fileId: string; url?: undefined; publicId?: string; _id?: string; createdAt?: string; includeInReport?: boolean }
     | {
         url: string;
         fileId?: undefined;
@@ -1270,13 +1321,31 @@ function serializePicAssetImages(raw: unknown): Array<
         includeInReport?: boolean;
       }
   > = [];
-  for (const item of raw) {
+  for (const item of dedupePicAssetImageMirrors(raw)) {
     if (item instanceof ObjectId) {
       out.push({ fileId: item.toString() });
       continue;
     }
     if (typeof item === "string" && ObjectId.isValid(item)) {
       out.push({ fileId: item });
+      continue;
+    }
+    if (item && typeof item === "object" && "fileId" in (item as object) && !("url" in (item as object))) {
+      const fid = (item as { fileId?: unknown }).fileId;
+      const fileId =
+        fid instanceof ObjectId
+          ? fid.toString()
+          : typeof fid === "string" && ObjectId.isValid(fid)
+            ? fid
+            : "";
+      if (!fileId) continue;
+      const row: (typeof out)[number] = { fileId };
+      if (typeof (item as { includeInReport?: unknown }).includeInReport === "boolean") {
+        (row as { includeInReport?: boolean }).includeInReport = (
+          item as { includeInReport: boolean }
+        ).includeInReport;
+      }
+      out.push(row);
       continue;
     }
     if (item && typeof item === "object" && "url" in (item as object)) {
@@ -1429,8 +1498,21 @@ function normalizePicAssetMediaArrayForPatch(
     }
     if (item && typeof item === "object" && "fileId" in (item as object)) {
       const fid = (item as { fileId?: unknown }).fileId;
+      const includeInReport = (item as { includeInReport?: unknown }).includeInReport;
       if (typeof fid === "string" && ObjectId.isValid(fid)) {
-        out.push(new ObjectId(fid));
+        if (field === "images" && typeof includeInReport === "boolean") {
+          out.push({ fileId: new ObjectId(fid), includeInReport });
+        } else {
+          out.push(new ObjectId(fid));
+        }
+        continue;
+      }
+      if (fid instanceof ObjectId) {
+        if (field === "images" && typeof includeInReport === "boolean") {
+          out.push({ fileId: fid, includeInReport });
+        } else {
+          out.push(fid);
+        }
         continue;
       }
     }
@@ -1990,6 +2072,67 @@ function picAssetImageIncludeInReport(raw: unknown): boolean {
   return (raw as { includeInReport?: unknown }).includeInReport === true;
 }
 
+/** يزامن اختيار التقرير من assets.images إلى سجلات GridFS المرتبطة (fileId أو sourceUrl). */
+async function syncGridFsIncludeInReportFromPicImages(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  projectId: ObjectId,
+  picAssetId: ObjectId,
+  images: unknown[],
+): Promise<void> {
+  if (!Array.isArray(images) || images.length === 0) return;
+  const col = db.collection<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>(MV_FILES_FILES_COLLECTION);
+  const now = new Date();
+  const ops: AnyBulkWriteOperation<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>[] = [];
+
+  for (const image of images) {
+    const includeInReport = picAssetImageIncludeInReport(image);
+    const fileId = picAssetImageFileObjectId(image);
+    if (fileId) {
+      ops.push({
+        updateOne: {
+          filter: {
+            _id: fileId,
+            "metadata.projectId": projectId,
+            "metadata.scope": "asset-images",
+          },
+          update: {
+            $set: {
+              "metadata.includeInReport": includeInReport,
+              "metadata.updatedAt": now,
+            },
+          },
+        },
+      });
+      continue;
+    }
+    const external = picAssetExternalImageUrl(image);
+    if (!external) continue;
+    ops.push({
+      updateMany: {
+        filter: {
+          "metadata.projectId": projectId,
+          "metadata.scope": "asset-images",
+          "metadata.picAssetId": picAssetId,
+          "metadata.sourceUrl": external.url,
+        },
+        update: {
+          $set: {
+            "metadata.includeInReport": includeInReport,
+            "metadata.updatedAt": now,
+          },
+        },
+      },
+    });
+  }
+
+  if (ops.length === 0) return;
+  try {
+    await col.bulkWrite(ops, { ordered: false });
+  } catch {
+    /* لا نُفشل حفظ الأصل بسبب فشل مزامنة المرآة */
+  }
+}
+
 function picAssetImageDisplayOrder(raw: unknown, fallback: number): number {
   if (!raw || typeof raw !== "object" || raw instanceof ObjectId) return fallback;
   const displayOrder = (raw as { displayOrder?: unknown }).displayOrder;
@@ -2143,6 +2286,105 @@ function compareAssetImageGridDocs(
   return da - dbt;
 }
 
+/**
+ * مفتاح تفرّد صورة أصل واحدة داخل ‎mv_files.files‎ (نطاق ‎asset-images‎). نسخ المعاينة
+ * المُنشأة من صورة خارجية واحدة (‎uploadExternalPicAssetImageToGridFs‎) تتشارك نفس
+ * ‎metadata.sourceUrl‎ دوماً بصرف النظر عن عدد مرات إعادة توليدها — فهذا المصدر هو الهوية
+ * الحقيقية المستقرة للصورة، لا الترتيب/الفهرس الذي يتغيّر مع كل صورة تُضاف لاحقاً. الصور
+ * المرفوعة مباشرة (بلا ‎sourceUrl‎) تُميَّز بمسارها النسبي داخل مجلدها.
+ */
+/**
+ * روابط التخزين قد تصل موقّعة في طلب، وعامة أو موقّعة بمعاملات مختلفة في طلب آخر.
+ * المعاملات لا تمثل ملفاً جديداً، لذا لا تدخل في هوية الصورة.
+ */
+function stableAssetImageSourceUrl(sourceUrl: string): string {
+  const raw = sourceUrl.trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return `${parsed.origin.toLowerCase()}${parsed.pathname}`.toLowerCase();
+    }
+  } catch {
+    // نحتفظ بالقيمة الخام للروابط غير القياسية بدلاً من منع السرد.
+  }
+  return raw.toLowerCase();
+}
+
+function assetImageFileDedupeKey(doc: { metadata?: MvStoredFileMetadata }): string {
+  const picAssetId = doc.metadata?.picAssetId?.toString?.() ?? "";
+  const sourceUrl =
+    typeof doc.metadata?.sourceUrl === "string" ? stableAssetImageSourceUrl(doc.metadata.sourceUrl) : "";
+  if (sourceUrl) return `${picAssetId}::url::${sourceUrl.toLowerCase()}`;
+  const relativePath = String(doc.metadata?.relativePath || doc.metadata?.originalFileName || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase();
+  return `${picAssetId}::path::${relativePath}`;
+}
+
+/**
+ * يُزيل نسخ الصور المكرَّرة لأصل واحد (نفس الصورة الخارجية أُعيد نسخها لـ GridFS أكثر من
+ * مرة عبر استدعاءات متكررة لعملية «backfill» غير متكافئة سابقاً) — يُحتفَظ بأقدم نسخة
+ * (الأصلية) فقط. يُستخدم قبل كل عدّ/سرد/تنزيل لصور الأصول حتى يتطابق العدد المعروض في
+ * النظام تماماً مع عدد الصور داخل ملف التنزيل، بصرف النظر عن أي تكرار قديم متراكم في
+ * قاعدة البيانات.
+ */
+/**
+ * نفس منطق `assetImageFileDedupeKey` أعلاه لكن كتعبير Mongo aggregation — يُستخدم في
+ * مسار الترقيم (pagination) لصور الأصول حتى يتطابق العدّ/الترتيب مع منطق إزالة التكرار
+ * نفسه دون تحميل كل الوثائق إلى الذاكرة.
+ */
+function assetImageDedupeKeyMongoExpr(): Record<string, unknown> {
+  return {
+    $let: {
+      vars: {
+        picAssetId: { $toString: { $ifNull: ["$metadata.picAssetId", ""] } },
+        // نطابق ‎stableAssetImageSourceUrl‎: نتجاهل معاملات/fragment روابط HTTP(S)
+        // لأنها تتغير في الروابط الموقعة ولا تعني صورة مختلفة.
+        sourceUrl: {
+          $toLower: {
+            $arrayElemAt: [
+              { $split: [{ $arrayElemAt: [{ $split: [{ $ifNull: ["$metadata.sourceUrl", ""] }, "#"] }, 0] }, "?"] },
+              0,
+            ],
+          },
+        },
+        path: {
+          $toLower: { $ifNull: ["$metadata.relativePath", { $ifNull: ["$filename", ""] }] },
+        },
+      },
+      in: {
+        $cond: [
+          { $gt: [{ $strLenCP: "$$sourceUrl" }, 0] },
+          { $concat: ["$$picAssetId", "::url::", "$$sourceUrl"] },
+          { $concat: ["$$picAssetId", "::path::", "$$path"] },
+        ],
+      },
+    },
+  };
+}
+
+function dedupeAssetImageFileDocs<
+  T extends { _id: ObjectId; uploadDate?: Date; metadata?: MvStoredFileMetadata },
+>(docs: T[]): T[] {
+  const byKey = new Map<string, T>();
+  for (const doc of docs) {
+    const key = assetImageFileDedupeKey(doc);
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, doc);
+      continue;
+    }
+    const currentTime = current.uploadDate instanceof Date ? current.uploadDate.getTime() : 0;
+    const nextTime = doc.uploadDate instanceof Date ? doc.uploadDate.getTime() : 0;
+    const keepNext =
+      nextTime < currentTime || (nextTime === currentTime && doc._id.toString() < current._id.toString());
+    if (keepNext) byKey.set(key, doc);
+  }
+  return Array.from(byKey.values());
+}
+
 function mapStoredFileDoc(
   doc: {
     _id: ObjectId;
@@ -2224,12 +2466,19 @@ async function uploadExternalPicAssetImageToGridFs(
     metadata?: MvStoredFileMetadata;
   }>(MV_FILES_FILES_COLLECTION);
 
+  /**
+   * كانت هذه المطابقة تتضمن `metadata.displayOrder` أيضاً — وهو غير مستقر إطلاقاً: يُحتسَب
+   * من فهرس الصورة داخل `assets.images` وقت الاستدعاء (`picAssetImageDisplayOrder`)، ويتغيّر
+   * مع كل صورة إضافية تُضاف لاحقاً لنفس المجلد. أي استدعاء لاحق (كل ضغطة تنزيل تُشغّل
+   * `runAssetImageBackfill` بـ `force: true`) كان يفوّت هذه المطابقة فيُعيد رفع نسخة GridFS
+   * جديدة لنفس الصورة الخارجية — وهذا هو السبب الجذري لتراكم نسخ مكرَّرة من كل صورة بمرور
+   * الوقت. `sourceUrl` وحده (مع `picAssetId`) هوية مستقرة كافية؛ لا حاجة لأي حقل آخر.
+   */
   const existing = await col.findOne({
     "metadata.projectId": projectId,
     "metadata.scope": "asset-images",
     "metadata.picAssetId": ref.picAssetId,
     "metadata.sourceUrl": ref.url,
-    "metadata.displayOrder": ref.displayOrder,
   });
   if (existing) return existing._id;
 
@@ -2272,6 +2521,103 @@ async function uploadExternalPicAssetImageToGridFs(
   });
 }
 
+/** عدد جلبات الصور الخارجية المتوازية أثناء الـ backfill — يقابل بطء صفحة الصور/تنزيل Word. */
+const MV_ASSET_IMAGE_EXTERNAL_FETCH_CONCURRENCY = 12;
+
+/**
+ * يُصالِح نسخ GridFS («asset-images») مع الحالة الحالية لـ ‎assets.images‎ لكل أصل شاركَته
+ * `externalRefs` — يحذف صنفين من التكرار لا يُغطّيهما ‎assetImageFileDedupeKey‎ وقت
+ * العرض/التنزيل لأنهما ليسا مجرد تكرار عرض بل نسخ GridFS حقيقية متراكمة في القاعدة:
+ *
+ * 1. نسخ «يتيمة»: أُنشئت من رابط خارجي (Cloudinary مثلاً) كان صالحاً وقتها، ثم تغيّر رابط
+ *    نفس الصورة في ‎assets.images‎ (نقلها لـ DigitalOcean Spaces) — تبقى النسخة القديمة
+ *    للأبد ما لم تُحذف، فتظهر الصورة مكرَّرة (نسخة قديمة + نسخة جديدة) في كل مكان.
+ * 2. نسخ متسابقة (race): استدعاءان متزامنان لعملية الـ backfill (من نسختين مختلفتين من
+ *    الخادم مثلاً) قد يُنشئان معاً نسخة GridFS لنفس ‎sourceUrl‎ قبل أن يرى أحدهما نسخة
+ *    الآخر — يُحتفَظ بالأقدم فقط.
+ */
+async function reconcileExternalAssetImageGridFsDocs(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  projectId: ObjectId,
+  externalRefs: ExternalPicAssetImageRef[],
+): Promise<void> {
+  const validSourceUrlsByPicAsset = new Map<string, Set<string>>();
+  for (const ref of externalRefs) {
+    const key = ref.picAssetId.toString();
+    let set = validSourceUrlsByPicAsset.get(key);
+    if (!set) {
+      set = new Set();
+      validSourceUrlsByPicAsset.set(key, set);
+    }
+    set.add(ref.url);
+  }
+  const picAssetIds = Array.from(validSourceUrlsByPicAsset.keys()).map((id) => new ObjectId(id));
+  if (picAssetIds.length === 0) return;
+
+  const col = db.collection<{
+    _id: ObjectId;
+    uploadDate?: Date;
+    metadata?: MvStoredFileMetadata;
+  }>(MV_FILES_FILES_COLLECTION);
+  const docs = await col
+    .find({
+      "metadata.projectId": projectId,
+      "metadata.scope": "asset-images",
+      "metadata.picAssetId": { $in: picAssetIds },
+      "metadata.sourceUrl": { $exists: true },
+    })
+    .project<{ _id: ObjectId; uploadDate?: Date; metadata?: MvStoredFileMetadata }>({
+      _id: 1,
+      uploadDate: 1,
+      "metadata.picAssetId": 1,
+      "metadata.sourceUrl": 1,
+    })
+    .toArray();
+  if (docs.length === 0) return;
+
+  const groups = new Map<string, typeof docs>();
+  for (const doc of docs) {
+    const picAssetId = doc.metadata?.picAssetId?.toString?.() ?? "";
+    const sourceUrl = String(doc.metadata?.sourceUrl ?? "");
+    const key = `${picAssetId}::${sourceUrl}`;
+    const group = groups.get(key);
+    if (group) group.push(doc);
+    else groups.set(key, [doc]);
+  }
+
+  const idsToDelete: ObjectId[] = [];
+  for (const [key, group] of groups) {
+    const [picAssetId, sourceUrl] = key.split("::");
+    const isStale = !validSourceUrlsByPicAsset.get(picAssetId!)?.has(sourceUrl!);
+    if (isStale) {
+      idsToDelete.push(...group.map((d) => d._id));
+      continue;
+    }
+    if (group.length > 1) {
+      const sorted = [...group].sort((a, b) => {
+        const ta = a.uploadDate instanceof Date ? a.uploadDate.getTime() : 0;
+        const tb = b.uploadDate instanceof Date ? b.uploadDate.getTime() : 0;
+        if (ta !== tb) return ta - tb;
+        return a._id.toString().localeCompare(b._id.toString());
+      });
+      idsToDelete.push(...sorted.slice(1).map((d) => d._id));
+    }
+  }
+  if (idsToDelete.length === 0) return;
+
+  const bucket = new GridFSBucket(db, { bucketName: MV_FILES_BUCKET });
+  await runWithConcurrency(
+    idsToDelete.map((id) => async () => {
+      try {
+        await bucket.delete(id);
+      } catch {
+        /* حُذفت مسبقاً أو غير موجودة — تجاهل */
+      }
+    }),
+    MV_GRIDFS_PARALLEL_UPLOAD_LIMIT,
+  );
+}
+
 async function backfillPicAssetGridFsImagesAsAssetFiles(
   db: Awaited<ReturnType<typeof getMongoDb>>,
   projectId: ObjectId,
@@ -2292,7 +2638,13 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
 
   const refsByFileId = new Map<
     string,
-    { fileId: ObjectId; picAssetId: ObjectId; folderName: string; imageIndex: number }
+    {
+      fileId: ObjectId;
+      picAssetId: ObjectId;
+      folderName: string;
+      imageIndex: number;
+      includeInReport: boolean;
+    }
   >();
   const externalRefs: ExternalPicAssetImageRef[] = [];
 
@@ -2309,6 +2661,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
           picAssetId: folder._id,
           folderName,
           imageIndex,
+          includeInReport: picAssetImageIncludeInReport(image),
         });
         return;
       }
@@ -2330,13 +2683,22 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
   /**
    * نرفع نسخة ‎GridFS‎ للمعاينة/التقرير فقط — **دون** تعديل ‎assets.images‎.
    * استبدال عنصر ‎{ url, publicId, … }‎ بـ ‎ObjectId‎ كان يفسد هيكل التطبيق الجوال.
+   * الرفع يتم بتوازٍ محدود (لا تسلسلياً) — مع مئات الصور الخارجية كان الانتظار على كل صورة
+   * دورها (fetch شبكي) هو السبب الرئيسي لبطء صفحة الصور وتنزيل ملف Word.
    */
-  for (const ref of externalRefs) {
-    try {
-      await uploadExternalPicAssetImageToGridFs(db, projectId, ref);
-    } catch {
-      /* تجاهل فشل الجلب/الرفع لعنصر واحد */
-    }
+  await runWithConcurrency(
+    externalRefs.map((ref) => async () => {
+      try {
+        await uploadExternalPicAssetImageToGridFs(db, projectId, ref);
+      } catch {
+        /* تجاهل فشل الجلب/الرفع لعنصر واحد */
+      }
+    }),
+    MV_ASSET_IMAGE_EXTERNAL_FETCH_CONCURRENCY,
+  );
+
+  if (externalRefs.length > 0) {
+    await reconcileExternalAssetImageGridFsDocs(db, projectId, externalRefs);
   }
 
   if (refsByFileId.size === 0) return;
@@ -2384,6 +2746,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
       needsPathBackfill ||
       typeof doc.metadata?.originalFileName !== "string" ||
       doc.metadata?.includeInReport === undefined ||
+      doc.metadata?.includeInReport !== ref.includeInReport ||
       needsDisplayOrderBackfill;
     if (!needsMetadataBackfill) continue;
 
@@ -2405,7 +2768,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
       "metadata.relativePath": relativePath,
       "metadata.originalFileName": doc.metadata?.originalFileName || fileName,
       "metadata.updatedAt": now,
-      "metadata.includeInReport": doc.metadata?.includeInReport === true,
+      "metadata.includeInReport": ref.includeInReport === true,
     };
 
     if (needsDisplayOrderBackfill) {
@@ -5877,6 +6240,17 @@ export class MachineValuationService implements OnModuleInit {
       { returnDocument: "after" },
     )) as PicAssetMongoDoc | null;
     if (!nextPic) throw new NotFoundException("photo folder asset not found");
+
+    // مزامنة includeInReport على مرايا GridFS حتى يحترم إعداد التقرير ودمج Word التحديد
+    if (b.images !== undefined) {
+      await syncGridFsIncludeInReportFromPicImages(
+        db,
+        pid,
+        picId,
+        Array.isArray(nextPic.images) ? nextPic.images : [],
+      );
+    }
+
     const subForResponse =
       folderMeta ??
       (await sp.findOne({ _id: sid, projectId: pid })) ??
@@ -6456,10 +6830,17 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("cursor غير صالح.");
       }
       const offset = Number(cursorText);
+      // إزالة نسخ الصور المكرَّرة (نفس الهوية عبر `assetImageDedupeKeyMongoExpr`) قبل الترتيب/الترقيم،
+      // حتى يتطابق العدّ المعروض هنا تماماً مع عدد الصور داخل ملف تنزيل الصور (`getProjectAssetImagesZip`).
+      const dedupeStage = { $set: { __mvDedupeKey: assetImageDedupeKeyMongoExpr() } };
       const [files, total] = await Promise.all([
         collection
           .aggregate<AssetFileRow>([
             { $match: filter },
+            dedupeStage,
+            { $sort: { uploadDate: 1, _id: 1 } },
+            { $group: { _id: "$__mvDedupeKey", doc: { $first: "$$ROOT" } } },
+            { $replaceRoot: { newRoot: "$doc" } },
             {
               $set: {
                 __mvOrderMissing: {
@@ -6483,7 +6864,15 @@ export class MachineValuationService implements OnModuleInit {
             { $limit: limit },
           ], { allowDiskUse: true })
           .toArray(),
-        collection.countDocuments(filter),
+        collection
+          .aggregate<{ total: number }>([
+            { $match: filter },
+            dedupeStage,
+            { $group: { _id: "$__mvDedupeKey" } },
+            { $count: "total" },
+          ], { allowDiskUse: true })
+          .toArray()
+          .then((rows) => rows[0]?.total ?? 0),
       ]);
       const nextOffset = offset + files.length;
       const hasMore = nextOffset < total;
@@ -6495,7 +6884,7 @@ export class MachineValuationService implements OnModuleInit {
       };
     }
 
-    const files = await collection.find(filter).toArray();
+    const files = dedupeAssetImageFileDocs(await collection.find(filter).toArray());
 
     files.sort(compareAssetImageGridDocs);
     return files.map((file) => mapStoredFileDoc(file));
@@ -6557,6 +6946,7 @@ export class MachineValuationService implements OnModuleInit {
         })
         .toArray(),
     ]);
+    const dedupedAssetFiles = dedupeAssetImageFileDocs(assetFiles);
 
     const itemById = new Map(itemFolders.map((item) => [item._id.toString(), item]));
     const picById = new Map(picFolders.map((pic) => [pic._id.toString(), pic]));
@@ -6659,7 +7049,7 @@ export class MachineValuationService implements OnModuleInit {
       if (path && path.length > 0) directoryPaths.add(joinZipPath([rootFolderName, ...path]));
     }
 
-    const imageFiles = assetFiles
+    const imageFiles = dedupedAssetFiles
       .filter((file) =>
         isLikelyImageUpload(
           file.metadata?.originalFileName || file.filename || "file",
@@ -7247,8 +7637,11 @@ export class MachineValuationService implements OnModuleInit {
       },
     );
 
-    if (result.matchedCount !== ids.length) {
-      throw new BadRequestException("بعض الصور غير موجودة أو لا تنتمي لهذا المشروع.");
+    // نحدّث المطابق فقط؛ بعض fileId قد تكون روابط عرض بلا سجل GridFS بعد
+    if (result.matchedCount === 0 && ids.length > 0) {
+      this.logger.warn(
+        `updateProjectAssetImageReportSelection: no GridFS matches for ${ids.length} id(s) in project ${projectId}`,
+      );
     }
 
     return this.listProjectAssetImageFiles(projectId, ctx, "skip-backfill");
