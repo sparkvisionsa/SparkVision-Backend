@@ -154,6 +154,8 @@ export interface CompanyAiReportTemplate {
 export interface CompanyReportWordTemplate {
   fileName?: string;
   fileUrl?: string | null;
+  /** معرف ملف GridFS — يضمن توفر القالب على أي سيرفر حتى لو اختفى مجلد uploads */
+  gridFsFileId?: string | null;
   uploadedAt?: string;
   sizeBytes?: number;
   bookmarkNames?: string[];

@@ -1,4 +1,5 @@
 import type { Db, Filter } from "mongodb";
+import { GridFSBucket, ObjectId } from "mongodb";
 import type { Request } from "express";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -1863,6 +1864,73 @@ async function persistCompanyReportLetterheadImage(
   return `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
 }
 
+const COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET = "company_report_templates";
+
+async function saveCompanyWordTemplateToGridFs(
+  companyId: string,
+  fileName: string,
+  buffer: Buffer,
+): Promise<string> {
+  const db = await getMongoDb();
+  const bucket = new GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
+  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+
+  // احذف النسخ السابقة لنفس الشركة لتجنّب تراكم القوالب
+  try {
+    const old = await db
+      .collection(`${COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET}.files`)
+      .find({ "metadata.companyId": safeCompanyId })
+      .project({ _id: 1 })
+      .toArray();
+    for (const doc of old) {
+      try {
+        await bucket.delete(doc._id as ObjectId);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore cleanup failures */
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const upload = bucket.openUploadStream(fileName || "word-template.docx", {
+      metadata: {
+        companyId: safeCompanyId,
+        scope: "company-word-template",
+        uploadedAt: new Date().toISOString(),
+      },
+      contentType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    upload.on("error", reject);
+    upload.on("finish", () => resolve(String(upload.id)));
+    upload.end(buffer);
+  });
+}
+
+export async function loadCompanyWordTemplateBufferFromGridFs(
+  gridFsFileId: string,
+): Promise<Buffer | null> {
+  const oid = tryParseObjectId(gridFsFileId.trim());
+  if (!oid) return null;
+  const db = await getMongoDb();
+  const bucket = new GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
+  try {
+    const stream = bucket.openDownloadStream(oid);
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      stream.on("error", reject);
+      stream.on("end", () => resolve());
+    });
+    const buffer = Buffer.concat(chunks);
+    return buffer.byteLength > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
 async function persistCompanyReportWordTemplate(
   companyId: string,
   value: unknown,
@@ -1879,6 +1947,10 @@ async function persistCompanyReportWordTemplate(
         .filter(Boolean)
     : [];
   const fileDataUrl = typeof data.fileDataUrl === "string" ? data.fileDataUrl.trim() : "";
+  const existingGridFsId =
+    typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
+      ? data.gridFsFileId.trim()
+      : "";
 
   if (!fileDataUrl) {
     if (!isReportDefaultsWordTemplateUrl(data.fileUrl)) return null;
@@ -1888,6 +1960,7 @@ async function persistCompanyReportWordTemplate(
       uploadedAt,
       sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
       bookmarkNames,
+      ...(existingGridFsId ? { gridFsFileId: existingGridFsId } : {}),
     };
   }
 
@@ -1905,12 +1978,21 @@ async function persistCompanyReportWordTemplate(
   await mkdir(dir, { recursive: true });
   const filename = `word-template-${Date.now()}-${randomId()}.docx`;
   await writeFile(join(dir, filename), buffer);
+
+  let gridFsFileId = existingGridFsId;
+  try {
+    gridFsFileId = await saveCompanyWordTemplateToGridFs(companyId, fileName, buffer);
+  } catch {
+    /* القرص المحلي يبقى متاحًا؛ GridFS اختياري للتسامح مع فشل التخزين السحابي/المحلي */
+  }
+
   return {
     fileName,
     fileUrl: `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`,
     uploadedAt,
     sizeBytes: buffer.byteLength,
     bookmarkNames,
+    ...(gridFsFileId ? { gridFsFileId } : {}),
   };
 }
 
@@ -2034,12 +2116,17 @@ function sanitizeCompanyReportWordTemplate(value: unknown): CompanyReportWordTem
         .map((name) => sanitizeReportDefaultsText(name, 120))
         .filter(Boolean)
     : [];
+  const gridFsFileId =
+    typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
+      ? data.gridFsFileId.trim()
+      : undefined;
   return {
     fileName: sanitizeReportDefaultsText(data.fileName, 240) || "word-template.docx",
     fileUrl,
     uploadedAt: sanitizeReportDefaultsText(data.uploadedAt, 40),
     sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
     bookmarkNames,
+    ...(gridFsFileId ? { gridFsFileId } : {}),
   };
 }
 
@@ -2364,6 +2451,9 @@ const wordTemplateSchema = z
         z.literal(""),
         z.null(),
       ])
+      .optional(),
+    gridFsFileId: z
+      .union([z.string().max(40), z.literal(""), z.null()])
       .optional(),
     fileDataUrl: z
       .union([

@@ -11,6 +11,7 @@ import { getAuthCollections } from "@/server/auth-tracking/collections";
 import {
   PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
   PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
+  loadCompanyWordTemplateBufferFromGridFs,
   resolveCompanyReportDefaults,
 } from "@/server/auth-tracking/service";
 import { getMongoDb } from "@/server/mongodb";
@@ -498,7 +499,9 @@ export class WordTemplateMergeService {
     }
 
     if (!templateBuffer) {
-      throw new BadRequestException("لم يُرفع قالب Word للمشروع أو للشركة.");
+      throw new BadRequestException(
+        "لم يُعثر على ملف قالب Word على السيرفر. أعد رفع قالب Word من إعدادات الشركة (لوحة مدير الشركة) ثم أعد المحاولة.",
+      );
     }
 
     let assetImagesBase64: string[] = [...(body.assetImagesBase64 ?? [])];
@@ -596,9 +599,27 @@ export class WordTemplateMergeService {
       adminPhone: adminUser?.phone,
       adminUsername: adminUser?.username,
     }).wordTemplate;
+
+    // 1) GridFS أولاً (يعمل عبر السيرفرات ولا يعتمد على مجلد uploads المحلي)
+    const gridFsId =
+      typeof wordTemplate?.gridFsFileId === "string" ? wordTemplate.gridFsFileId.trim() : "";
+    if (gridFsId) {
+      const fromGrid = await loadCompanyWordTemplateBufferFromGridFs(gridFsId);
+      if (fromGrid?.byteLength) return fromGrid;
+    }
+
+    // 2) ملف القرص المحلي (مفيد للتطوير وللسيرفر إن وُجد المجلد)
     const filePath = wordTemplate?.fileUrl ? resolveCompanyWordTemplatePath(wordTemplate.fileUrl) : null;
-    if (!filePath || !fs.existsSync(filePath)) return null;
-    return fs.promises.readFile(filePath);
+    if (filePath && fs.existsSync(filePath)) {
+      return fs.promises.readFile(filePath);
+    }
+
+    if (wordTemplate?.fileUrl) {
+      this.logger.warn(
+        `Company Word template metadata exists (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}) but file is missing on disk/GridFS for company ${String(companyId)}`,
+      );
+    }
+    return null;
   }
 
   private async loadStoredAssetImagesBase64(projectId: string, ctx: MvAccessContext): Promise<string[]> {
