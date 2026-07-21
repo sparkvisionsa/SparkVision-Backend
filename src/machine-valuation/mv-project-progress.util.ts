@@ -13,7 +13,7 @@ const SIMPLE_REPORT_DATA_REQUIRED_FIELDS = [
   "clientName",
 ] as const satisfies readonly (keyof MvProjectReportData)[];
 
-const SIMPLE_REPORT_STEP_COUNT = 4;
+const SIMPLE_REPORT_STEP_COUNT = 5;
 
 function isReportFieldFilled(value: unknown): boolean {
   if (value == null) return false;
@@ -37,6 +37,7 @@ export type MvProjectProgressInput = {
   reportData?: MvProjectReportData | null;
   assetImageCount?: number;
   valuationAccountImageCount?: number;
+  clientDocumentImageCount?: number;
 };
 
 export function computeMvProjectProgressPct(input: MvProjectProgressInput): number {
@@ -45,6 +46,7 @@ export function computeMvProjectProgressPct(input: MvProjectProgressInput): numb
   if (isSimpleReportDataStepComplete(input.reportData)) completed += 1;
   if ((input.assetImageCount ?? 0) > 0) completed += 1;
   if ((input.valuationAccountImageCount ?? 0) > 0) completed += 1;
+  if ((input.clientDocumentImageCount ?? 0) > 0) completed += 1;
   if (isReportPreviewStepComplete(input.reportData)) completed += 1;
 
   return Math.round((completed / SIMPLE_REPORT_STEP_COUNT) * 100);
@@ -55,4 +57,8 @@ export function countValuationAccountImages(workspace: unknown): number {
   const images = (workspace as { images?: unknown }).images;
   if (!Array.isArray(images)) return 0;
   return images.length;
+}
+
+export function countClientDocumentImages(workspace: unknown): number {
+  return countValuationAccountImages(workspace);
 }

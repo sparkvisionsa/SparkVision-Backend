@@ -862,6 +862,69 @@ function sanitizeValuationAccountingWorkspaceForClient(raw: unknown | undefined 
   }
 }
 
+function sanitizeClientDocumentsWorkspaceForPersist(raw: unknown): Record<string, unknown> {
+  if (raw == null) {
+    throw new BadRequestException("clientDocumentsWorkspace is required when provided");
+  }
+  let obj: Record<string, unknown>;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      throw new BadRequestException("clientDocumentsWorkspace must be valid JSON");
+    }
+  } else if (typeof raw === "object") {
+    obj = cloneValuationAccountingWorkspaceObject(raw as Record<string, unknown>);
+  } else {
+    throw new BadRequestException("clientDocumentsWorkspace must be an object");
+  }
+  if (!obj || typeof obj !== "object") {
+    throw new BadRequestException("clientDocumentsWorkspace invalid");
+  }
+  if (obj.version !== 1) {
+    throw new BadRequestException("clientDocumentsWorkspace version must be 1");
+  }
+  const sources = obj.sources;
+  if (sources != null && !Array.isArray(sources)) {
+    throw new BadRequestException("clientDocumentsWorkspace.sources invalid");
+  }
+  if (Array.isArray(sources)) {
+    for (const s of sources) {
+      if (s && typeof s === "object") {
+        const row = s as Record<string, unknown>;
+        const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
+        if (fid) delete row.dataUrl;
+      }
+    }
+  }
+  const images = obj.images;
+  if (images != null && !Array.isArray(images)) {
+    throw new BadRequestException("clientDocumentsWorkspace.images invalid");
+  }
+  if (Array.isArray(images)) {
+    for (const im of images) {
+      if (im && typeof im === "object") {
+        const row = im as Record<string, unknown>;
+        const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
+        if (fid) delete row.dataUrl;
+      }
+    }
+  }
+  obj.version = 1;
+  if (typeof obj.includeInReport !== "boolean") {
+    obj.includeInReport = true;
+  }
+  const serialized = JSON.stringify(obj);
+  if (serialized.length > MV_VALUATION_WORKSPACE_MAX_JSON_CHARS) {
+    throw new BadRequestException("clientDocumentsWorkspace exceeds maximum allowed size");
+  }
+  return obj;
+}
+
+function sanitizeClientDocumentsWorkspaceForClient(raw: unknown | undefined | null): unknown {
+  return sanitizeValuationAccountingWorkspaceForClient(raw);
+}
+
 function sanitizeValuationReadyExcelWorkspaceForPersist(raw: unknown): Record<string, unknown> {
   if (raw == null) {
     throw new BadRequestException("valuationReadyExcelWorkspace is required when provided");
@@ -4318,7 +4381,8 @@ export class MachineValuationService implements OnModuleInit {
     const matchInProjects = { $match: { projectId: { $in: projectIds } } } as const;
     const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } } as const;
 
-    const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg] = await Promise.all([
+    const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg, clientDocumentImageAgg] =
+      await Promise.all([
       db
         .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
         .aggregate<{ _id: ObjectId | null; count: number }>([matchInProjects, groupByProject])
@@ -4395,6 +4459,25 @@ export class MachineValuationService implements OnModuleInit {
           );
           return [] as { _id: ObjectId; valuationAccountImageCount: number }[];
         }),
+      col
+        .aggregate<{ _id: ObjectId; clientDocumentImageCount: number }>([
+          { $match: { _id: { $in: projectIds } } },
+          {
+            $project: {
+              _id: 1,
+              clientDocumentImageCount: {
+                $size: { $ifNull: ["$clientDocumentsWorkspace.images", []] },
+              },
+            },
+          },
+        ])
+        .toArray()
+        .catch((err) => {
+          this.logger.warn(
+            `listProjects: client document image aggregate failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return [] as { _id: ObjectId; clientDocumentImageCount: number }[];
+        }),
     ]);
 
     const countMap = new Map(
@@ -4432,6 +4515,17 @@ export class MachineValuationService implements OnModuleInit {
         .map(
           (row) =>
             [row._id.toString(), toSafeNonNegativeInt(row.valuationAccountImageCount)] as [
+              string,
+              number,
+            ],
+        ),
+    );
+    const clientDocumentImageMap = new Map(
+      clientDocumentImageAgg
+        .filter((row) => row._id != null)
+        .map(
+          (row) =>
+            [row._id.toString(), toSafeNonNegativeInt(row.clientDocumentImageCount)] as [
               string,
               number,
             ],
@@ -4475,6 +4569,7 @@ export class MachineValuationService implements OnModuleInit {
         const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
         const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
         const valuationAccountImageCount = toSafeNonNegativeInt(valuationImageMap.get(idStr));
+        const clientDocumentImageCount = toSafeNonNegativeInt(clientDocumentImageMap.get(idStr));
 
         return {
           _id: idStr,
@@ -4497,10 +4592,12 @@ export class MachineValuationService implements OnModuleInit {
           assetImageCount,
           picAssetCount,
           valuationAccountImageCount,
+          clientDocumentImageCount,
           progressPct: computeMvProjectProgressPct({
             reportData: reportDataSummary,
             assetImageCount,
             valuationAccountImageCount,
+            clientDocumentImageCount,
           }),
           workflowStatus: projectWorkflowStatus(p),
           reportType: projectReportType(p),
@@ -4668,6 +4765,7 @@ export class MachineValuationService implements OnModuleInit {
       inspectionAssignments?: unknown;
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
+      clientDocumentsWorkspace?: unknown | null;
     } | null,
   ) {
     const db = await getMongoDb();
@@ -4754,6 +4852,16 @@ export class MachineValuationService implements OnModuleInit {
       }
     }
 
+    if (b.clientDocumentsWorkspace !== undefined) {
+      if (b.clientDocumentsWorkspace === null) {
+        $set.clientDocumentsWorkspace = null;
+      } else {
+        $set.clientDocumentsWorkspace = sanitizeClientDocumentsWorkspaceForPersist(
+          b.clientDocumentsWorkspace,
+        );
+      }
+    }
+
     if (Object.keys($set).length === 1) {
       throw new BadRequestException("No project fields to update");
     }
@@ -4800,6 +4908,9 @@ export class MachineValuationService implements OnModuleInit {
         ),
         valuationReadyExcelWorkspace: sanitizeValuationReadyExcelWorkspaceForClient(
           updated.valuationReadyExcelWorkspace,
+        ),
+        clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(
+          updated.clientDocumentsWorkspace,
         ),
       },
       updatedAt: now.toISOString(),
@@ -4979,6 +5090,9 @@ export class MachineValuationService implements OnModuleInit {
         ),
         valuationReadyExcelWorkspace: sanitizeValuationReadyExcelWorkspaceForClient(
           project.valuationReadyExcelWorkspace,
+        ),
+        clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(
+          project.clientDocumentsWorkspace,
         ),
       },
       subProjects: merged,

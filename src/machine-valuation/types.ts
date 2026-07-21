@@ -272,6 +272,8 @@ export interface MvProjectDoc {
    * حالة مسار «إكسيل جاهز»: نتيجة الاستيراد + صور مقتطعة من الجدول (مرجع ملفات) + شريحة التقرير.
    */
   valuationReadyExcelWorkspace?: unknown;
+  /** مستندات العميل (PDF/صور) لخطوة «ملفات العميل» ومرفق 3 / إشارة مستنداتعميل. */
+  clientDocumentsWorkspace?: unknown;
 }
 
 export type MvProjectMongoDoc = WithId<MvProjectDoc>;

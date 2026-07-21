@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.computeMvProjectProgressPct = computeMvProjectProgressPct;
 exports.countValuationAccountImages = countValuationAccountImages;
+exports.countClientDocumentImages = countClientDocumentImages;
 const SIMPLE_REPORT_DATA_REQUIRED_FIELDS = [
     "valuationMethod",
     "valuationPurpose",
@@ -14,7 +15,7 @@ const SIMPLE_REPORT_DATA_REQUIRED_FIELDS = [
     "inspectionLocation",
     "clientName",
 ];
-const SIMPLE_REPORT_STEP_COUNT = 4;
+const SIMPLE_REPORT_STEP_COUNT = 5;
 function isReportFieldFilled(value) {
     if (value == null)
         return false;
@@ -44,6 +45,8 @@ function computeMvProjectProgressPct(input) {
         completed += 1;
     if ((input.valuationAccountImageCount ?? 0) > 0)
         completed += 1;
+    if ((input.clientDocumentImageCount ?? 0) > 0)
+        completed += 1;
     if (isReportPreviewStepComplete(input.reportData))
         completed += 1;
     return Math.round((completed / SIMPLE_REPORT_STEP_COUNT) * 100);
@@ -55,4 +58,7 @@ function countValuationAccountImages(workspace) {
     if (!Array.isArray(images))
         return 0;
     return images.length;
+}
+function countClientDocumentImages(workspace) {
+    return countValuationAccountImages(workspace);
 }

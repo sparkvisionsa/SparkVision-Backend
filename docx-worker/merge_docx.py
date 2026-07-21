@@ -63,7 +63,19 @@ TEXT_BOOKMARKS: dict[str, list[str]] = {
 IMAGE_BOOKMARKS: dict[str, dict[str, Any]] = {
     "صوراصول": {"field": "asset", "layout": "paged_grid3", "remove_placeholder": True},
     "صورحسابات": {"field": "valuation", "layout": "paged_grid3", "remove_placeholder": True},
+    "مستنداتعميل": {
+        "field": "client",
+        "layout": "client_grid",
+        "remove_placeholder": True,
+        "images_per_row": 2,
+        "images_per_page": 4,
+    },
 }
+CLIENT_DOCS_IMAGES_PER_ROW = 2
+CLIENT_DOCS_IMAGES_PER_PAGE = 4
+# مرفق مستندات العميل: الشبكة تملأ ~95% من ارتفاع المحتوى بعد العنوان، مع ~10px هامش سفلي.
+CLIENT_DOCS_CONTENT_HEIGHT_RATIO = 0.95
+CLIENT_DOCS_BOTTOM_MARGIN_PX = 10
 
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
@@ -74,6 +86,7 @@ IMAGE_ROWS_PER_PAGE = math.ceil(IMAGES_PER_PAGE / IMAGES_PER_ROW)
 EMU_PER_INCH = 914400
 PIXEL_DXA = 15
 PIXEL_EMU = int(EMU_PER_INCH / 96)
+CLIENT_DOCS_BOTTOM_MARGIN_EMU = PIXEL_EMU * CLIENT_DOCS_BOTTOM_MARGIN_PX
 IMAGE_HORIZONTAL_MARGIN_PX = 3
 IMAGE_HORIZONTAL_MARGIN_DXA = PIXEL_DXA * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
@@ -1585,8 +1598,18 @@ def document_cell_dimensions_emu(
     images_per_row: int,
     image_rows_per_page: int,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
+    *,
+    fill_content_height: bool = False,
+    content_height_ratio: float = 1.0,
+    bottom_margin_emu: int = 0,
 ) -> tuple[int, int]:
     _content_width, content_height = document_content_box_emu(doc)
+    if fill_content_height:
+        usable_height = max(
+            1,
+            int(content_height * content_height_ratio) - max(0, int(bottom_margin_emu)),
+        )
+        content_height = usable_height
     if section_metrics is None:
         page_width, _page_height = document_physical_page_box_emu(doc)
     else:
@@ -1594,6 +1617,9 @@ def document_cell_dimensions_emu(
     available_width = max(1, int(page_width * IMAGE_CONTENT_WIDTH_RATIO))
     width_fit = max(1, (available_width - (images_per_row - 1) * ASSET_IMAGE_GAP_EMU) // images_per_row)
     height_fit = max(1, (content_height - (image_rows_per_page - 1) * ASSET_IMAGE_GAP_EMU) // image_rows_per_page)
+    if fill_content_height:
+        # مستندات العميل: املأ الارتفاع المتاح دون إجبار الخلية على مربع.
+        return width_fit, height_fit
     return width_fit, max(1, min(width_fit, height_fit))
 
 
@@ -1617,6 +1643,11 @@ def make_docx_image_table_element(
     images_per_row: int,
     image_rows_per_page: int,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
+    *,
+    fill_content_height: bool = False,
+    content_height_ratio: float = 1.0,
+    bottom_margin_emu: int = 0,
+    contain_images: bool = False,
 ) -> tuple[Any, int]:
     from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1628,6 +1659,9 @@ def make_docx_image_table_element(
         images_per_row,
         image_rows_per_page,
         section_metrics,
+        fill_content_height=fill_content_height,
+        content_height_ratio=content_height_ratio,
+        bottom_margin_emu=bottom_margin_emu,
     )
     cell_width_dxa = max(1, int(cell_width_emu / EMU_PER_INCH * 1440))
 
@@ -1672,23 +1706,37 @@ def make_docx_image_table_element(
             if img_index >= len(images):
                 continue
             try:
-                img_buf = io.BytesIO(
-                    crop_to_fill_jpeg_bytes(
+                if contain_images:
+                    fit_w, fit_h = scaled_image_size_for_width(
                         images[img_index],
                         cell_width_emu,
                         image_emu,
                     )
-                )
-                para.add_run().add_picture(
-                    img_buf,
-                    width=Emu(cell_width_emu),
-                    height=Emu(image_emu),
-                )
+                    img_buf = io.BytesIO(images[img_index])
+                    para.add_run().add_picture(
+                        img_buf,
+                        width=Emu(fit_w),
+                        height=Emu(fit_h),
+                    )
+                else:
+                    img_buf = io.BytesIO(
+                        crop_to_fill_jpeg_bytes(
+                            images[img_index],
+                            cell_width_emu,
+                            image_emu,
+                        )
+                    )
+                    para.add_run().add_picture(
+                        img_buf,
+                        width=Emu(cell_width_emu),
+                        height=Emu(image_emu),
+                    )
                 inserted += 1
             except Exception as exc:
-                log(f"Skipped image {img_index + 1}: {exc}")
+                log(f"image insert skipped: {exc}")
             img_index += 1
 
+    # python-docx leaves the table attached to the document body; detach for bookmark splice.
     return detach_docx_body_element(table._tbl), inserted
 
 
@@ -1772,6 +1820,7 @@ def replace_image_bookmark_with_docx_elements(
             inserted += count
     else:
         image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
+        fill_client = layout == "client_grid"
         for page_idx in range(0, len(images), images_per_page):
             if page_idx > 0:
                 elements.append(make_docx_page_break_element(doc))
@@ -1781,6 +1830,10 @@ def replace_image_bookmark_with_docx_elements(
                 images_per_row,
                 image_rows_per_page,
                 section_metrics,
+                fill_content_height=fill_client,
+                content_height_ratio=CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0,
+                bottom_margin_emu=CLIENT_DOCS_BOTTOM_MARGIN_EMU if fill_client else 0,
+                contain_images=fill_client,
             )
             elements.append(table_elem)
             inserted += count
@@ -1794,13 +1847,14 @@ def apply_image_bookmarks_docx_api(
     docx_bytes: bytes,
     asset_images: list[bytes],
     valuation_images: list[bytes],
+    client_images: list[bytes] | None = None,
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
 ) -> tuple[bytes, dict[str, int]]:
     from docx import Document
 
     doc = Document(io.BytesIO(docx_bytes))
-    stats = {"asset": 0, "valuation": 0}
+    stats = {"asset": 0, "valuation": 0, "client": 0}
     stats["asset"] = replace_image_bookmark_with_docx_elements(
         doc,
         "صوراصول",
@@ -1816,6 +1870,15 @@ def apply_image_bookmarks_docx_api(
         valuation_images,
         True,
         "valuation_pages",
+    )
+    stats["client"] = replace_image_bookmark_with_docx_elements(
+        doc,
+        "مستنداتعميل",
+        client_images or [],
+        True,
+        "client_grid",
+        CLIENT_DOCS_IMAGES_PER_ROW,
+        CLIENT_DOCS_IMAGES_PER_PAGE,
     )
     out = io.BytesIO()
     doc.save(out)
@@ -1834,6 +1897,7 @@ def merge_package(payload: dict[str, Any]) -> bytes:
     name_to_text = build_name_to_text(text_values, payload.get("textByBookmarkName") or {})
     asset_images = [base64.b64decode(x) for x in (payload.get("assetImagesBase64") or [])]
     valuation_images = [base64.b64decode(x) for x in (payload.get("valuationImagesBase64") or [])]
+    client_images = [base64.b64decode(x) for x in (payload.get("clientImagesBase64") or [])]
     image_layout = payload.get("imageLayout") if isinstance(payload.get("imageLayout"), dict) else {}
     try:
         images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
@@ -1845,7 +1909,7 @@ def merge_package(payload: dict[str, Any]) -> bytes:
     modified: dict[str, bytes] = {}
     total_text = 0
     all_bookmarks: list[str] = []
-    img_stats = {"asset": 0, "valuation": 0}
+    img_stats = {"asset": 0, "valuation": 0, "client": 0}
 
     with zipfile.ZipFile(in_buf, "r") as zin:
         names = zin.namelist()
@@ -1863,11 +1927,12 @@ def merge_package(payload: dict[str, Any]) -> bytes:
 
         result = write_docx_zip(zin, modified)
 
-    if asset_images or valuation_images:
+    if asset_images or valuation_images or client_images:
         result, img_stats = apply_image_bookmarks_docx_api(
             result,
             asset_images,
             valuation_images,
+            client_images,
             images_per_row,
             images_per_page,
         )
@@ -1880,6 +1945,7 @@ def merge_package(payload: dict[str, Any]) -> bytes:
                 "textFilled": total_text,
                 "assetImagesInserted": img_stats.get("asset", 0),
                 "valuationImagesInserted": img_stats.get("valuation", 0),
+                "clientImagesInserted": img_stats.get("client", 0),
                 "bookmarksFound": all_bookmarks,
             },
             ensure_ascii=False,

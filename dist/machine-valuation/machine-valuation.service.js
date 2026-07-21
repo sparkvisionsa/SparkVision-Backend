@@ -765,6 +765,72 @@ function sanitizeValuationAccountingWorkspaceForClient(raw) {
         return undefined;
     }
 }
+function sanitizeClientDocumentsWorkspaceForPersist(raw) {
+    if (raw == null) {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace is required when provided");
+    }
+    let obj;
+    if (typeof raw === "string") {
+        try {
+            obj = JSON.parse(raw);
+        }
+        catch {
+            throw new common_1.BadRequestException("clientDocumentsWorkspace must be valid JSON");
+        }
+    }
+    else if (typeof raw === "object") {
+        obj = cloneValuationAccountingWorkspaceObject(raw);
+    }
+    else {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace must be an object");
+    }
+    if (!obj || typeof obj !== "object") {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace invalid");
+    }
+    if (obj.version !== 1) {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace version must be 1");
+    }
+    const sources = obj.sources;
+    if (sources != null && !Array.isArray(sources)) {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace.sources invalid");
+    }
+    if (Array.isArray(sources)) {
+        for (const s of sources) {
+            if (s && typeof s === "object") {
+                const row = s;
+                const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
+                if (fid)
+                    delete row.dataUrl;
+            }
+        }
+    }
+    const images = obj.images;
+    if (images != null && !Array.isArray(images)) {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace.images invalid");
+    }
+    if (Array.isArray(images)) {
+        for (const im of images) {
+            if (im && typeof im === "object") {
+                const row = im;
+                const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
+                if (fid)
+                    delete row.dataUrl;
+            }
+        }
+    }
+    obj.version = 1;
+    if (typeof obj.includeInReport !== "boolean") {
+        obj.includeInReport = true;
+    }
+    const serialized = JSON.stringify(obj);
+    if (serialized.length > MV_VALUATION_WORKSPACE_MAX_JSON_CHARS) {
+        throw new common_1.BadRequestException("clientDocumentsWorkspace exceeds maximum allowed size");
+    }
+    return obj;
+}
+function sanitizeClientDocumentsWorkspaceForClient(raw) {
+    return sanitizeValuationAccountingWorkspaceForClient(raw);
+}
 function sanitizeValuationReadyExcelWorkspaceForPersist(raw) {
     if (raw == null) {
         throw new common_1.BadRequestException("valuationReadyExcelWorkspace is required when provided");
@@ -3539,7 +3605,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const projectIds = projects.map((p) => p._id);
         const matchInProjects = { $match: { projectId: { $in: projectIds } } };
         const groupByProject = { $group: { _id: "$projectId", count: { $sum: 1 } } };
-        const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg] = await Promise.all([
+        const [counts, itemCounts, sheetAgg, picAssetAgg, valuationImageAgg, clientDocumentImageAgg] = await Promise.all([
             db
                 .collection(collections_2.MV_SUBPROJECTS_COLLECTION)
                 .aggregate([matchInProjects, groupByProject])
@@ -3606,6 +3672,23 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 this.logger.warn(`listProjects: valuation image aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
                 return [];
             }),
+            col
+                .aggregate([
+                { $match: { _id: { $in: projectIds } } },
+                {
+                    $project: {
+                        _id: 1,
+                        clientDocumentImageCount: {
+                            $size: { $ifNull: ["$clientDocumentsWorkspace.images", []] },
+                        },
+                    },
+                },
+            ])
+                .toArray()
+                .catch((err) => {
+                this.logger.warn(`listProjects: client document image aggregate failed: ${err instanceof Error ? err.message : String(err)}`);
+                return [];
+            }),
         ]);
         const countMap = new Map(counts
             .filter((c) => c._id != null)
@@ -3628,6 +3711,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const valuationImageMap = new Map(valuationImageAgg
             .filter((row) => row._id != null)
             .map((row) => [row._id.toString(), toSafeNonNegativeInt(row.valuationAccountImageCount)]));
+        const clientDocumentImageMap = new Map(clientDocumentImageAgg
+            .filter((row) => row._id != null)
+            .map((row) => [row._id.toString(), toSafeNonNegativeInt(row.clientDocumentImageCount)]));
         const creatorIds = Array.from(new Set(projects
             .map((project) => (0, object_id_util_1.tryCoerceToObjectId)(project.userId))
             .filter((value) => value != null)));
@@ -3659,6 +3745,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             const assetImageCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.imageCount);
             const picAssetCount = toSafeNonNegativeInt(picAssetMap.get(idStr)?.picAssetCount);
             const valuationAccountImageCount = toSafeNonNegativeInt(valuationImageMap.get(idStr));
+            const clientDocumentImageCount = toSafeNonNegativeInt(clientDocumentImageMap.get(idStr));
             return {
                 _id: idStr,
                 name: String(p.name ?? ""),
@@ -3680,10 +3767,12 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 assetImageCount,
                 picAssetCount,
                 valuationAccountImageCount,
+                clientDocumentImageCount,
                 progressPct: (0, mv_project_progress_util_1.computeMvProjectProgressPct)({
                     reportData: reportDataSummary,
                     assetImageCount,
                     valuationAccountImageCount,
+                    clientDocumentImageCount,
                 }),
                 workflowStatus: projectWorkflowStatus(p),
                 reportType: projectReportType(p),
@@ -3871,6 +3960,14 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 $set.valuationReadyExcelWorkspace = sanitizeValuationReadyExcelWorkspaceForPersist(b.valuationReadyExcelWorkspace);
             }
         }
+        if (b.clientDocumentsWorkspace !== undefined) {
+            if (b.clientDocumentsWorkspace === null) {
+                $set.clientDocumentsWorkspace = null;
+            }
+            else {
+                $set.clientDocumentsWorkspace = sanitizeClientDocumentsWorkspaceForPersist(b.clientDocumentsWorkspace);
+            }
+        }
         if (Object.keys($set).length === 1) {
             throw new common_1.BadRequestException("No project fields to update");
         }
@@ -3903,6 +4000,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 inspectorFiles: (0, inspector_files_util_1.normalizeInspectorFilesArray)(updated.inspectorFiles).map(inspector_files_util_1.serializeInspectorFileForClient),
                 valuationAccountingWorkspace: sanitizeValuationAccountingWorkspaceForClient(updated.valuationAccountingWorkspace),
                 valuationReadyExcelWorkspace: sanitizeValuationReadyExcelWorkspaceForClient(updated.valuationReadyExcelWorkspace),
+                clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(updated.clientDocumentsWorkspace),
             },
             updatedAt: now.toISOString(),
         };
@@ -4034,6 +4132,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 inspectorFiles: (0, inspector_files_util_1.normalizeInspectorFilesArray)(project.inspectorFiles).map(inspector_files_util_1.serializeInspectorFileForClient),
                 valuationAccountingWorkspace: sanitizeValuationAccountingWorkspaceForClient(project.valuationAccountingWorkspace),
                 valuationReadyExcelWorkspace: sanitizeValuationReadyExcelWorkspaceForClient(project.valuationReadyExcelWorkspace),
+                clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(project.clientDocumentsWorkspace),
             },
             subProjects: merged,
         };

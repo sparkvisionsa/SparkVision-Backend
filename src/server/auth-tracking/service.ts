@@ -1769,6 +1769,7 @@ export const PRO_OPTION_BUNDLED_WORD_TEMPLATE: CompanyReportWordTemplate = {
     "قيمةاحرف",
     "صورحسابات",
     "صوراصول",
+    "مستنداتعميل",
   ],
 };
 const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [

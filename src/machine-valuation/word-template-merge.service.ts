@@ -22,6 +22,7 @@ type MergePayload = {
   textByBookmarkName: Record<string, string>;
   assetImagesBase64: string[];
   valuationImagesBase64: string[];
+  clientImagesBase64: string[];
   imageLayout: {
     imagesPerRow: number;
     imagesPerPage: number;
@@ -74,6 +75,7 @@ type MergeWorkerResult = {
     textFilled: number;
     assetImagesInserted: number;
     valuationImagesInserted: number;
+    clientImagesInserted: number;
     bookmarksFound: string[];
   };
 };
@@ -89,6 +91,7 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
         textFilled: Number(parsed.textFilled ?? 0),
         assetImagesInserted: Number(parsed.assetImagesInserted ?? 0),
         valuationImagesInserted: Number(parsed.valuationImagesInserted ?? 0),
+        clientImagesInserted: Number(parsed.clientImagesInserted ?? 0),
         bookmarksFound: Array.isArray(parsed.bookmarksFound) ? parsed.bookmarksFound.map(String) : [],
       };
     } catch {
@@ -99,6 +102,7 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
     textFilled: 0,
     assetImagesInserted: 0,
     valuationImagesInserted: 0,
+    clientImagesInserted: 0,
     bookmarksFound: [],
   };
 }
@@ -114,6 +118,7 @@ function estimateMergePayloadSize(payload: MergePayload): number {
   let size = payload.templateBase64.length;
   for (const img of payload.assetImagesBase64) size += img.length;
   for (const img of payload.valuationImagesBase64) size += img.length;
+  for (const img of payload.clientImagesBase64) size += img.length;
   return size;
 }
 
@@ -163,6 +168,12 @@ async function streamMergePayloadJson(payload: MergePayload, stream: NodeJS.Writ
   await writeAsync(stream, `,"valuationImagesBase64":[`);
   for (let i = 0; i < payload.valuationImagesBase64.length; i++) {
     await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.valuationImagesBase64[i])}`);
+  }
+  await writeAsync(stream, `]`);
+
+  await writeAsync(stream, `,"clientImagesBase64":[`);
+  for (let i = 0; i < payload.clientImagesBase64.length; i++) {
+    await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.clientImagesBase64[i])}`);
   }
   await writeAsync(stream, `]}`);
 }
@@ -491,8 +502,10 @@ export class WordTemplateMergeService {
       templateFileId?: string;
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
+      clientImageUrls?: string[];
       assetImagesBase64?: string[];
       valuationImagesBase64?: string[];
+      clientImagesBase64?: string[];
       textValues?: Record<string, string>;
       textByBookmarkName?: Record<string, string>;
       imageLayout?: {
@@ -523,8 +536,11 @@ export class WordTemplateMergeService {
     }
 
     let assetImagesBase64: string[] = [...(body.assetImagesBase64 ?? [])];
-    const valuationImagesBase64: string[] = [...(body.valuationImagesBase64 ?? [])];
+    let valuationImagesBase64: string[] = [...(body.valuationImagesBase64 ?? [])];
+    let clientImagesBase64: string[] = [...(body.clientImagesBase64 ?? [])];
     const assetImageUrlsProvided = Array.isArray(body.assetImageUrls);
+    const valuationImageUrlsProvided = Array.isArray(body.valuationImageUrls);
+    const clientImageUrlsProvided = Array.isArray(body.clientImageUrls);
 
     if (assetImagesBase64.length === 0 && (body.assetImageUrls?.length ?? 0) > 0) {
       const loaded = await mapWithConcurrency(
@@ -550,6 +566,22 @@ export class WordTemplateMergeService {
         if (buf) valuationImagesBase64.push(buf.toString("base64"));
       }
     }
+    if (valuationImagesBase64.length === 0 && !valuationImageUrlsProvided) {
+      valuationImagesBase64 = await this.loadStoredValuationImagesBase64(project, ctx);
+    }
+    if (clientImagesBase64.length === 0 && (body.clientImageUrls?.length ?? 0) > 0) {
+      const loaded = await mapWithConcurrency(
+        body.clientImageUrls ?? [],
+        MV_MERGE_IMAGE_FETCH_CONCURRENCY,
+        (url) => this.fetchImageBuffer(url, ctx),
+      );
+      for (const buf of loaded) {
+        if (buf) clientImagesBase64.push(buf.toString("base64"));
+      }
+    }
+    if (clientImagesBase64.length === 0 && !clientImageUrlsProvided) {
+      clientImagesBase64 = await this.loadStoredClientImagesBase64(project, ctx);
+    }
 
     const storedTextValues = buildTextValues(reportData, project.name || "");
     const requestTextValues = sanitizeTextRecord(body.textValues, { dropEmpty: true });
@@ -564,11 +596,12 @@ export class WordTemplateMergeService {
       textByBookmarkName,
       assetImagesBase64,
       valuationImagesBase64,
+      clientImagesBase64,
       imageLayout: sanitizeImageLayout(body.imageLayout),
     };
 
     this.logger.log(
-      `Merging Word for ${projectId}: ${assetImagesBase64.length} asset, ${valuationImagesBase64.length} valuation images`,
+      `Merging Word for ${projectId}: ${assetImagesBase64.length} asset, ${valuationImagesBase64.length} valuation, ${clientImagesBase64.length} client images`,
     );
 
     let mergeResult: MergeWorkerResult;
@@ -677,6 +710,63 @@ export class WordTemplateMergeService {
       return loaded.filter((item): item is string => Boolean(item));
     } catch (err) {
       this.logger.warn(`Could not load stored asset images for Word merge: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  private async loadWorkspaceImagesBase64(
+    projectId: string,
+    workspace: unknown,
+    ctx: MvAccessContext,
+  ): Promise<string[]> {
+    if (!workspace || typeof workspace !== "object") return [];
+    const store = workspace as { includeInReport?: boolean; images?: unknown[] };
+    if (store.includeInReport === false || !Array.isArray(store.images)) return [];
+    const fileIds = store.images
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const row = item as { fileId?: unknown; includeInReport?: unknown };
+        if (row.includeInReport === false) return "";
+        return typeof row.fileId === "string" ? row.fileId.trim() : "";
+      })
+      .filter(Boolean);
+    if (fileIds.length === 0) return [];
+    const loaded = await mapWithConcurrency(fileIds, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (fileId) => {
+      try {
+        const download = await this.mvService.getProjectFileDownload(projectId, fileId, ctx);
+        const buffer = await bufferFromStream(download.stream);
+        return buffer.byteLength > 0 ? buffer.toString("base64") : null;
+      } catch {
+        return null;
+      }
+    });
+    return loaded.filter((item): item is string => Boolean(item));
+  }
+
+  private async loadStoredValuationImagesBase64(
+    project: { _id?: unknown; valuationAccountingWorkspace?: unknown },
+    ctx: MvAccessContext,
+  ): Promise<string[]> {
+    const projectId = String(project._id ?? "").trim();
+    if (!projectId) return [];
+    try {
+      return await this.loadWorkspaceImagesBase64(projectId, project.valuationAccountingWorkspace, ctx);
+    } catch (err) {
+      this.logger.warn(`Could not load valuation images for Word merge: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  private async loadStoredClientImagesBase64(
+    project: { _id?: unknown; clientDocumentsWorkspace?: unknown },
+    ctx: MvAccessContext,
+  ): Promise<string[]> {
+    const projectId = String(project._id ?? "").trim();
+    if (!projectId) return [];
+    try {
+      return await this.loadWorkspaceImagesBase64(projectId, project.clientDocumentsWorkspace, ctx);
+    } catch (err) {
+      this.logger.warn(`Could not load client document images for Word merge: ${(err as Error).message}`);
       return [];
     }
   }

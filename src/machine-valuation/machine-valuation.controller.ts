@@ -309,6 +309,7 @@ export class MachineValuationController {
       inspectionAssignments?: unknown[];
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
+      clientDocumentsWorkspace?: unknown | null;
     },
   ) {
     const context = await resolveRequestContext(req);
@@ -332,6 +333,7 @@ export class MachineValuationController {
       inspectionAssignments?: unknown[];
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
+      clientDocumentsWorkspace?: unknown | null;
     },
   ) {
     const context = await resolveRequestContext(req);
@@ -892,8 +894,10 @@ export class MachineValuationController {
       templateFileId?: string;
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
+      clientImageUrls?: string[];
       assetImagesBase64?: string[];
       valuationImagesBase64?: string[];
+      clientImagesBase64?: string[];
       textValues?: Record<string, string>;
       textByBookmarkName?: Record<string, string>;
       imageLayout?: {
