@@ -104,6 +104,13 @@ DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
 COVER_BOOKMARK_FONT_FAMILY = "Tajawal"
+# غلاف: عنوان 22pt أعلى، اسم العميل 14pt أسفله، محاذاة يمين مع 12px من حافة الصفحة.
+COVER_TITLE_FONT_SIZE_HALF_POINTS = 44  # 22pt
+COVER_CLIENT_FONT_SIZE_HALF_POINTS = 28  # 14pt
+COVER_EDGE_MARGIN_PX = 12
+COVER_EDGE_MARGIN_TWIPS = PIXEL_DXA * COVER_EDGE_MARGIN_PX
+COVER_EDGE_MARGIN_EMU = PIXEL_EMU * COVER_EDGE_MARGIN_PX
+COVER_SHAPE_BOOKMARK_NAMES = ("عنوان", "غلاف", "عميلغلاف")
 ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
 MOJIBAKE_RE = re.compile(r"[ØÙÃÂÐÑ]")
 
@@ -652,7 +659,69 @@ def clear_rpr_flags(rpr: etree._Element, *tags: str) -> None:
         remove_w_children(rpr, tag)
 
 
+def resolve_section_right_margin_twips(para: etree._Element) -> int:
+    """أقرب ‎sectPr‎ بعد الفقرة، ثم آخر ‎sectPr‎ في المستند، وإلا هامش افتراضي."""
+    default_twips = emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)
+    body = find_ancestor(para, w("body"))
+    if body is None:
+        root = para.getroottree().getroot() if para.getroottree() is not None else None
+        body = root.find(f".//{w('body')}") if root is not None else None
+    if body is None:
+        return default_twips
+
+    children = list(body)
+    para_idx = None
+    for idx, child in enumerate(children):
+        if child is para:
+            para_idx = idx
+            break
+        contained = False
+        for el in child.iter():
+            if el is para:
+                contained = True
+                break
+        if contained:
+            para_idx = idx
+            break
+
+    def margin_from_sect(sect: etree._Element | None) -> int | None:
+        if sect is None:
+            return None
+        pg_mar = sect.find(w("pgMar"))
+        if pg_mar is None:
+            return None
+        raw = pg_mar.get(w("right"))
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if para_idx is not None:
+        for child in children[para_idx:]:
+            sect = child if child.tag == w("sectPr") else child.find(w("sectPr"))
+            if sect is None:
+                sect = child.find(f".//{w('sectPr')}")
+            margin = margin_from_sect(sect)
+            if margin is not None:
+                return margin
+
+    for child in reversed(children):
+        sect = child if child.tag == w("sectPr") else child.find(f".//{w('sectPr')}")
+        margin = margin_from_sect(sect)
+        if margin is not None:
+            return margin
+    return default_twips
+
+
 def set_paragraph_cover_alignment(para: etree._Element) -> None:
+    """محاذاة الغلاف إلى اليمين بصرياً مع هامش 12px.
+
+    Word مع فقرات عربية/RTL يعكس معنى jc: ‎jc=right‎ يظهر يساراً و‎jc=left‎ يظهر يميناً.
+    لذلك نضع ‎w:bidi‎ مع ‎jc=left‎ لنحصل على الجانب الأيمن الفعلي للصفحة.
+
+    ملاحظة: ‎w:ind/@w:right‎ الموجب يزيد الفراغ من اليمين الفيزيائي. لفقرة الصفحة
+    نستخدم قيمة سالبة = (12px − هامش القسم الأيمن) لتقريب النص من حافة الصفحة.
+    """
     ppr = para.find(w("pPr"))
     if ppr is None:
         ppr = etree.Element(w("pPr"))
@@ -660,22 +729,36 @@ def set_paragraph_cover_alignment(para: etree._Element) -> None:
     remove_w_children(ppr, "jc")
     remove_w_children(ppr, "ind")
     remove_w_children(ppr, "bidi")
+
+    # داخل مربع نص الغلاف: هامش موجب صغير من إطار المربع.
+    if find_ancestor(para, w("txbxContent")) is not None:
+        right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS)
+        left_indent_twips = 0
+    else:
+        section_right_twips = resolve_section_right_margin_twips(para)
+        # سالب عادةً: يسحب المحاذاة حتى 12px من حافة الصفحة الفعلية.
+        right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS) - int(section_right_twips)
+        left_indent_twips = 0
+
     bidi = etree.Element(w("bidi"))
     ind = etree.Element(w("ind"))
-    ind.set(w("left"), "0")
-    ind.set(w("right"), "0")
+    # ind فيزيائي فقط — تجنّب start/end حتى لا يحوّلهما Word بشكل مربك.
+    ind.set(w("right"), str(right_indent_twips))
+    ind.set(w("left"), str(left_indent_twips))
     jc = etree.Element(w("jc"))
-    jc.set(w("val"), "center")
+    # left + bidi = يمين بصري في Word (انظر اختبارات تصدير PDF)
+    jc.set(w("val"), "left")
+
     rpr = ppr.find(w("rPr"))
+    # الترتيب صالح في Word: bidi ثم ind ثم jc (قبل rPr إن وُجد).
+    insert_nodes = [bidi, ind, jc]
     if rpr is not None:
         insert_at = list(ppr).index(rpr)
-        ppr.insert(insert_at, bidi)
-        ppr.insert(insert_at + 1, ind)
-        ppr.insert(insert_at + 2, jc)
+        for offset, node in enumerate(insert_nodes):
+            ppr.insert(insert_at + offset, node)
     else:
-        ppr.append(bidi)
-        ppr.append(ind)
-        ppr.append(jc)
+        for node in insert_nodes:
+            ppr.append(node)
 
 
 def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | None = None) -> None:
@@ -704,20 +787,21 @@ def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | 
 
 
 def cover_bookmark_font_size(bookmark_name: str) -> int | None:
-    """Word stores font size in half-points (14pt => 28, 11pt => 22).
+    """Word stores font size in half-points (22pt => 44, 14pt => 28).
 
-    غلاف التقرير فقط: «عنوان» و«غلاف» بحجم 14pt.
-    «عنوانغ» و«عنواناصل» تظهر داخل فقرات التقرير فترث تنسيق الكلام المحيط
-    (عادة ~11pt) دون فرض Tajawal/توسيط الغلاف.
+    غلاف التقرير فقط:
+    - «عنوان» و«غلاف»: 22pt أعلى يمين.
+    - «عميلغلاف»: 14pt أسفل العنوان يمين.
+    «عنوانغ» و«عنواناصل» ترث تنسيق الفقرة المحيطة دون فرض تنسيق الغلاف.
     """
     norm = normalize_bookmark_name(bookmark_name)
     if norm in {
         normalize_bookmark_name("عنوان"),
         normalize_bookmark_name("غلاف"),
     }:
-        return 28
+        return COVER_TITLE_FONT_SIZE_HALF_POINTS
     if norm in {normalize_bookmark_name(name) for name in ("عميلغلاف",)}:
-        return 40
+        return COVER_CLIENT_FONT_SIZE_HALF_POINTS
     return None
 
 
@@ -735,6 +819,10 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
     if para is not None:
         set_paragraph_cover_alignment(para)
         set_paragraph_cover_font(para, size)
+    # الفقرة الخارجية التي تحمل مربع النص العائم — محاذاتها تحرك الصندوق نفسه يميناً
+    outer_para = find_cover_outer_paragraph(start)
+    if outer_para is not None and outer_para is not para:
+        set_paragraph_cover_alignment(outer_para)
     styled = deepcopy(rpr) if rpr is not None else etree.Element(w("rPr"))
     set_rpr_value(
         styled,
@@ -757,6 +845,169 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
         set_rpr_flag(styled, "bCs")
     set_rpr_flag(styled, "rtl")
     return styled
+
+
+def find_cover_outer_paragraph(start: etree._Element) -> etree._Element | None:
+    """فقرة المستند التي تضم الرسم/مربع النص (وليست الفقرة داخل txbxContent)."""
+    container = find_ancestor(start, w("drawing"))
+    if container is None:
+        container = find_ancestor(start, w("pict"))
+    if container is None:
+        return None
+    return find_ancestor(container, w("p"))
+
+
+def resolve_document_page_width_emu(root: etree._Element) -> int:
+    for sect in root.iter(w("sectPr")):
+        pg_sz = sect.find(w("pgSz"))
+        if pg_sz is None:
+            continue
+        raw = pg_sz.get(w("w"))
+        try:
+            twips = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            twips = 0
+        if twips > 0:
+            return twips_to_emu(twips)
+    return DEFAULT_PAGE_WIDTH_EMU
+
+
+def _set_wp_position_h_page_right(parent: etree._Element, page_width_emu: int) -> None:
+    """يعيد تمكين موضع أفقي يمين الصفحة مع هامش 12px إن أمكن معرفة عرض الشكل."""
+    for old in list(parent.findall(f"{{{WP_NS}}}positionH")):
+        parent.remove(old)
+
+    position_h = etree.Element(f"{{{WP_NS}}}positionH")
+    position_h.set("relativeFrom", "page")
+    extent = parent.find(f"{{{WP_NS}}}extent")
+    cx = 0
+    if extent is not None:
+        try:
+            cx = int(extent.get("cx") or "0")
+        except (TypeError, ValueError):
+            cx = 0
+    if cx > 0 and page_width_emu > cx + COVER_EDGE_MARGIN_EMU:
+        offset = etree.SubElement(position_h, f"{{{WP_NS}}}posOffset")
+        offset.text = str(max(0, page_width_emu - cx - COVER_EDGE_MARGIN_EMU))
+    else:
+        align = etree.SubElement(position_h, f"{{{WP_NS}}}align")
+        align.text = "right"
+
+    simple_pos = parent.find(f"{{{WP_NS}}}simplePos")
+    if simple_pos is not None:
+        simple_pos.addnext(position_h)
+    else:
+        parent.insert(0, position_h)
+
+
+def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu: int) -> None:
+    anchor = drawing.find(f"{{{WP_NS}}}anchor")
+    if anchor is not None:
+        if anchor.get("simplePos") in ("1", "true", "True"):
+            anchor.set("simplePos", "0")
+        _set_wp_position_h_page_right(anchor, page_width_emu)
+        return
+
+    inline = drawing.find(f"{{{WP_NS}}}inline")
+    if inline is None:
+        return
+    # حوّل inline إلى anchor عائم بمحاذاة يمين الصفحة حتى لا يبقى الصندوق يساراً مع تدفق النص.
+    anchor = etree.Element(f"{{{WP_NS}}}anchor")
+    for key, value in inline.attrib.items():
+        anchor.set(key, value)
+    anchor.set("simplePos", "0")
+    anchor.set("relativeHeight", anchor.get("relativeHeight") or "251658240")
+    anchor.set("behindDoc", anchor.get("behindDoc") or "0")
+    anchor.set("locked", anchor.get("locked") or "0")
+    anchor.set("layoutInCell", anchor.get("layoutInCell") or "1")
+    anchor.set("allowOverlap", anchor.get("allowOverlap") or "1")
+    anchor.set("distT", anchor.get("distT") or "0")
+    anchor.set("distB", anchor.get("distB") or "0")
+    anchor.set("distL", anchor.get("distL") or "0")
+    anchor.set("distR", anchor.get("distR") or "0")
+
+    simple = etree.SubElement(anchor, f"{{{WP_NS}}}simplePos")
+    simple.set("x", "0")
+    simple.set("y", "0")
+    for child in list(inline):
+        anchor.append(child)
+    # إن لم يوجد positionV أبقِ الشكل في موضعه الرأسي تقريباً عبر align top relative to paragraph
+    if anchor.find(f"{{{WP_NS}}}positionV") is None:
+        position_v = etree.Element(f"{{{WP_NS}}}positionV")
+        position_v.set("relativeFrom", "paragraph")
+        align_v = etree.SubElement(position_v, f"{{{WP_NS}}}align")
+        align_v.text = "top"
+        extent_el = anchor.find(f"{{{WP_NS}}}extent")
+        if extent_el is not None:
+            extent_el.addprevious(position_v)
+        else:
+            anchor.append(position_v)
+    if anchor.find(f"{{{WP_NS}}}wrapNone") is None and anchor.find(f"{{{WP_NS}}}wrapSquare") is None:
+        wrap = etree.Element(f"{{{WP_NS}}}wrapNone")
+        extent_el = anchor.find(f"{{{WP_NS}}}extent")
+        if extent_el is not None:
+            extent_el.addnext(wrap)
+        else:
+            anchor.append(wrap)
+
+    _set_wp_position_h_page_right(anchor, page_width_emu)
+    parent = inline.getparent()
+    if parent is not None:
+        parent.replace(inline, anchor)
+
+
+def reposition_vml_shape_to_page_right(pict: etree._Element) -> None:
+    for el in pict.iter():
+        tag = el.tag if isinstance(el.tag, str) else ""
+        if not tag.endswith("}shape") and tag != "shape":
+            continue
+        style = el.get("style") or ""
+        style = re.sub(
+            r"mso-position-horizontal\s*:\s*[^;]+",
+            "mso-position-horizontal:right",
+            style,
+            flags=re.I,
+        )
+        if re.search(r"mso-position-horizontal\s*:", style, flags=re.I) is None:
+            style = (style.rstrip(";") + ";mso-position-horizontal:right").lstrip(";")
+        style = re.sub(
+            r"mso-position-horizontal-relative\s*:\s*[^;]+",
+            "mso-position-horizontal-relative:page",
+            style,
+            flags=re.I,
+        )
+        if re.search(r"mso-position-horizontal-relative\s*:", style, flags=re.I) is None:
+            style = (style.rstrip(";") + ";mso-position-horizontal-relative:page").lstrip(";")
+        style = re.sub(r"margin-left\s*:\s*[^;]+;?", "", style, flags=re.I)
+        style = re.sub(r";{2,}", ";", style).strip(" ;")
+        el.set("style", style)
+
+
+def force_cover_shapes_to_page_right(root: etree._Element) -> None:
+    """ينقل مربعات نص الغلاف (عنوان/عميل) إلى يمين الصفحة — محاذاة الفقرة وحدها لا تكفي للصناديق العائمة."""
+    wanted = {normalize_bookmark_name(name) for name in COVER_SHAPE_BOOKMARK_NAMES}
+    page_width_emu = resolve_document_page_width_emu(root)
+    seen: set[int] = set()
+
+    for name, _bid, start, _end in find_bookmark_pairs(root):
+        if normalize_bookmark_name(name) not in wanted:
+            continue
+        drawing = find_ancestor(start, w("drawing"))
+        pict = None if drawing is not None else find_ancestor(start, w("pict"))
+        target = drawing if drawing is not None else pict
+        if target is None:
+            continue
+        target_id = id(target)
+        if target_id in seen:
+            continue
+        seen.add(target_id)
+        if drawing is not None:
+            reposition_wp_drawing_to_page_right(drawing, page_width_emu)
+        elif pict is not None:
+            reposition_vml_shape_to_page_right(pict)
+        outer_para = find_cover_outer_paragraph(start)
+        if outer_para is not None:
+            set_paragraph_cover_alignment(outer_para)
 
 
 def run_has_meaningful_content(run: etree._Element) -> bool:
@@ -907,10 +1158,45 @@ def apply_text_bookmarks(
 
     if text_values:
         filled += apply_contextual_text_fallbacks(root, text_values)
+    ensure_cover_title_above_client(root)
+    force_cover_shapes_to_page_right(root)
     normalize_numeric_date_suffixes(root)
 
     out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
     return out, filled
+
+
+def _cover_bookmark_paragraph(root: etree._Element, bookmark_names: set[str]) -> etree._Element | None:
+    wanted = {normalize_bookmark_name(name) for name in bookmark_names}
+    for name, _bid, start, _end in find_bookmark_pairs(root):
+        if normalize_bookmark_name(name) not in wanted:
+            continue
+        para = find_ancestor(start, w("p"))
+        if para is not None:
+            return para
+    return None
+
+
+def ensure_cover_title_above_client(root: etree._Element) -> None:
+    """إن وُجد عنوان الغلاف واسم العميل كفقرتين شقيقتين والعميل أعلى، بدّل ترتيبهما."""
+    title_para = _cover_bookmark_paragraph(root, {"عنوان", "غلاف"})
+    client_para = _cover_bookmark_paragraph(root, {"عميلغلاف"})
+    if title_para is None or client_para is None:
+        return
+    if title_para is client_para:
+        return
+    parent = title_para.getparent()
+    if parent is None or parent is not client_para.getparent():
+        return
+    children = list(parent)
+    try:
+        title_idx = children.index(title_para)
+        client_idx = children.index(client_para)
+    except ValueError:
+        return
+    if client_idx < title_idx:
+        parent.remove(title_para)
+        parent.insert(client_idx, title_para)
 
 
 def paragraph_has_drawing(p: etree._Element) -> bool:
@@ -1850,6 +2136,8 @@ def apply_image_bookmarks_docx_api(
     client_images: list[bytes] | None = None,
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
+    client_images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
+    client_images_per_page: int = CLIENT_DOCS_IMAGES_PER_PAGE,
 ) -> tuple[bytes, dict[str, int]]:
     from docx import Document
 
@@ -1877,8 +2165,8 @@ def apply_image_bookmarks_docx_api(
         client_images or [],
         True,
         "client_grid",
-        CLIENT_DOCS_IMAGES_PER_ROW,
-        CLIENT_DOCS_IMAGES_PER_PAGE,
+        client_images_per_row,
+        client_images_per_page,
     )
     out = io.BytesIO()
     doc.save(out)
@@ -1903,7 +2191,19 @@ def merge_package(payload: dict[str, Any]) -> bytes:
         images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
     except (TypeError, ValueError):
         images_per_row = IMAGES_PER_ROW
-    images_per_page = images_per_row * (5 if images_per_row >= 4 else 4)
+    auto_images_per_page = images_per_row * (5 if images_per_row >= 4 else 4)
+    try:
+        images_per_page = max(1, int(image_layout.get("imagesPerPage", auto_images_per_page)))
+    except (TypeError, ValueError):
+        images_per_page = auto_images_per_page
+    images_per_page = max(images_per_row, images_per_page)
+    try:
+        client_images_per_row = int(image_layout.get("clientImagesPerRow", CLIENT_DOCS_IMAGES_PER_ROW))
+    except (TypeError, ValueError):
+        client_images_per_row = CLIENT_DOCS_IMAGES_PER_ROW
+    if client_images_per_row not in (1, 2, 3):
+        client_images_per_row = CLIENT_DOCS_IMAGES_PER_ROW
+    client_images_per_page = client_images_per_row * client_images_per_row
 
     in_buf = io.BytesIO(template_bytes)
     modified: dict[str, bytes] = {}
@@ -1935,6 +2235,8 @@ def merge_package(payload: dict[str, Any]) -> bytes:
             client_images,
             images_per_row,
             images_per_page,
+            client_images_per_row,
+            client_images_per_page,
         )
     else:
         validate_docx_package(result)

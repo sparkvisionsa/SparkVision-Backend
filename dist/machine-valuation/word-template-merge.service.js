@@ -62,9 +62,18 @@ function sanitizeImageLayout(value) {
     const safeImagesPerRow = Number.isFinite(imagesPerRow)
         ? Math.max(1, Math.min(6, imagesPerRow))
         : 4;
+    const providedPerPage = Math.trunc(Number(input.imagesPerPage));
+    const autoPerPage = safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4);
+    const safeImagesPerPage = Number.isFinite(providedPerPage) && providedPerPage > 0
+        ? Math.max(safeImagesPerRow, Math.min(60, providedPerPage))
+        : autoPerPage;
+    const clientRaw = Math.trunc(Number(input.clientImagesPerRow));
+    const clientImagesPerRow = clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
     return {
         imagesPerRow: safeImagesPerRow,
-        imagesPerPage: safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4),
+        imagesPerPage: safeImagesPerPage,
+        clientImagesPerRow,
+        clientImagesPerPage: clientImagesPerRow * clientImagesPerRow,
     };
 }
 function findPythonBin() {

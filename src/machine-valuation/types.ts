@@ -142,6 +142,8 @@ export interface MvProjectReportData {
   reportPresentationDraft?: boolean;
   /** HTML — مستندات مستلمة من العميل */
   receivedClientDocumentsHtml?: string;
+  /** عدد صور مستندات العميل في الصف/الارتفاع (1|2|3) لمرفق 3 وWord */
+  clientDocumentsImagesPerRow?: 1 | 2 | 3;
   /** HTML — شهادة التسجيل في بوابة «تقييم» */
   sceRegistrationCertificateHtml?: string;
   /** تعديلات نصية مباشرة داخل صفحة إعداد التقرير، بما يشمل القيم الديناميكية. */

@@ -8,6 +8,7 @@ import zipfile
 from lxml import etree
 from merge_docx import (
     ASSET_IMAGE_GAP_DXA,
+    COVER_EDGE_MARGIN_EMU,
     EMU_PER_INCH,
     IMAGE_CONTENT_WIDTH_RATIO,
     IMAGE_HORIZONTAL_MARGIN_DXA,
@@ -158,11 +159,31 @@ DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
               <w:r><w:t>old textbox purpose</w:t></w:r>
               <w:r><w:bookmarkEnd w:id="5"/></w:r>
             </w:p>
-            <w:p>
-              <w:bookmarkStart w:id="7" w:name="عنوان"/>
-              <w:bookmarkEnd w:id="7"/>
-            </w:p>
           </w:txbxContent>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:anchor xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" simplePos="0" relativeHeight="251658240" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+            <wp:simplePos x="0" y="0"/>
+            <wp:positionH relativeFrom="page"><wp:align>left</wp:align></wp:positionH>
+            <wp:positionV relativeFrom="page"><wp:align>center</wp:align></wp:positionV>
+            <wp:extent cx="3000000" cy="900000"/>
+            <wp:wrapNone/>
+            <wp:docPr id="77" name="CoverTitleBox"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                <w:txbxContent>
+                  <w:p>
+                    <w:bookmarkStart w:id="7" w:name="عنوان"/>
+                    <w:bookmarkEnd w:id="7"/>
+                  </w:p>
+                </w:txbxContent>
+              </a:graphicData>
+            </a:graphic>
+          </wp:anchor>
         </w:drawing>
       </w:r>
     </w:p>
@@ -248,7 +269,7 @@ def main() -> None:
         "textByBookmarkName": {},
         "assetImagesBase64": [image_b64 for _ in range(12)],
         "valuationImagesBase64": [image_b64 for _ in range(4)],
-        "imageLayout": {"imagesPerRow": 2, "imagesPerPage": 5},
+        "imageLayout": {"imagesPerRow": 2, "imagesPerPage": 8},
     }
     out = merge_package(payload)
     with zipfile.ZipFile(io.BytesIO(out), "r") as z:
@@ -308,7 +329,7 @@ def main() -> None:
     assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
     title_runs = matching_runs("تقرير اختبار مباشر")
     assert len(title_runs) >= 1, "report title should fill cover bookmark"
-    # «عنوان» على الغلاف فقط يفرض Tajawal 14pt؛ «عنوانغ» يرث تنسيق الفقرة
+    # «عنوان» على الغلاف فقط يفرض Tajawal 22pt يمين؛ «عنوانغ» يرث تنسيق الفقرة
     cover_title_runs = [
         run
         for run in title_runs
@@ -316,9 +337,9 @@ def main() -> None:
         and run.find(w("rPr")).find(w("rFonts")) is not None
         and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "44"
     ]
-    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 14pt"
+    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 22pt"
     for title_run in cover_title_runs:
         rpr = title_run.find(w("rPr"))
         assert rpr is not None and rpr.find(w("b")) is None, "cover title should not be bold"
@@ -328,12 +349,42 @@ def main() -> None:
         assert title_para is not None, "cover title paragraph missing"
         title_ppr = title_para.find(w("pPr"))
         title_jc = title_ppr.find(w("jc")) if title_ppr is not None else None
-        assert title_jc is not None and title_jc.get(f"{{{W_NS}}}val") == "center", "cover title must be centered"
+        # Word RTL: jc=left ⇒ يمين بصري على الغلاف
+        assert title_jc is not None and title_jc.get(f"{{{W_NS}}}val") == "left", (
+            "cover title must use jc=left under bidi for visual right alignment"
+        )
+        assert title_ppr.find(w("bidi")) is not None, "cover title must set w:bidi for Arabic RTL"
+        title_ind = title_ppr.find(w("ind")) if title_ppr is not None else None
+        assert title_ind is not None, "cover title must set right edge indent"
+        # عنوان داخل مربع نص: هامش 12px (180 twips) من إطار المربع
+        assert title_ind.get(f"{{{W_NS}}}right") == "180", "cover title textbox must keep 12px from box edge"
+        assert title_ind.get(f"{{{W_NS}}}start") is None, "cover title must use physical right indent only"
         title_para_rpr = title_ppr.find(w("rPr")) if title_ppr is not None else None
         title_para_fonts = title_para_rpr.find(w("rFonts")) if title_para_rpr is not None else None
         assert title_para_fonts is not None and title_para_fonts.get(f"{{{W_NS}}}cs") == "Tajawal", "cover paragraph must enforce Tajawal"
         title_para_sz = title_para_rpr.find(w("sz")) if title_para_rpr is not None else None
-        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "28", "cover paragraph should be 14pt"
+        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "44", "cover paragraph should be 22pt"
+    # مربع نص الغلاف العائم يجب أن يُنقل من يسار الصفحة إلى اليمين (مع هامش 12px)
+    cover_anchors = [
+        node
+        for node in root.iter(f"{{{WP_NS}}}anchor")
+        if any((el.text or "") == "تقرير اختبار مباشر" for el in node.iter(w("t")))
+    ]
+    assert cover_anchors, "cover title floating anchor missing after merge"
+    for anchor in cover_anchors:
+        position_h = anchor.find(f"{{{WP_NS}}}positionH")
+        assert position_h is not None and position_h.get("relativeFrom") == "page"
+        align = position_h.find(f"{{{WP_NS}}}align")
+        pos_offset = position_h.find(f"{{{WP_NS}}}posOffset")
+        assert (align is not None and (align.text or "").strip() == "right") or pos_offset is not None, (
+            "cover title box must be pinned to the right side of the page"
+        )
+        if pos_offset is not None:
+            page_width_emu = int(11906 * 635)
+            extent = anchor.find(f"{{{WP_NS}}}extent")
+            cx = int(extent.get("cx") or "0") if extent is not None else 0
+            expected = page_width_emu - cx - int(COVER_EDGE_MARGIN_EMU)
+            assert int(pos_offset.text or "0") == expected, "cover title box must keep 12px from page edge"
     # عنوانغ / عنواناصل داخل التقرير: يرثان ~11pt ونوع خط الفقرة المحيطة
     inline_body_runs = [
         run
@@ -359,20 +410,41 @@ def main() -> None:
         for run in title_runs
         if run.find(w("rPr")) is not None
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "44"
         and run.find(w("rPr")).find(w("rFonts")) is not None
         and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
     )
     assert forced_cover_style_count == len(cover_title_runs), (
-        "عنوانغ/عنواناصل must not receive forced cover 14pt Tajawal styling"
+        "عنوانغ/عنواناصل must not receive forced cover 22pt Tajawal styling"
     )
     client_runs = matching_runs("شركة الاختبار")
     assert any(
         run.find(w("rPr")) is not None
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "40"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
         for run in client_runs
-    ), "cover client should be 20pt"
+    ), "cover client should be 14pt"
+    for client_run in client_runs:
+        client_para = client_run
+        while client_para is not None and client_para.tag != w("p"):
+            client_para = client_para.getparent()
+        if client_para is None:
+            continue
+        client_ppr = client_para.find(w("pPr"))
+        if client_ppr is None:
+            continue
+        client_jc = client_ppr.find(w("jc"))
+        if client_jc is not None:
+            assert client_jc.get(f"{{{W_NS}}}val") == "left", (
+                "cover client must use jc=left under bidi for visual right alignment"
+            )
+            assert client_ppr.find(w("bidi")) is not None, "cover client must set w:bidi for Arabic RTL"
+            client_ind = client_ppr.find(w("ind"))
+            # section right 2127 − → indent = 180 − 2127 = -1947 (يسحب للنصف الأيمن من الصفحة)
+            assert client_ind is not None and client_ind.get(f"{{{W_NS}}}right") == "-1947"
+            break
+    else:
+        raise AssertionError("cover client paragraph alignment missing")
     assert f"على أساس {valuation_basis} في تاريخ التقييم" in plain_text, "contextual valuation basis was not filled"
     assert any(
         valuation_date in line and line.strip().startswith("تاريخ التقييم")

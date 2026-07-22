@@ -696,6 +696,10 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     reportTemplateId: sanitizeOptionalText(data.reportTemplateId, 120),
     reportPresentationDraft: data.reportPresentationDraft !== false,
     receivedClientDocumentsHtml: sanitizeOptionalText(data.receivedClientDocumentsHtml, 50_000),
+    clientDocumentsImagesPerRow: (() => {
+      const n = Math.trunc(Number(data.clientDocumentsImagesPerRow));
+      return n === 1 || n === 2 || n === 3 ? n : 2;
+    })(),
     sceRegistrationCertificateHtml: sanitizeOptionalText(data.sceRegistrationCertificateHtml, 50_000),
     reportTextOverrides: sanitizeReportTextOverrides(data.reportTextOverrides),
     reportIntroExtraHtml: sanitizeOptionalText(data.reportIntroExtraHtml, 50_000),
@@ -2133,6 +2137,68 @@ function picAssetExternalImageUrl(raw: unknown): { url: string; rawUrl: string }
 function picAssetImageIncludeInReport(raw: unknown): boolean {
   if (!raw || typeof raw !== "object" || raw instanceof ObjectId) return false;
   return (raw as { includeInReport?: unknown }).includeInReport === true;
+}
+
+/** يزامن اختيار التقرير من GridFS إلى assets.images المرتبطة بنفس fileId. */
+async function syncPicImagesIncludeInReportFromGridFsIds(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  projectId: ObjectId,
+  fileIds: ObjectId[],
+  includeInReport: boolean,
+): Promise<void> {
+  if (fileIds.length === 0) return;
+  const idSet = new Set(fileIds.map((id) => id.toString()));
+  const pa = db.collection<AssetDoc>(ASSETS_COLLECTION);
+  const folders = await pa
+    .find({
+      projectId,
+      ...MV_PHOTO_FOLDER_FILTER,
+      images: { $exists: true, $ne: [] },
+    })
+    .project({ images: 1 })
+    .toArray();
+  if (folders.length === 0) return;
+
+  const now = new Date();
+  const ops: AnyBulkWriteOperation<AssetDoc>[] = [];
+  for (const folder of folders) {
+    const images = Array.isArray(folder.images) ? folder.images : [];
+    let changed = false;
+    const nextImages = images.map((image) => {
+      const fileId = picAssetImageFileObjectId(image);
+      if (!fileId || !idSet.has(fileId.toString())) return image;
+      const current =
+        image && typeof image === "object"
+          ? (image as { includeInReport?: unknown }).includeInReport === true
+          : false;
+      if (
+        image &&
+        typeof image === "object" &&
+        typeof (image as { includeInReport?: unknown }).includeInReport === "boolean" &&
+        current === includeInReport
+      ) {
+        return image;
+      }
+      changed = true;
+      if (typeof image === "string" && image.trim()) {
+        return { fileId: image.trim(), includeInReport };
+      }
+      if (image && typeof image === "object") {
+        return { ...(image as object), includeInReport };
+      }
+      return image;
+    });
+    if (!changed) continue;
+    ops.push({
+      updateOne: {
+        filter: { _id: folder._id, projectId },
+        update: { $set: { images: nextImages, updatedAt: now } },
+      },
+    });
+  }
+  if (ops.length > 0) {
+    await pa.bulkWrite(ops, { ordered: false });
+  }
 }
 
 /** يزامن اختيار التقرير من assets.images إلى سجلات GridFS المرتبطة (fileId أو sourceUrl). */
@@ -7755,6 +7821,15 @@ export class MachineValuationService implements OnModuleInit {
     if (result.matchedCount === 0 && ids.length > 0) {
       this.logger.warn(
         `updateProjectAssetImageReportSelection: no GridFS matches for ${ids.length} id(s) in project ${projectId}`,
+      );
+    }
+
+    // مزامنة عكسية: GridFS → assets.images حتى لا يمسح دمج التقرير التحديد
+    try {
+      await syncPicImagesIncludeInReportFromGridFsIds(db, pid, ids, includeInReport);
+    } catch (err) {
+      this.logger.warn(
+        `syncPicImagesIncludeInReportFromGridFsIds failed for project ${projectId}: ${(err as Error).message}`,
       );
     }
 
