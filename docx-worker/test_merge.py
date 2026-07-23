@@ -8,6 +8,7 @@ import zipfile
 from lxml import etree
 from merge_docx import (
     ASSET_IMAGE_GAP_DXA,
+    ASSET_IMAGE_MAX_SQUARE_PX,
     COVER_EDGE_MARGIN_EMU,
     EMU_PER_INCH,
     IMAGE_CONTENT_WIDTH_RATIO,
@@ -15,6 +16,7 @@ from merge_docx import (
     IMAGE_PAGE_TITLE,
     IMAGES_PER_PAGE,
     IMAGES_PER_ROW,
+    stretch_to_fill_canvas_jpeg_bytes,
     merge_package,
     validate_part_xml,
 )
@@ -27,6 +29,38 @@ A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+def make_solid_jpeg(width: int, height: int, color: tuple[int, int, int] = (20, 120, 200)) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), color)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+def test_stretch_fills_uniform_canvas_without_crop_or_pad() -> None:
+    """تمطيط لملء الخلية: بدون فراغات بيضاء وبدون قصّ — الزوايا من محتوى الصورة."""
+    from PIL import Image
+
+    wide = make_solid_jpeg(800, 200, (10, 200, 40))
+    cell = int(2.0 * EMU_PER_INCH)
+    out = stretch_to_fill_canvas_jpeg_bytes(wide, cell, cell, max_side_px=400)
+    canvas = Image.open(io.BytesIO(out)).convert("RGB")
+    assert canvas.size == (400, 400), "canvas must match uniform cell"
+    # لا حشوة بيضاء — كل البكسلات من الصورة الممطوطة (أخضر)
+    for xy in ((2, 2), (200, 200), (397, 397), (2, 397), (397, 2)):
+        pixel = canvas.getpixel(xy)
+        assert pixel[1] > 150 and pixel[0] < 80, f"expected stretched green at {xy}, got {pixel}"
+
+    tall = make_solid_jpeg(200, 800, (220, 30, 30))
+    out2 = stretch_to_fill_canvas_jpeg_bytes(tall, cell, cell, max_side_px=400)
+    canvas2 = Image.open(io.BytesIO(out2)).convert("RGB")
+    for xy in ((2, 2), (200, 200), (397, 397)):
+        pixel = canvas2.getpixel(xy)
+        assert pixel[0] > 180 and pixel[1] < 80, f"expected stretched red at {xy}, got {pixel}"
+    assert ASSET_IMAGE_MAX_SQUARE_PX >= 1600
 
 
 def mojibake(text: str) -> str:
@@ -246,6 +280,8 @@ def make_template() -> bytes:
 
 
 def main() -> None:
+    test_stretch_fills_uniform_canvas_without_crop_or_pad()
+    print("OK: stretch_to_fill fills uniform cell without crop/pad")
     image_b64 = base64.b64encode(PNG_1X1).decode("ascii")
     valuation_basis = "القيمة السوقية"
     valuation_date = "14/06/2026"

@@ -926,6 +926,217 @@ function toSafeNonNegativeInt(value) {
     }
     return 0;
 }
+function mongoSafeArraySize(fieldPath) {
+    return {
+        $cond: [{ $isArray: fieldPath }, { $size: fieldPath }, 0],
+    };
+}
+function mongoPicAssetImagesCount(fieldPath = "$images") {
+    return {
+        $cond: [
+            { $isArray: fieldPath },
+            { $size: fieldPath },
+            {
+                $cond: [
+                    { $eq: [{ $type: fieldPath }, "object"] },
+                    {
+                        $reduce: {
+                            input: { $objectToArray: fieldPath },
+                            initialValue: 0,
+                            in: {
+                                $add: [
+                                    "$$value",
+                                    {
+                                        $switch: {
+                                            branches: [
+                                                {
+                                                    case: { $isArray: "$$this.v" },
+                                                    then: { $size: "$$this.v" },
+                                                },
+                                                {
+                                                    case: {
+                                                        $and: [
+                                                            { $ne: ["$$this.v", null] },
+                                                            { $eq: [{ $type: "$$this.v" }, "object"] },
+                                                        ],
+                                                    },
+                                                    then: 1,
+                                                },
+                                            ],
+                                            default: 0,
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                    0,
+                ],
+            },
+        ],
+    };
+}
+function emptyPicAssetImagesObject() {
+    return {
+        plate: null,
+        odometer: null,
+        brand: null,
+        details: null,
+        other: [],
+    };
+}
+function flattenPicAssetImagesRaw(raw) {
+    if (Array.isArray(raw))
+        return raw;
+    if (!raw || typeof raw !== "object")
+        return [];
+    const out = [];
+    for (const value of Object.values(raw)) {
+        if (value == null)
+            continue;
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                if (item != null)
+                    out.push(item);
+            }
+            continue;
+        }
+        if (typeof value === "object")
+            out.push(value);
+    }
+    return out;
+}
+function isPicAssetCategorizedImagesObject(raw) {
+    return !!raw && typeof raw === "object" && !Array.isArray(raw);
+}
+function mapPicAssetImagesStructure(raw, mapper) {
+    if (Array.isArray(raw))
+        return raw.map(mapper);
+    if (!isPicAssetCategorizedImagesObject(raw))
+        return raw;
+    const next = { ...raw };
+    for (const [key, value] of Object.entries(raw)) {
+        if (value == null) {
+            next[key] = value;
+            continue;
+        }
+        if (Array.isArray(value)) {
+            next[key] = value.map(mapper);
+            continue;
+        }
+        if (typeof value === "object") {
+            next[key] = mapper(value);
+        }
+    }
+    return next;
+}
+function picAssetImagesExistFilter() {
+    return {
+        images: { $exists: true, $nin: [null, []] },
+    };
+}
+function picAssetImageMatchesFileId(image, fileId) {
+    if (image instanceof mongodb_1.ObjectId)
+        return image.equals(fileId);
+    if (typeof image === "string")
+        return image === fileId.toString();
+    const oid = picAssetImageFileObjectId(image);
+    return !!oid && oid.equals(fileId);
+}
+function removePicAssetImageByFileId(raw, fileId) {
+    let changed = false;
+    if (Array.isArray(raw)) {
+        const next = raw.filter((image) => {
+            const keep = !picAssetImageMatchesFileId(image, fileId);
+            if (!keep)
+                changed = true;
+            return keep;
+        });
+        return { next, changed };
+    }
+    if (!isPicAssetCategorizedImagesObject(raw)) {
+        return { next: raw, changed: false };
+    }
+    const next = { ...raw };
+    for (const [key, value] of Object.entries(raw)) {
+        if (value == null)
+            continue;
+        if (Array.isArray(value)) {
+            const filtered = value.filter((image) => {
+                const keep = !picAssetImageMatchesFileId(image, fileId);
+                if (!keep)
+                    changed = true;
+                return keep;
+            });
+            next[key] = filtered;
+            continue;
+        }
+        if (typeof value === "object" && picAssetImageMatchesFileId(value, fileId)) {
+            next[key] = key === "other" ? [] : null;
+            changed = true;
+        }
+    }
+    return { next, changed };
+}
+function buildAppendPicAssetImageUpdate(_existingImages, imageDoc, now) {
+    const emptyCats = {
+        plate: null,
+        odometer: null,
+        brand: null,
+        details: null,
+        other: [],
+    };
+    return [
+        {
+            $set: {
+                updatedAt: now,
+                images: {
+                    $cond: [
+                        { $isArray: "$images" },
+                        { $concatArrays: ["$images", [imageDoc]] },
+                        {
+                            $let: {
+                                vars: {
+                                    base: {
+                                        $mergeObjects: [
+                                            emptyCats,
+                                            {
+                                                $cond: [
+                                                    { $eq: [{ $type: "$images" }, "object"] },
+                                                    "$images",
+                                                    {},
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                },
+                                in: {
+                                    $mergeObjects: [
+                                        "$$base",
+                                        {
+                                            other: {
+                                                $concatArrays: [
+                                                    {
+                                                        $cond: [
+                                                            { $isArray: "$$base.other" },
+                                                            "$$base.other",
+                                                            [],
+                                                        ],
+                                                    },
+                                                    [imageDoc],
+                                                ],
+                                            },
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    ];
+}
 function mvProjectIdString(project) {
     const id = project?._id;
     if (id == null)
@@ -1027,7 +1238,7 @@ function buildPicAssetDocument(projectId, parentFolderId, name, now, createdBy) 
         kilometersDriven: null,
         isPresent: true,
         createdBy,
-        images: [],
+        images: emptyPicAssetImagesObject(),
         voiceNotes: [],
         isDone: false,
         createdAt: now,
@@ -1196,10 +1407,11 @@ function isDigitalOceanAssetImage(raw) {
     return typeof url === "string" && /(^|[/.])digitaloceanspaces\.com(?:[/:]|$)/i.test(url);
 }
 function dedupePicAssetImageMirrors(raw) {
-    if (!Array.isArray(raw))
+    const list = flattenPicAssetImagesRaw(raw);
+    if (list.length === 0)
         return [];
     const byFilename = new Map();
-    raw.forEach((item, index) => {
+    list.forEach((item, index) => {
         const url = item && typeof item === "object" ? item.url : null;
         if (typeof url !== "string")
             return;
@@ -1212,23 +1424,23 @@ function dedupePicAssetImageMirrors(raw) {
         else
             byFilename.set(filename, [index]);
     });
-    const keep = new Set(raw.map((_, index) => index));
+    const keep = new Set(list.map((_, index) => index));
     for (const indexes of byFilename.values()) {
         if (indexes.length < 2)
             continue;
-        const preferred = indexes.find((index) => isDigitalOceanAssetImage(raw[index])) ??
+        const preferred = indexes.find((index) => isDigitalOceanAssetImage(list[index])) ??
             indexes[0];
-        if (!isDigitalOceanAssetImage(raw[preferred]))
+        if (!isDigitalOceanAssetImage(list[preferred]))
             continue;
         for (const index of indexes) {
             if (index !== preferred)
                 keep.delete(index);
         }
     }
-    return raw.filter((_, index) => keep.has(index));
+    return list.filter((_, index) => keep.has(index));
 }
 function serializePicAssetImages(raw) {
-    if (!Array.isArray(raw))
+    if (!Array.isArray(raw) && !isPicAssetCategorizedImagesObject(raw))
         return [];
     const out = [];
     for (const item of dedupePicAssetImageMirrors(raw)) {
@@ -1347,6 +1559,39 @@ function serializePicAssetVoiceNotes(raw) {
     return out;
 }
 function normalizePicAssetMediaArrayForPatch(raw, field) {
+    if (field === "images" && isPicAssetCategorizedImagesObject(raw)) {
+        const out = { ...emptyPicAssetImagesObject() };
+        for (const [key, value] of Object.entries(raw)) {
+            if (value == null) {
+                out[key] = null;
+                continue;
+            }
+            if (Array.isArray(value)) {
+                out[key] = normalizePicAssetMediaArrayForPatch(value, field);
+                continue;
+            }
+            if (typeof value === "object") {
+                const one = normalizePicAssetMediaArrayForPatch([value], field);
+                out[key] = Array.isArray(one) && one.length > 0 ? one[0] : null;
+                continue;
+            }
+            out[key] = null;
+        }
+        for (const key of Object.keys(raw)) {
+            if (!(key in out)) {
+                const value = raw[key];
+                if (value == null)
+                    out[key] = null;
+                else if (Array.isArray(value))
+                    out[key] = normalizePicAssetMediaArrayForPatch(value, field);
+                else if (typeof value === "object") {
+                    const one = normalizePicAssetMediaArrayForPatch([value], field);
+                    out[key] = Array.isArray(one) && one.length > 0 ? one[0] : null;
+                }
+            }
+        }
+        return out;
+    }
     if (!Array.isArray(raw)) {
         throw new common_1.BadRequestException(`${field} must be an array`);
     }
@@ -1871,7 +2116,7 @@ async function syncPicImagesIncludeInReportFromGridFsIds(db, projectId, fileIds,
         .find({
         projectId,
         ...MV_PHOTO_FOLDER_FILTER,
-        images: { $exists: true, $ne: [] },
+        ...picAssetImagesExistFilter(),
     })
         .project({ images: 1 })
         .toArray();
@@ -1880,9 +2125,12 @@ async function syncPicImagesIncludeInReportFromGridFsIds(db, projectId, fileIds,
     const now = new Date();
     const ops = [];
     for (const folder of folders) {
-        const images = Array.isArray(folder.images) ? folder.images : [];
+        const imagesRaw = folder.images;
+        const flat = flattenPicAssetImagesRaw(imagesRaw);
+        if (flat.length === 0)
+            continue;
         let changed = false;
-        const nextImages = images.map((image) => {
+        const nextImages = mapPicAssetImagesStructure(imagesRaw, (image) => {
             const fileId = picAssetImageFileObjectId(image);
             if (!fileId || !idSet.has(fileId.toString()))
                 return image;
@@ -1918,12 +2166,13 @@ async function syncPicImagesIncludeInReportFromGridFsIds(db, projectId, fileIds,
     }
 }
 async function syncGridFsIncludeInReportFromPicImages(db, projectId, picAssetId, images) {
-    if (!Array.isArray(images) || images.length === 0)
+    const list = flattenPicAssetImagesRaw(images);
+    if (list.length === 0)
         return;
     const col = db.collection(collections_2.MV_FILES_FILES_COLLECTION);
     const now = new Date();
     const ops = [];
-    for (const image of images) {
+    for (const image of list) {
         const includeInReport = picAssetImageIncludeInReport(image);
         const fileId = picAssetImageFileObjectId(image);
         if (fileId) {
@@ -2320,7 +2569,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
         .find({
         projectId,
         ...MV_PHOTO_FOLDER_FILTER,
-        images: { $exists: true, $ne: [] },
+        ...picAssetImagesExistFilter(),
     })
         .project({
         _id: 1,
@@ -2331,7 +2580,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(db, projectId) {
     const refsByFileId = new Map();
     const externalRefs = [];
     for (const folder of picFolders) {
-        const images = Array.isArray(folder.images) ? folder.images : [];
+        const images = flattenPicAssetImagesRaw(folder.images);
         images.forEach((image, imageIndex) => {
             const fileId = picAssetImageFileObjectId(image);
             const folderName = sanitizeUploadedPathPart(folder.name || "asset");
@@ -3702,7 +3951,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                                 $cond: [
                                     { $gte: [{ $ifNull: ["$imageCount", -1] }, 0] },
                                     { $max: [0, { $floor: "$imageCount" }] },
-                                    { $size: { $ifNull: ["$images", []] } },
+                                    mongoPicAssetImagesCount("$images"),
                                 ],
                             },
                         },
@@ -3720,9 +3969,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 {
                     $project: {
                         _id: 1,
-                        valuationAccountImageCount: {
-                            $size: { $ifNull: ["$valuationAccountingWorkspace.images", []] },
-                        },
+                        valuationAccountImageCount: mongoSafeArraySize("$valuationAccountingWorkspace.images"),
                     },
                 },
             ])
@@ -3737,9 +3984,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 {
                     $project: {
                         _id: 1,
-                        clientDocumentImageCount: {
-                            $size: { $ifNull: ["$clientDocumentsWorkspace.images", []] },
-                        },
+                        clientDocumentImageCount: mongoSafeArraySize("$clientDocumentsWorkspace.images"),
                     },
                 },
             ])
@@ -4097,8 +4342,8 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 { $match: { projectId: _id, ...MV_PHOTO_FOLDER_FILTER } },
                 {
                     $addFields: {
-                        imageCount: { $size: { $ifNull: ["$images", []] } },
-                        voiceNoteCount: { $size: { $ifNull: ["$voiceNotes", []] } },
+                        imageCount: mongoPicAssetImagesCount("$images"),
+                        voiceNoteCount: mongoSafeArraySize("$voiceNotes"),
                     },
                 },
                 { $project: { images: 0, voiceNotes: 0 } },
@@ -4628,6 +4873,26 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             };
         }
         if (isPicUnderPhotos && parentId && options?.kind !== "folder") {
+            const existingAsset = await db.collection(collections_3.ASSETS_COLLECTION).findOne({
+                projectId: pid,
+                parent: parentId,
+                name: n,
+                ...MV_PHOTO_FOLDER_FILTER,
+            });
+            if (existingAsset) {
+                const tCreated = existingAsset.createdAt ?? existingAsset.importedAt ?? existingAsset.updatedAt;
+                return {
+                    _id: existingAsset._id.toString(),
+                    projectId: existingAsset.projectId.toString(),
+                    parent: existingAsset.parent.toString(),
+                    name: existingAsset.name ?? "",
+                    createdAt: tCreated instanceof Date && !Number.isNaN(tCreated.getTime())
+                        ? tCreated.toISOString()
+                        : existingAsset.updatedAt.toISOString(),
+                    updatedAt: existingAsset.updatedAt.toISOString(),
+                    picAsset: serializePicAsset(existingAsset),
+                };
+            }
             const duplicateFolder = (await db.collection(collections_2.MV_SUBPROJECTS_COLLECTION).findOne({
                 projectId: pid,
                 name: n,
@@ -5240,7 +5505,7 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         if (!nextPic)
             throw new common_1.NotFoundException("photo folder asset not found");
         if (b.images !== undefined) {
-            await syncGridFsIncludeInReportFromPicImages(db, pid, picId, Array.isArray(nextPic.images) ? nextPic.images : []);
+            await syncGridFsIncludeInReportFromPicImages(db, pid, picId, nextPic.images);
         }
         const subForResponse = folderMeta ??
             (await sp.findOne({ _id: sid, projectId: pid })) ??
@@ -6169,20 +6434,16 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                 imageKey = uploaded.key;
             }
             const now = new Date();
-            await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: targetPicOid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, {
-                $push: {
-                    images: {
-                        _id: new mongodb_1.ObjectId(),
-                        url: imageUrl,
-                        publicId: imageKey,
-                        createdAt: now,
-                        mediaType: "image",
-                        mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
-                        includeInReport: moveDoc.metadata?.includeInReport !== false,
-                    },
-                },
-                $set: { updatedAt: now },
-            });
+            const imageDoc = {
+                _id: new mongodb_1.ObjectId(),
+                url: imageUrl,
+                publicId: imageKey,
+                createdAt: now,
+                mediaType: "image",
+                mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
+                includeInReport: moveDoc.metadata?.includeInReport !== false,
+            };
+            await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: targetPicOid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, buildAppendPicAssetImageUpdate(null, imageDoc, now));
             if (existingSpacesKey) {
                 await col.deleteOne({ _id: oidMoving });
             }
@@ -6479,20 +6740,16 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                     this.logger.error(`uploadProjectFiles Spaces (asset image): ${err instanceof Error ? err.message : String(err)}`);
                     throw new common_1.BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
                 }
-                await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, {
-                    $push: {
-                        images: {
-                            _id: imageId,
-                            url: uploaded.url,
-                            publicId: uploaded.key,
-                            createdAt: now,
-                            mediaType: "image",
-                            mimeType: metadata.mimeType,
-                            includeInReport: true,
-                        },
-                    },
-                    $set: { updatedAt: now },
-                });
+                const imageDoc = {
+                    _id: imageId,
+                    url: uploaded.url,
+                    publicId: uploaded.key,
+                    createdAt: now,
+                    mediaType: "image",
+                    mimeType: metadata.mimeType,
+                    includeInReport: true,
+                };
+                await db.collection(collections_3.ASSETS_COLLECTION).updateOne({ _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, buildAppendPicAssetImageUpdate(null, imageDoc, now));
                 return mapStoredFileDoc({
                     _id: imageId,
                     filename: fileName,
@@ -6633,10 +6890,31 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         else {
             await this.getFilesBucket(db).delete(fid);
         }
-        await db.collection(collections_3.ASSETS_COLLECTION).updateMany({ projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, {
-            $pull: { images: { $in: [fid, fid.toString()] } },
-            $set: { updatedAt: new Date() },
-        });
+        const pa = db.collection(collections_3.ASSETS_COLLECTION);
+        const folders = await pa
+            .find({
+            projectId: pid,
+            ...MV_PHOTO_FOLDER_FILTER,
+            ...picAssetImagesExistFilter(),
+        })
+            .project({ images: 1 })
+            .toArray();
+        const now = new Date();
+        const ops = [];
+        for (const folder of folders) {
+            const { next, changed } = removePicAssetImageByFileId(folder.images, fid);
+            if (!changed)
+                continue;
+            ops.push({
+                updateOne: {
+                    filter: { _id: folder._id, projectId: pid },
+                    update: { $set: { images: next, updatedAt: now } },
+                },
+            });
+        }
+        if (ops.length > 0) {
+            await pa.bulkWrite(ops, { ordered: false });
+        }
         return { ok: true };
     }
     async listSheets(projectId, ctx, subProjectId) {
@@ -6666,9 +6944,9 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                     updatedAt: 1,
                     rowCount: {
                         $cond: {
-                            if: { $gt: [{ $size: { $ifNull: ["$rowValues", []] } }, 0] },
-                            then: { $size: "$rowValues" },
-                            else: { $size: { $ifNull: ["$rows", []] } },
+                            if: { $gt: [mongoSafeArraySize("$rowValues"), 0] },
+                            then: mongoSafeArraySize("$rowValues"),
+                            else: mongoSafeArraySize("$rows"),
                         },
                     },
                 },

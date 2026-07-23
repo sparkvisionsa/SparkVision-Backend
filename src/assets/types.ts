@@ -25,7 +25,7 @@ export interface MvPhotoFolderAssetFields {
   /** صف استيراد/جدول ومجلد معاينة صور: الافتراضي ‎true‎ عند الإنشاء في ‎MongoDB‎ */
   isDone?: boolean | null;
   createdBy?: ObjectId | null;
-  images?: unknown[];
+  images?: unknown;
   voiceNotes?: ObjectId[] | unknown[];
 }
 

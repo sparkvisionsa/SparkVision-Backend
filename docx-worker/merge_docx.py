@@ -73,9 +73,13 @@ IMAGE_BOOKMARKS: dict[str, dict[str, Any]] = {
 }
 CLIENT_DOCS_IMAGES_PER_ROW = 2
 CLIENT_DOCS_IMAGES_PER_PAGE = 4
-# مرفق مستندات العميل: الشبكة تملأ ~95% من ارتفاع المحتوى بعد العنوان، مع ~10px هامش سفلي.
-CLIENT_DOCS_CONTENT_HEIGHT_RATIO = 0.95
-CLIENT_DOCS_BOTTOM_MARGIN_PX = 10
+# مرفق 3 (مستندات العميل): أقصى ملء للصفحة — هوامش شبه معدومة حتى تغلب الصور.
+CLIENT_DOCS_CONTENT_WIDTH_RATIO = 0.99
+CLIENT_DOCS_CONTENT_HEIGHT_RATIO = 0.995
+CLIENT_DOCS_BOTTOM_MARGIN_PX = 0
+CLIENT_DOCS_GAP_PX = 1
+# احتياطي علوي ضئيل لأي عنوان مرفق متبقٍ في القالب (بدل ~0.65 بوصة الافتراضي).
+CLIENT_DOCS_TITLE_RESERVE_PX = 8
 
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
@@ -87,19 +91,21 @@ EMU_PER_INCH = 914400
 PIXEL_DXA = 15
 PIXEL_EMU = int(EMU_PER_INCH / 96)
 CLIENT_DOCS_BOTTOM_MARGIN_EMU = PIXEL_EMU * CLIENT_DOCS_BOTTOM_MARGIN_PX
+CLIENT_DOCS_GAP_DXA = PIXEL_DXA * CLIENT_DOCS_GAP_PX
+CLIENT_DOCS_GAP_EMU = PIXEL_EMU * CLIENT_DOCS_GAP_PX
+CLIENT_DOCS_TITLE_RESERVE_EMU = PIXEL_EMU * CLIENT_DOCS_TITLE_RESERVE_PX
 IMAGE_HORIZONTAL_MARGIN_PX = 3
 IMAGE_HORIZONTAL_MARGIN_DXA = PIXEL_DXA * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_CONTENT_WIDTH_RATIO = 0.95
 ASSET_IMAGE_GAP_DXA = IMAGE_HORIZONTAL_MARGIN_DXA
 ASSET_IMAGE_GAP_EMU = IMAGE_HORIZONTAL_MARGIN_EMU
-# خلية صور الأصول لا تتجاوز عرضها ~2 بوصة في التقرير؛ 900px تكفي لطباعة حادة حتى عند 400dpi
-# (900/2 = 450dpi) بينما تقلّص زمن فك/إعادة ترميز الصورة وحجم ملف الـ docx الناتج جذرياً مقارنة
-# بإبقاء دقة كاميرا الهاتف الكاملة (غالباً 3000-4000px) لكل صورة — الفارق الرئيسي في بطء الدمج
-# مع مشاريع بها مئات الصور.
-ASSET_IMAGE_MAX_SQUARE_PX = 900
-# صور التقييم أقل عدداً لكنها تُعرض بعرض يصل لـ90% من الصفحة؛ سقف أعلى يحفظ الوضوح.
-VALUATION_IMAGE_MAX_DIMENSION_PX = 1800
+# خلية صور الأصول ~2 بوصة؛ 1800px ≈ 900dpi على العرض — حاد بعد التمطيط عالي الجودة.
+ASSET_IMAGE_MAX_SQUARE_PX = 1800
+# صور حسابات القيمة / المستندات النصية — دقة عالية للطباعة (~300DPI على عرض الصفحة)
+VALUATION_IMAGE_MAX_DIMENSION_PX = 4800
+DOCUMENT_IMAGE_JPEG_QUALITY = 96
+ASSET_IMAGE_JPEG_QUALITY = 95
 DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
@@ -1225,16 +1231,40 @@ def next_image_path(media_paths: set[str]) -> str:
     return f"word/media/image{(max(nums) if nums else 0) + 1}.jpeg"
 
 
-def ensure_jpeg(data: bytes) -> bytes:
+def ensure_jpeg(data: bytes, *, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
+    """يضمن JPEG صالحاً للتضمين مع الحفاظ على الحدة (subsampling=0 للنصوص/الأرقام)."""
     try:
         img = Image.open(io.BytesIO(data))
+        # تجنّب إعادة الترميز إن كانت JPEG جاهزة — يقلل فقدان الجودة عبر الأجيال
+        if img.format == "JPEG" and img.mode in ("RGB", "L"):
+            return data
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         out = io.BytesIO()
-        img.save(out, format="JPEG", quality=88, optimize=True)
+        img.save(
+            out,
+            format="JPEG",
+            quality=max(80, min(98, int(quality))),
+            optimize=True,
+            subsampling=0,
+        )
         return out.getvalue()
     except Exception:
         return data
+
+
+def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    out = io.BytesIO()
+    img.save(
+        out,
+        format="JPEG",
+        quality=max(80, min(98, int(quality))),
+        optimize=True,
+        subsampling=0,
+    )
+    return out.getvalue()
 
 
 def ensure_content_type(ct_xml: str, media_path: str) -> str:
@@ -1486,20 +1516,21 @@ def write_docx_zip(zin: zipfile.ZipFile, modified: dict[str, bytes]) -> bytes:
 
 
 def downscale_jpeg_bytes(img_bytes: bytes, max_dimension: int) -> bytes:
-    """يحدّ أبعاد الصورة الأطول لأقصى قيمة قبل تضمينها في Word — صور كاميرا الهاتف الأصلية
-    (غالباً 3000-4000px) لا تحتاج هذه الدقة لعرض بعرض صفحة تقرير؛ تقليصها يسرّع الدمج
-    ويقلّص حجم ملف الـ docx الناتج كثيراً بلا أي فرق بصري ملحوظ عند الطباعة أو العرض."""
+    """يحدّ البعد الأطول مع الإبقاء على جودة طباعة عالية (بدون chroma subsampling)."""
     try:
         img = Image.open(io.BytesIO(img_bytes))
+        source_format = img.format
         img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
         width, height = img.size
         longest = max(width, height)
         if longest > max_dimension > 0:
             scale = max_dimension / longest
             img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=90)
-        return out.getvalue()
+            return _save_print_jpeg(img, DOCUMENT_IMAGE_JPEG_QUALITY)
+        if source_format == "JPEG":
+            # ضمن الحد وJPEG أصلاً — أعد البايتات كما هي لتفادي جيل ضغط إضافي
+            return img_bytes
+        return _save_print_jpeg(img, DOCUMENT_IMAGE_JPEG_QUALITY)
     except Exception:
         return img_bytes
 
@@ -1509,6 +1540,7 @@ def crop_to_fill_jpeg_bytes(
     target_width: int,
     target_height: int,
 ) -> bytes:
+    """إرث: قصّ لملء الإطار (cover). صور الأصول تستخدم ‎stretch_to_fill_canvas_jpeg_bytes‎."""
     img = Image.open(io.BytesIO(img_bytes))
     img = img.convert("RGB")
     width, height = img.size
@@ -1529,9 +1561,96 @@ def crop_to_fill_jpeg_bytes(
             (max(1, int(cropped.width * scale)), max(1, int(cropped.height * scale))),
             Image.LANCZOS,
         )
-    out = io.BytesIO()
-    cropped.save(out, format="JPEG", quality=90)
-    return out.getvalue()
+    return _save_print_jpeg(cropped, ASSET_IMAGE_JPEG_QUALITY)
+
+
+def _canvas_pixel_size_for_cell(
+    target_width_emu: int,
+    target_height_emu: int,
+    max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+) -> tuple[int, int]:
+    """أبعاد بكسل للوحة بنفس نسبة الخلية، مع حد أقصى للضلع الأطول."""
+    tw = max(1, int(target_width_emu))
+    th = max(1, int(target_height_emu))
+    side = max(64, int(max_side_px))
+    if tw >= th:
+        canvas_w = side
+        canvas_h = max(1, int(round(side * th / tw)))
+    else:
+        canvas_h = side
+        canvas_w = max(1, int(round(side * tw / th)))
+    return canvas_w, canvas_h
+
+
+def _high_quality_stretch(img: Image.Image, canvas_w: int, canvas_h: int) -> Image.Image:
+    """
+    تمطيط (stretch) عالي الجودة إلى مقاس ثابت — مثل Fit Content to Frame / Free Transform:
+    محورا العرض والارتفاع يُعدَّلان بشكل مستقل لملء الإطار بالكامل بدون قصّ وبدون فراغات.
+    التصغير الكبير يتم على خطوات LANCZOS لتقليل التشويش قبل الضبط النهائي.
+    """
+    work = img
+    # خطوات تصغير عندما المصدر أكبر بكثير من الهدف على كلا المحورين
+    while work.width > canvas_w * 2 and work.height > canvas_h * 2:
+        work = work.resize(
+            (max(canvas_w, work.width // 2), max(canvas_h, work.height // 2)),
+            Image.LANCZOS,
+        )
+    if work.size != (canvas_w, canvas_h):
+        work = work.resize((canvas_w, canvas_h), Image.LANCZOS)
+    return work
+
+
+def stretch_to_fill_canvas_jpeg_bytes(
+    img_bytes: bytes,
+    target_width_emu: int,
+    target_height_emu: int,
+    *,
+    max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+    quality: int = ASSET_IMAGE_JPEG_QUALITY,
+) -> bytes:
+    """
+    توحيد مساحة صور الأصول بدون اقتطاع وبدون هوامش داخلية:
+    - الصورة كاملة تُمطَّط لتملأ الخلية 100%
+    - كل الخلايا بنفس المقاس
+    - إعادة عيّنة LANCZOS متعددة الخطوات (جودة برامج الصور المحترفة)
+    """
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        img = img.convert("RGB")
+    except Exception:
+        return img_bytes
+
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        return img_bytes
+
+    canvas_w, canvas_h = _canvas_pixel_size_for_cell(
+        target_width_emu,
+        target_height_emu,
+        max_side_px,
+    )
+    stretched = _high_quality_stretch(img, canvas_w, canvas_h)
+    return _save_print_jpeg(stretched, quality)
+
+
+# توافق مع الاستدعاءات/الاختبارات القديمة إن وُجدت
+def fit_contain_to_canvas_jpeg_bytes(
+    img_bytes: bytes,
+    target_width_emu: int,
+    target_height_emu: int,
+    *,
+    max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+    quality: int = ASSET_IMAGE_JPEG_QUALITY,
+    fill_rgb: tuple[int, int, int] = (255, 255, 255),
+) -> bytes:
+    del fill_rgb  # لم يعد مستخدماً — التمطيط يملأ الإطار
+    return stretch_to_fill_canvas_jpeg_bytes(
+        img_bytes,
+        target_width_emu,
+        target_height_emu,
+        max_side_px=max_side_px,
+        quality=quality,
+    )
 
 
 def package_base_for_rels(rels_name: str) -> str:
@@ -1871,9 +1990,18 @@ def scaled_image_size_for_width_only(img_bytes: bytes, target_width_emu: int) ->
     return cx, cy
 
 
-def document_content_box_emu(doc) -> tuple[int, int]:
+def document_content_box_emu(
+    doc,
+    *,
+    title_reserve_emu: int | None = None,
+) -> tuple[int, int]:
     content_width, content_height = document_page_inner_box_emu(doc)
-    content_height = int(content_height - int(0.65 * EMU_PER_INCH))
+    reserve = (
+        int(title_reserve_emu)
+        if title_reserve_emu is not None
+        else int(0.65 * EMU_PER_INCH)
+    )
+    content_height = int(content_height - max(0, reserve))
     if content_height <= 0:
         content_height = int(9.0 * EMU_PER_INCH)
     return content_width, content_height
@@ -1888,8 +2016,14 @@ def document_cell_dimensions_emu(
     fill_content_height: bool = False,
     content_height_ratio: float = 1.0,
     bottom_margin_emu: int = 0,
+    content_width_ratio: float = IMAGE_CONTENT_WIDTH_RATIO,
+    gap_emu: int = ASSET_IMAGE_GAP_EMU,
+    title_reserve_emu: int | None = None,
 ) -> tuple[int, int]:
-    _content_width, content_height = document_content_box_emu(doc)
+    _content_width, content_height = document_content_box_emu(
+        doc,
+        title_reserve_emu=title_reserve_emu,
+    )
     if fill_content_height:
         usable_height = max(
             1,
@@ -1900,9 +2034,11 @@ def document_cell_dimensions_emu(
         page_width, _page_height = document_physical_page_box_emu(doc)
     else:
         page_width = section_metrics[0]
-    available_width = max(1, int(page_width * IMAGE_CONTENT_WIDTH_RATIO))
-    width_fit = max(1, (available_width - (images_per_row - 1) * ASSET_IMAGE_GAP_EMU) // images_per_row)
-    height_fit = max(1, (content_height - (image_rows_per_page - 1) * ASSET_IMAGE_GAP_EMU) // image_rows_per_page)
+    width_ratio = min(1.0, max(0.5, float(content_width_ratio)))
+    gap = max(0, int(gap_emu))
+    available_width = max(1, int(page_width * width_ratio))
+    width_fit = max(1, (available_width - (images_per_row - 1) * gap) // images_per_row)
+    height_fit = max(1, (content_height - (image_rows_per_page - 1) * gap) // image_rows_per_page)
     if fill_content_height:
         # مستندات العميل: املأ الارتفاع المتاح دون إجبار الخلية على مربع.
         return width_fit, height_fit
@@ -1934,8 +2070,12 @@ def make_docx_image_table_element(
     content_height_ratio: float = 1.0,
     bottom_margin_emu: int = 0,
     contain_images: bool = False,
+    content_width_ratio: float = IMAGE_CONTENT_WIDTH_RATIO,
+    gap_dxa: int = ASSET_IMAGE_GAP_DXA,
+    gap_emu: int = ASSET_IMAGE_GAP_EMU,
+    title_reserve_emu: int | None = None,
 ) -> tuple[Any, int]:
-    from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Emu, Pt
 
@@ -1948,24 +2088,30 @@ def make_docx_image_table_element(
         fill_content_height=fill_content_height,
         content_height_ratio=content_height_ratio,
         bottom_margin_emu=bottom_margin_emu,
+        content_width_ratio=content_width_ratio,
+        gap_emu=gap_emu,
+        title_reserve_emu=title_reserve_emu,
     )
     cell_width_dxa = max(1, int(cell_width_emu / EMU_PER_INCH * 1440))
+    width_ratio = min(1.0, max(0.5, float(content_width_ratio)))
+    gap_dxa_val = max(0, int(gap_dxa))
+    gap_emu_val = max(0, int(gap_emu))
 
     table = doc.add_table(rows=rows, cols=images_per_row)
     table.alignment = WD_TABLE_ALIGNMENT.LEFT
     table.autofit = False
     set_docx_table_borders_none(table)
-    set_docx_table_cell_spacing(table, ASSET_IMAGE_GAP_DXA)
+    set_docx_table_cell_spacing(table, gap_dxa_val)
     set_docx_table_width(
         table,
-        cell_width_emu * images_per_row + (images_per_row - 1) * ASSET_IMAGE_GAP_EMU,
+        cell_width_emu * images_per_row + (images_per_row - 1) * gap_emu_val,
     )
     if section_metrics is None:
         page_width, _page_height = document_physical_page_box_emu(doc)
         left_margin, _right_margin, _top_margin, _bottom_margin = document_section_margins_emu(doc)
     else:
         page_width, _page_height, left_margin, _right_margin, _top_margin, _bottom_margin = section_metrics
-    physical_side_margin = max(0, int(page_width * (1 - IMAGE_CONTENT_WIDTH_RATIO) / 2))
+    physical_side_margin = max(0, int(page_width * (1 - width_ratio) / 2))
     set_docx_table_indent(table, physical_side_margin - left_margin)
 
     inserted = 0
@@ -1984,6 +2130,7 @@ def make_docx_image_table_element(
             tc_w.set(docx_qn("w:type"), "dxa")
             tc_pr.append(tc_w)
             set_docx_cell_margins(cell, 0)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
             para = cell.paragraphs[0]
             para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2005,8 +2152,9 @@ def make_docx_image_table_element(
                         height=Emu(fit_h),
                     )
                 else:
+                    # صور الأصول: تمطيط عالي الجودة لملء الخلية بالكامل (بدون قصّ وبدون فراغات)
                     img_buf = io.BytesIO(
-                        crop_to_fill_jpeg_bytes(
+                        stretch_to_fill_canvas_jpeg_bytes(
                             images[img_index],
                             cell_width_emu,
                             image_emu,
@@ -2120,6 +2268,10 @@ def replace_image_bookmark_with_docx_elements(
                 content_height_ratio=CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0,
                 bottom_margin_emu=CLIENT_DOCS_BOTTOM_MARGIN_EMU if fill_client else 0,
                 contain_images=fill_client,
+                content_width_ratio=CLIENT_DOCS_CONTENT_WIDTH_RATIO if fill_client else IMAGE_CONTENT_WIDTH_RATIO,
+                gap_dxa=CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
+                gap_emu=CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
+                title_reserve_emu=CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None,
             )
             elements.append(table_elem)
             inserted += count

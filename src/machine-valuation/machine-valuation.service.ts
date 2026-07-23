@@ -1018,6 +1018,243 @@ function toSafeNonNegativeInt(value: unknown): number {
   return 0;
 }
 
+/**
+ * ‎$size‎ يفشل إن كان الحقل object وليس array.
+ * ‎$ifNull‎ لا يكفي لأنه يُرجع الكائن كما هو. نتحقق بـ ‎$isArray‎ أولاً.
+ */
+function mongoSafeArraySize(fieldPath: string): Record<string, unknown> {
+  return {
+    $cond: [{ $isArray: fieldPath }, { $size: fieldPath }, 0],
+  };
+}
+
+/**
+ * عدّ صور الأصل سواء كانت مصفوفة قديمة أو كائن مصنّف:
+ * ‎{ plate: {...}|null, other: [...], … }‎
+ */
+function mongoPicAssetImagesCount(fieldPath: string = "$images"): Record<string, unknown> {
+  return {
+    $cond: [
+      { $isArray: fieldPath },
+      { $size: fieldPath },
+      {
+        $cond: [
+          { $eq: [{ $type: fieldPath }, "object"] },
+          {
+            $reduce: {
+              input: { $objectToArray: fieldPath },
+              initialValue: 0,
+              in: {
+                $add: [
+                  "$$value",
+                  {
+                    $switch: {
+                      branches: [
+                        {
+                          case: { $isArray: "$$this.v" },
+                          then: { $size: "$$this.v" },
+                        },
+                        {
+                          case: {
+                            $and: [
+                              { $ne: ["$$this.v", null] },
+                              { $eq: [{ $type: "$$this.v" }, "object"] },
+                            ],
+                          },
+                          then: 1,
+                        },
+                      ],
+                      default: 0,
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          0,
+        ],
+      },
+    ],
+  };
+}
+
+function emptyPicAssetImagesObject(): Record<string, unknown> {
+  return {
+    plate: null,
+    odometer: null,
+    brand: null,
+    details: null,
+    other: [],
+  };
+}
+
+/**
+ * يسطّح ‎images‎ إلى قائمة وسائط واحدة سواء كانت:
+ * - مصفوفة قديمة ‎[...]‎
+ * - أو كائن مصنّف ‎{ plate: obj|null, other: [...], … }‎
+ */
+function flattenPicAssetImagesRaw(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== "object") return [];
+  const out: unknown[] = [];
+  for (const value of Object.values(raw as Record<string, unknown>)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item != null) out.push(item);
+      }
+      continue;
+    }
+    if (typeof value === "object") out.push(value);
+  }
+  return out;
+}
+
+function isPicAssetCategorizedImagesObject(raw: unknown): raw is Record<string, unknown> {
+  return !!raw && typeof raw === "object" && !Array.isArray(raw);
+}
+
+/** يطبّق دالة على كل عنصر وسائط مع الحفاظ على شكل المصفوفة أو الكائن المصنّف. */
+function mapPicAssetImagesStructure(
+  raw: unknown,
+  mapper: (image: unknown) => unknown,
+): unknown {
+  if (Array.isArray(raw)) return raw.map(mapper);
+  if (!isPicAssetCategorizedImagesObject(raw)) return raw;
+  const next: Record<string, unknown> = { ...raw };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value == null) {
+      next[key] = value;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      next[key] = value.map(mapper);
+      continue;
+    }
+    if (typeof value === "object") {
+      next[key] = mapper(value);
+    }
+  }
+  return next;
+}
+
+function picAssetImagesExistFilter(): Record<string, unknown> {
+  return {
+    images: { $exists: true, $nin: [null, []] },
+  };
+}
+
+function picAssetImageMatchesFileId(image: unknown, fileId: ObjectId): boolean {
+  if (image instanceof ObjectId) return image.equals(fileId);
+  if (typeof image === "string") return image === fileId.toString();
+  const oid = picAssetImageFileObjectId(image);
+  return !!oid && oid.equals(fileId);
+}
+
+/** يزيل صورة مرتبطة بـ fileId مع الحفاظ على شكل المصفوفة أو الكائن المصنّف. */
+function removePicAssetImageByFileId(raw: unknown, fileId: ObjectId): { next: unknown; changed: boolean } {
+  let changed = false;
+  if (Array.isArray(raw)) {
+    const next = raw.filter((image) => {
+      const keep = !picAssetImageMatchesFileId(image, fileId);
+      if (!keep) changed = true;
+      return keep;
+    });
+    return { next, changed };
+  }
+  if (!isPicAssetCategorizedImagesObject(raw)) {
+    return { next: raw, changed: false };
+  }
+  const next: Record<string, unknown> = { ...raw };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      const filtered = value.filter((image) => {
+        const keep = !picAssetImageMatchesFileId(image, fileId);
+        if (!keep) changed = true;
+        return keep;
+      });
+      next[key] = filtered;
+      continue;
+    }
+    if (typeof value === "object" && picAssetImageMatchesFileId(value, fileId)) {
+      next[key] = key === "other" ? [] : null;
+      changed = true;
+    }
+  }
+  return { next, changed };
+}
+
+/**
+ * إضافة صورة جديدة بأمان ذري (aggregation pipeline):
+ * - مصفوفة قديمة ← concat إلى images
+ * - كائن مصنّف (حتى لو other=null) ← يضمن other كمصفوفة ثم يضيف إليها
+ * يتجنّب فشل ‎$push‎ عندما يكون ‎images.other‎ من نوع null.
+ */
+function buildAppendPicAssetImageUpdate(
+  _existingImages: unknown,
+  imageDoc: Record<string, unknown>,
+  now: Date,
+): Record<string, unknown>[] {
+  const emptyCats = {
+    plate: null,
+    odometer: null,
+    brand: null,
+    details: null,
+    other: [] as unknown[],
+  };
+  return [
+    {
+      $set: {
+        updatedAt: now,
+        images: {
+          $cond: [
+            { $isArray: "$images" },
+            { $concatArrays: ["$images", [imageDoc]] },
+            {
+              $let: {
+                vars: {
+                  base: {
+                    $mergeObjects: [
+                      emptyCats,
+                      {
+                        $cond: [
+                          { $eq: [{ $type: "$images" }, "object"] },
+                          "$images",
+                          {},
+                        ],
+                      },
+                    ],
+                  },
+                },
+                in: {
+                  $mergeObjects: [
+                    "$$base",
+                    {
+                      other: {
+                        $concatArrays: [
+                          {
+                            $cond: [
+                              { $isArray: "$$base.other" },
+                              "$$base.other",
+                              [],
+                            ],
+                          },
+                          [imageDoc],
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  ];
+}
+
 function mvProjectIdString(project: { _id?: unknown }): string | null {
   const id = project?._id;
   if (id == null) return null;
@@ -1135,7 +1372,7 @@ function buildPicAssetDocument(
     kilometersDriven: null,
     isPresent: true,
     createdBy,
-    images: [],
+    images: emptyPicAssetImagesObject(),
     voiceNotes: [],
     isDone: false,
     createdAt: now,
@@ -1304,7 +1541,9 @@ function coerceNumberishField(v: unknown): number | string | null {
 }
 
 /**
- * ‎images‎ في ‎DB‎: ‎ObjectId[]‎ (GridFS قديم) أو كائنات وسائط كاملة ‎{ url, publicId, mediaType, … }‎ من التطبيق.
+ * ‎images‎ في ‎DB‎:
+ * - مصفوفة قديمة ‎ObjectId[]‎ / كائنات وسائط
+ * - أو كائن مصنّف ‎{ plate, odometer, brand, details, other }‎ (قيمة واحدة أو مصفوفة لكل فئة)
  */
 function assetImageOriginalFilename(rawUrl: string): string | null {
   try {
@@ -1329,9 +1568,10 @@ function isDigitalOceanAssetImage(raw: unknown): boolean {
  * DigitalOcean فقط (والأقدم عند وجود نسخ DO متعددة) حتى لا يصل التكرار للواجهة.
  */
 function dedupePicAssetImageMirrors(raw: unknown): unknown[] {
-  if (!Array.isArray(raw)) return [];
+  const list = flattenPicAssetImagesRaw(raw);
+  if (list.length === 0) return [];
   const byFilename = new Map<string, number[]>();
-  raw.forEach((item, index) => {
+  list.forEach((item, index) => {
     const url = item && typeof item === "object" ? (item as { url?: unknown }).url : null;
     if (typeof url !== "string") return;
     const filename = assetImageOriginalFilename(url);
@@ -1341,20 +1581,20 @@ function dedupePicAssetImageMirrors(raw: unknown): unknown[] {
     else byFilename.set(filename, [index]);
   });
 
-  const keep = new Set(raw.map((_, index) => index));
+  const keep = new Set(list.map((_, index) => index));
   for (const indexes of byFilename.values()) {
     if (indexes.length < 2) continue;
     const preferred =
-      indexes.find((index) => isDigitalOceanAssetImage(raw[index])) ??
+      indexes.find((index) => isDigitalOceanAssetImage(list[index])) ??
       indexes[0];
     // لا ندمج ملفات متشابهة الاسم من نفس المصدر؛ الحذف خاص بنسخ الترحيل حيث
     // توجد نسخة DigitalOcean مؤكدة للصورة.
-    if (!isDigitalOceanAssetImage(raw[preferred])) continue;
+    if (!isDigitalOceanAssetImage(list[preferred])) continue;
     for (const index of indexes) {
       if (index !== preferred) keep.delete(index);
     }
   }
-  return raw.filter((_, index) => keep.has(index));
+  return list.filter((_, index) => keep.has(index));
 }
 
 function serializePicAssetImages(raw: unknown): Array<
@@ -1372,7 +1612,8 @@ function serializePicAssetImages(raw: unknown): Array<
       includeInReport?: boolean;
     }
 > {
-  if (!Array.isArray(raw)) return [];
+  // يقبل المصفوفة القديمة والكائن المصنّف؛ الواجهة تبقى مصفوفة مسطّحة.
+  if (!Array.isArray(raw) && !isPicAssetCategorizedImagesObject(raw)) return [];
   const out: Array<
     | { fileId: string; url?: undefined; publicId?: string; _id?: string; createdAt?: string; includeInReport?: boolean }
     | {
@@ -1549,11 +1790,44 @@ function serializePicAssetVoiceNotes(raw: unknown): Array<
 
 /**
  * تخزين ‎DB‎: ‎ObjectId‎ أو كائن وسائط خارجي يحتوي ‎url‎.
+ * يقبل مصفوفة قديمة أو كائن مصنّف ‎{ plate, other, … }‎.
  */
 function normalizePicAssetMediaArrayForPatch(
   raw: unknown,
   field: "images" | "voiceNotes",
-): (ObjectId | Record<string, unknown>)[] {
+): (ObjectId | Record<string, unknown>)[] | Record<string, unknown> {
+  if (field === "images" && isPicAssetCategorizedImagesObject(raw)) {
+    const out: Record<string, unknown> = { ...emptyPicAssetImagesObject() };
+    for (const [key, value] of Object.entries(raw)) {
+      if (value == null) {
+        out[key] = null;
+        continue;
+      }
+      if (Array.isArray(value)) {
+        out[key] = normalizePicAssetMediaArrayForPatch(value, field);
+        continue;
+      }
+      if (typeof value === "object") {
+        const one = normalizePicAssetMediaArrayForPatch([value], field);
+        out[key] = Array.isArray(one) && one.length > 0 ? one[0] : null;
+        continue;
+      }
+      out[key] = null;
+    }
+    // احتفظ بأي مفاتيح فئات إضافية غير القياسية
+    for (const key of Object.keys(raw)) {
+      if (!(key in out)) {
+        const value = raw[key];
+        if (value == null) out[key] = null;
+        else if (Array.isArray(value)) out[key] = normalizePicAssetMediaArrayForPatch(value, field);
+        else if (typeof value === "object") {
+          const one = normalizePicAssetMediaArrayForPatch([value], field);
+          out[key] = Array.isArray(one) && one.length > 0 ? one[0] : null;
+        }
+      }
+    }
+    return out;
+  }
   if (!Array.isArray(raw)) {
     throw new BadRequestException(`${field} must be an array`);
   }
@@ -2153,7 +2427,7 @@ async function syncPicImagesIncludeInReportFromGridFsIds(
     .find({
       projectId,
       ...MV_PHOTO_FOLDER_FILTER,
-      images: { $exists: true, $ne: [] },
+      ...picAssetImagesExistFilter(),
     })
     .project({ images: 1 })
     .toArray();
@@ -2162,9 +2436,11 @@ async function syncPicImagesIncludeInReportFromGridFsIds(
   const now = new Date();
   const ops: AnyBulkWriteOperation<AssetDoc>[] = [];
   for (const folder of folders) {
-    const images = Array.isArray(folder.images) ? folder.images : [];
+    const imagesRaw = folder.images;
+    const flat = flattenPicAssetImagesRaw(imagesRaw);
+    if (flat.length === 0) continue;
     let changed = false;
-    const nextImages = images.map((image) => {
+    const nextImages = mapPicAssetImagesStructure(imagesRaw, (image) => {
       const fileId = picAssetImageFileObjectId(image);
       if (!fileId || !idSet.has(fileId.toString())) return image;
       const current =
@@ -2192,7 +2468,7 @@ async function syncPicImagesIncludeInReportFromGridFsIds(
     ops.push({
       updateOne: {
         filter: { _id: folder._id, projectId },
-        update: { $set: { images: nextImages, updatedAt: now } },
+        update: { $set: { images: nextImages as never, updatedAt: now } },
       },
     });
   }
@@ -2206,14 +2482,15 @@ async function syncGridFsIncludeInReportFromPicImages(
   db: Awaited<ReturnType<typeof getMongoDb>>,
   projectId: ObjectId,
   picAssetId: ObjectId,
-  images: unknown[],
+  images: unknown,
 ): Promise<void> {
-  if (!Array.isArray(images) || images.length === 0) return;
+  const list = flattenPicAssetImagesRaw(images);
+  if (list.length === 0) return;
   const col = db.collection<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>(MV_FILES_FILES_COLLECTION);
   const now = new Date();
   const ops: AnyBulkWriteOperation<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>[] = [];
 
-  for (const image of images) {
+  for (const image of list) {
     const includeInReport = picAssetImageIncludeInReport(image);
     const fileId = picAssetImageFileObjectId(image);
     if (fileId) {
@@ -2756,9 +3033,9 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
     .find({
       projectId,
       ...MV_PHOTO_FOLDER_FILTER,
-      images: { $exists: true, $ne: [] },
+      ...picAssetImagesExistFilter(),
     })
-    .project<{ _id: ObjectId; name?: string | null; images?: unknown[] }>({
+    .project<{ _id: ObjectId; name?: string | null; images?: unknown }>({
       _id: 1,
       name: 1,
       images: 1,
@@ -2778,7 +3055,7 @@ async function backfillPicAssetGridFsImagesAsAssetFiles(
   const externalRefs: ExternalPicAssetImageRef[] = [];
 
   for (const folder of picFolders) {
-    const images = Array.isArray(folder.images) ? folder.images : [];
+    const images = flattenPicAssetImagesRaw(folder.images);
     images.forEach((image, imageIndex) => {
       const fileId = picAssetImageFileObjectId(image);
       const folderName = sanitizeUploadedPathPart(folder.name || "asset");
@@ -4492,7 +4769,7 @@ export class MachineValuationService implements OnModuleInit {
                   $cond: [
                     { $gte: [{ $ifNull: ["$imageCount", -1] }, 0] },
                     { $max: [0, { $floor: "$imageCount" }] },
-                    { $size: { $ifNull: ["$images", []] } },
+                    mongoPicAssetImagesCount("$images"),
                   ],
                 },
               },
@@ -4512,9 +4789,9 @@ export class MachineValuationService implements OnModuleInit {
           {
             $project: {
               _id: 1,
-              valuationAccountImageCount: {
-                $size: { $ifNull: ["$valuationAccountingWorkspace.images", []] },
-              },
+              valuationAccountImageCount: mongoSafeArraySize(
+                "$valuationAccountingWorkspace.images",
+              ),
             },
           },
         ])
@@ -4531,9 +4808,9 @@ export class MachineValuationService implements OnModuleInit {
           {
             $project: {
               _id: 1,
-              clientDocumentImageCount: {
-                $size: { $ifNull: ["$clientDocumentsWorkspace.images", []] },
-              },
+              clientDocumentImageCount: mongoSafeArraySize(
+                "$clientDocumentsWorkspace.images",
+              ),
             },
           },
         ])
@@ -5030,8 +5307,8 @@ export class MachineValuationService implements OnModuleInit {
               { $match: { projectId: _id, ...MV_PHOTO_FOLDER_FILTER } },
               {
                 $addFields: {
-                  imageCount: { $size: { $ifNull: ["$images", []] } },
-                  voiceNoteCount: { $size: { $ifNull: ["$voiceNotes", []] } },
+                  imageCount: mongoPicAssetImagesCount("$images"),
+                  voiceNoteCount: mongoSafeArraySize("$voiceNotes"),
                 },
               },
               { $project: { images: 0, voiceNotes: 0 } },
@@ -5682,6 +5959,28 @@ export class MachineValuationService implements OnModuleInit {
     }
 
     if (isPicUnderPhotos && parentId && options?.kind !== "folder") {
+      const existingAsset = await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
+        projectId: pid,
+        parent: parentId,
+        name: n,
+        ...MV_PHOTO_FOLDER_FILTER,
+      });
+      if (existingAsset) {
+        const tCreated =
+          existingAsset.createdAt ?? existingAsset.importedAt ?? existingAsset.updatedAt;
+        return {
+          _id: existingAsset._id.toString(),
+          projectId: existingAsset.projectId.toString(),
+          parent: existingAsset.parent!.toString(),
+          name: existingAsset.name ?? "",
+          createdAt:
+            tCreated instanceof Date && !Number.isNaN(tCreated.getTime())
+              ? tCreated.toISOString()
+              : existingAsset.updatedAt.toISOString(),
+          updatedAt: existingAsset.updatedAt.toISOString(),
+          picAsset: serializePicAsset(existingAsset as PicAssetMongoDoc),
+        };
+      }
       const duplicateFolder =
         (await db.collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION).findOne({
           projectId: pid,
@@ -6427,7 +6726,7 @@ export class MachineValuationService implements OnModuleInit {
         db,
         pid,
         picId,
-        Array.isArray(nextPic.images) ? nextPic.images : [],
+        nextPic.images,
       );
     }
 
@@ -7611,22 +7910,18 @@ export class MachineValuationService implements OnModuleInit {
       }
 
       const now = new Date();
+      const imageDoc = {
+        _id: new ObjectId(),
+        url: imageUrl,
+        publicId: imageKey,
+        createdAt: now,
+        mediaType: "image",
+        mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
+        includeInReport: moveDoc.metadata?.includeInReport !== false,
+      };
       await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
         { _id: targetPicOid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-        {
-          $push: {
-            images: {
-              _id: new ObjectId(),
-              url: imageUrl,
-              publicId: imageKey,
-              createdAt: now,
-              mediaType: "image",
-              mimeType: moveDoc.metadata?.mimeType || "application/octet-stream",
-              includeInReport: moveDoc.metadata?.includeInReport !== false,
-            },
-          },
-          $set: { updatedAt: now },
-        },
+        buildAppendPicAssetImageUpdate(null, imageDoc, now) as never,
       );
 
       if (existingSpacesKey) {
@@ -8035,22 +8330,18 @@ export class MachineValuationService implements OnModuleInit {
               throw new BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
             }
 
+            const imageDoc = {
+              _id: imageId,
+              url: uploaded.url,
+              publicId: uploaded.key,
+              createdAt: now,
+              mediaType: "image",
+              mimeType: metadata.mimeType,
+              includeInReport: true,
+            };
             await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
               { _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-              {
-                $push: {
-                  images: {
-                    _id: imageId,
-                    url: uploaded.url,
-                    publicId: uploaded.key,
-                    createdAt: now,
-                    mediaType: "image",
-                    mimeType: metadata.mimeType,
-                    includeInReport: true,
-                  },
-                },
-                $set: { updatedAt: now },
-              },
+              buildAppendPicAssetImageUpdate(null, imageDoc, now) as never,
             );
 
             return mapStoredFileDoc({
@@ -8231,13 +8522,30 @@ export class MachineValuationService implements OnModuleInit {
     } else {
       await this.getFilesBucket(db).delete(fid);
     }
-    await db.collection<AssetDoc>(ASSETS_COLLECTION).updateMany(
-      { projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-      {
-        $pull: { images: { $in: [fid, fid.toString()] } },
-        $set: { updatedAt: new Date() },
-      },
-    );
+    const pa = db.collection<AssetDoc>(ASSETS_COLLECTION);
+    const folders = await pa
+      .find({
+        projectId: pid,
+        ...MV_PHOTO_FOLDER_FILTER,
+        ...picAssetImagesExistFilter(),
+      })
+      .project({ images: 1 })
+      .toArray();
+    const now = new Date();
+    const ops: AnyBulkWriteOperation<AssetDoc>[] = [];
+    for (const folder of folders) {
+      const { next, changed } = removePicAssetImageByFileId(folder.images, fid);
+      if (!changed) continue;
+      ops.push({
+        updateOne: {
+          filter: { _id: folder._id, projectId: pid },
+          update: { $set: { images: next as never, updatedAt: now } },
+        },
+      });
+    }
+    if (ops.length > 0) {
+      await pa.bulkWrite(ops, { ordered: false });
+    }
     return { ok: true };
   }
 
@@ -8279,9 +8587,9 @@ export class MachineValuationService implements OnModuleInit {
             updatedAt: 1,
             rowCount: {
               $cond: {
-                if: { $gt: [{ $size: { $ifNull: ["$rowValues", []] } }, 0] },
-                then: { $size: "$rowValues" },
-                else: { $size: { $ifNull: ["$rows", []] } },
+                if: { $gt: [mongoSafeArraySize("$rowValues"), 0] },
+                then: mongoSafeArraySize("$rowValues"),
+                else: mongoSafeArraySize("$rows"),
               },
             },
           },
