@@ -10,6 +10,7 @@ from merge_docx import (
     ASSET_IMAGE_GAP_DXA,
     ASSET_IMAGE_MAX_SQUARE_PX,
     COVER_EDGE_MARGIN_EMU,
+    COVER_EDGE_MARGIN_TWIPS,
     EMU_PER_INCH,
     IMAGE_CONTENT_WIDTH_RATIO,
     IMAGE_HORIZONTAL_MARGIN_DXA,
@@ -365,7 +366,7 @@ def main() -> None:
     assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
     title_runs = matching_runs("تقرير اختبار مباشر")
     assert len(title_runs) >= 1, "report title should fill cover bookmark"
-    # «عنوان» على الغلاف فقط يفرض Tajawal 22pt يمين؛ «عنوانغ» يرث تنسيق الفقرة
+    # «عنوان» على الغلاف فقط يفرض Tajawal 24pt bold يمين؛ «عنوانغ» يرث تنسيق الفقرة
     cover_title_runs = [
         run
         for run in title_runs
@@ -373,12 +374,12 @@ def main() -> None:
         and run.find(w("rPr")).find(w("rFonts")) is not None
         and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "44"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "48"
     ]
-    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 22pt"
+    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 24pt"
     for title_run in cover_title_runs:
         rpr = title_run.find(w("rPr"))
-        assert rpr is not None and rpr.find(w("b")) is None, "cover title should not be bold"
+        assert rpr is not None and rpr.find(w("b")) is not None, "cover title should be bold"
         title_para = title_run
         while title_para is not None and title_para.tag != w("p"):
             title_para = title_para.getparent()
@@ -392,15 +393,20 @@ def main() -> None:
         assert title_ppr.find(w("bidi")) is not None, "cover title must set w:bidi for Arabic RTL"
         title_ind = title_ppr.find(w("ind")) if title_ppr is not None else None
         assert title_ind is not None, "cover title must set right edge indent"
-        # عنوان داخل مربع نص: هامش 12px (180 twips) من إطار المربع
-        assert title_ind.get(f"{{{W_NS}}}right") == "180", "cover title textbox must keep 12px from box edge"
-        assert title_ind.get(f"{{{W_NS}}}start") is None, "cover title must use physical right indent only"
+        # عنوان داخل مربع نص: هامش ~40px من إطار المربع (فيزيائي + start للعربي)
+        assert title_ind.get(f"{{{W_NS}}}right") == str(COVER_EDGE_MARGIN_TWIPS), (
+            "cover title textbox must keep ~40px from box edge"
+        )
+        assert title_ind.get(f"{{{W_NS}}}start") == str(COVER_EDGE_MARGIN_TWIPS), (
+            "cover title must set logical start indent for RTL margin"
+        )
         title_para_rpr = title_ppr.find(w("rPr")) if title_ppr is not None else None
         title_para_fonts = title_para_rpr.find(w("rFonts")) if title_para_rpr is not None else None
         assert title_para_fonts is not None and title_para_fonts.get(f"{{{W_NS}}}cs") == "Tajawal", "cover paragraph must enforce Tajawal"
         title_para_sz = title_para_rpr.find(w("sz")) if title_para_rpr is not None else None
-        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "44", "cover paragraph should be 22pt"
-    # مربع نص الغلاف العائم يجب أن يُنقل من يسار الصفحة إلى اليمين (مع هامش 12px)
+        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "48", "cover paragraph should be 24pt"
+        assert title_para_rpr.find(w("b")) is not None, "cover paragraph style should be bold"
+    # مربع نص الغلاف العائم يجب أن يُنقل من يسار الصفحة إلى اليمين (مع هامش ~40px)
     cover_anchors = [
         node
         for node in root.iter(f"{{{WP_NS}}}anchor")
@@ -410,17 +416,19 @@ def main() -> None:
     for anchor in cover_anchors:
         position_h = anchor.find(f"{{{WP_NS}}}positionH")
         assert position_h is not None and position_h.get("relativeFrom") == "page"
-        align = position_h.find(f"{{{WP_NS}}}align")
         pos_offset = position_h.find(f"{{{WP_NS}}}posOffset")
-        assert (align is not None and (align.text or "").strip() == "right") or pos_offset is not None, (
-            "cover title box must be pinned to the right side of the page"
+        assert pos_offset is not None, "cover title box must use posOffset with page-edge margin"
+        page_width_emu = int(11906 * 635)
+        extent = anchor.find(f"{{{WP_NS}}}extent")
+        cx = int(extent.get("cx") or "0") if extent is not None else 0
+        max_cx = page_width_emu - int(COVER_EDGE_MARGIN_EMU)
+        if cx <= 0 or cx > max_cx:
+            cx = max_cx
+        expected = page_width_emu - cx - int(COVER_EDGE_MARGIN_EMU)
+        assert int(pos_offset.text or "0") == expected, "cover title box must keep ~40px from page edge"
+        assert int(anchor.get("distR") or "0") >= int(COVER_EDGE_MARGIN_EMU), (
+            "cover title anchor must keep distR page margin"
         )
-        if pos_offset is not None:
-            page_width_emu = int(11906 * 635)
-            extent = anchor.find(f"{{{WP_NS}}}extent")
-            cx = int(extent.get("cx") or "0") if extent is not None else 0
-            expected = page_width_emu - cx - int(COVER_EDGE_MARGIN_EMU)
-            assert int(pos_offset.text or "0") == expected, "cover title box must keep 12px from page edge"
     # عنوانغ / عنواناصل داخل التقرير: يرثان ~11pt ونوع خط الفقرة المحيطة
     inline_body_runs = [
         run
@@ -446,20 +454,21 @@ def main() -> None:
         for run in title_runs
         if run.find(w("rPr")) is not None
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "44"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "48"
         and run.find(w("rPr")).find(w("rFonts")) is not None
         and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
     )
     assert forced_cover_style_count == len(cover_title_runs), (
-        "عنوانغ/عنواناصل must not receive forced cover 22pt Tajawal styling"
+        "عنوانغ/عنواناصل must not receive forced cover 24pt Tajawal styling"
     )
     client_runs = matching_runs("شركة الاختبار")
     assert any(
         run.find(w("rPr")) is not None
         and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "28"
+        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "32"
+        and run.find(w("rPr")).find(w("b")) is not None
         for run in client_runs
-    ), "cover client should be 14pt"
+    ), "cover client should be 16pt bold"
     for client_run in client_runs:
         client_para = client_run
         while client_para is not None and client_para.tag != w("p"):
@@ -476,8 +485,9 @@ def main() -> None:
             )
             assert client_ppr.find(w("bidi")) is not None, "cover client must set w:bidi for Arabic RTL"
             client_ind = client_ppr.find(w("ind"))
-            # section right 2127 − → indent = 180 − 2127 = -1947 (يسحب للنصف الأيمن من الصفحة)
-            assert client_ind is not None and client_ind.get(f"{{{W_NS}}}right") == "-1947"
+            # section right 2127 − → indent = COVER_EDGE_MARGIN_TWIPS − 2127
+            expected_client_right = str(int(COVER_EDGE_MARGIN_TWIPS) - 2127)
+            assert client_ind is not None and client_ind.get(f"{{{W_NS}}}right") == expected_client_right
             break
     else:
         raise AssertionError("cover client paragraph alignment missing")

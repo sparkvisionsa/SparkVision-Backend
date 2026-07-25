@@ -6798,7 +6798,10 @@ export class MachineValuationService implements OnModuleInit {
       projectId: pid,
       ...MV_PHOTO_FOLDER_FILTER,
     })) as PicAssetMongoDoc | null;
-    if (!picNode) throw new NotFoundException("Sub-project not found");
+    if (!picNode) {
+      // مجلد/أصل محذوف مسبقاً — نجاح متساهل لتفادي رسائل المزامنة بعد الحذف المتفائل
+      return { ok: true, alreadyGone: true };
+    }
     if (ctx.userRole === "inspector") {
       await this.assertInspectorAccessToFolderId(db, pid, sid, ctx);
     }
@@ -8509,7 +8512,16 @@ export class MachineValuationService implements OnModuleInit {
     const pid = toId(projectId);
     await this.loadProjectForAccess(db, pid, ctx);
     const fid = toId(fileId);
-    const file = await this.getStoredFileDoc(db, pid, fid);
+    let file: Awaited<ReturnType<typeof this.getStoredFileDoc>> | null = null;
+    try {
+      file = await this.getStoredFileDoc(db, pid, fid);
+    } catch (err) {
+      // حذف متساهل: الملف غير موجود أصلاً = نجاح (يتجنب فشل الواجهة بعد حذف متفائل/مكرر)
+      if (err instanceof NotFoundException) {
+        return { ok: true, alreadyGone: true };
+      }
+      throw err;
+    }
     if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
       try {
         await this.inspectorSpaces.deleteObject(file.metadata.spacesKey.trim());
@@ -8520,7 +8532,14 @@ export class MachineValuationService implements OnModuleInit {
       }
       await db.collection(MV_FILES_FILES_COLLECTION).deleteOne({ _id: fid, "metadata.projectId": pid });
     } else {
-      await this.getFilesBucket(db).delete(fid);
+      try {
+        await this.getFilesBucket(db).delete(fid);
+      } catch (err) {
+        this.logger.warn(
+          `deleteProjectFile GridFS: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      await db.collection(MV_FILES_FILES_COLLECTION).deleteOne({ _id: fid, "metadata.projectId": pid });
     }
     const pa = db.collection<AssetDoc>(ASSETS_COLLECTION);
     const folders = await pa

@@ -110,13 +110,17 @@ DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
 COVER_BOOKMARK_FONT_FAMILY = "Tajawal"
-# غلاف: عنوان 22pt أعلى، اسم العميل 14pt أسفله، محاذاة يمين مع 12px من حافة الصفحة.
-COVER_TITLE_FONT_SIZE_HALF_POINTS = 44  # 22pt
-COVER_CLIENT_FONT_SIZE_HALF_POINTS = 28  # 14pt
-COVER_EDGE_MARGIN_PX = 12
+# غلاف: عنوان أكبر وأفخم (24pt bold)، اسم العميل (16pt bold)،
+# هامش يمين واضح من حافة الصفحة (~40px) + حشوة داخلية لمربع النص.
+COVER_TITLE_FONT_SIZE_HALF_POINTS = 48  # 24pt
+COVER_CLIENT_FONT_SIZE_HALF_POINTS = 32  # 16pt
+COVER_EDGE_MARGIN_PX = 40
 COVER_EDGE_MARGIN_TWIPS = PIXEL_DXA * COVER_EDGE_MARGIN_PX
 COVER_EDGE_MARGIN_EMU = PIXEL_EMU * COVER_EDGE_MARGIN_PX
+COVER_EDGE_MARGIN_PT = round(COVER_EDGE_MARGIN_PX * 72 / 96, 2)
 COVER_SHAPE_BOOKMARK_NAMES = ("عنوان", "غلاف", "عميلغلاف")
+WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+VML_NS = "urn:schemas-microsoft-com:vml"
 ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
 MOJIBAKE_RE = re.compile(r"[ØÙÃÂÐÑ]")
 
@@ -720,13 +724,10 @@ def resolve_section_right_margin_twips(para: etree._Element) -> int:
 
 
 def set_paragraph_cover_alignment(para: etree._Element) -> None:
-    """محاذاة الغلاف إلى اليمين بصرياً مع هامش 12px.
+    """محاذاة الغلاف إلى اليمين بصرياً مع هامش واضح من الحافة (~40px).
 
     Word مع فقرات عربية/RTL يعكس معنى jc: ‎jc=right‎ يظهر يساراً و‎jc=left‎ يظهر يميناً.
     لذلك نضع ‎w:bidi‎ مع ‎jc=left‎ لنحصل على الجانب الأيمن الفعلي للصفحة.
-
-    ملاحظة: ‎w:ind/@w:right‎ الموجب يزيد الفراغ من اليمين الفيزيائي. لفقرة الصفحة
-    نستخدم قيمة سالبة = (12px − هامش القسم الأيمن) لتقريب النص من حافة الصفحة.
     """
     ppr = para.find(w("pPr"))
     if ppr is None:
@@ -736,27 +737,30 @@ def set_paragraph_cover_alignment(para: etree._Element) -> None:
     remove_w_children(ppr, "ind")
     remove_w_children(ppr, "bidi")
 
-    # داخل مربع نص الغلاف: هامش موجب صغير من إطار المربع.
+    # داخل مربع نص الغلاف: هامش موجب صريح من إطار المربع.
+    # مع bidi/عربي: ‎w:start‎ = بداية اتجاه القراءة = اليمين البصري.
     if find_ancestor(para, w("txbxContent")) is not None:
         right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS)
         left_indent_twips = 0
+        use_logical_start = True
     else:
         section_right_twips = resolve_section_right_margin_twips(para)
-        # سالب عادةً: يسحب المحاذاة حتى 12px من حافة الصفحة الفعلية.
+        # سالب عادةً: يسحب المحاذاة حتى هامش الغلاف من حافة الصفحة الفعلية.
         right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS) - int(section_right_twips)
         left_indent_twips = 0
+        use_logical_start = False
 
     bidi = etree.Element(w("bidi"))
     ind = etree.Element(w("ind"))
-    # ind فيزيائي فقط — تجنّب start/end حتى لا يحوّلهما Word بشكل مربك.
     ind.set(w("right"), str(right_indent_twips))
     ind.set(w("left"), str(left_indent_twips))
+    if use_logical_start and right_indent_twips > 0:
+        ind.set(w("start"), str(right_indent_twips))
     jc = etree.Element(w("jc"))
-    # left + bidi = يمين بصري في Word (انظر اختبارات تصدير PDF)
+    # left + bidi = يمين بصري في Word
     jc.set(w("val"), "left")
 
     rpr = ppr.find(w("rPr"))
-    # الترتيب صالح في Word: bidi ثم ind ثم jc (قبل rPr إن وُجد).
     insert_nodes = [bidi, ind, jc]
     if rpr is not None:
         insert_at = list(ppr).index(rpr)
@@ -790,14 +794,16 @@ def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | 
     if font_size_half_points is not None:
         set_rpr_value(rpr, "sz", {"val": str(font_size_half_points)})
         set_rpr_value(rpr, "szCs", {"val": str(font_size_half_points)})
+    set_rpr_flag(rpr, "b")
+    set_rpr_flag(rpr, "bCs")
 
 
 def cover_bookmark_font_size(bookmark_name: str) -> int | None:
-    """Word stores font size in half-points (22pt => 44, 14pt => 28).
+    """Word stores font size in half-points (24pt => 48, 16pt => 32).
 
     غلاف التقرير فقط:
-    - «عنوان» و«غلاف»: 22pt أعلى يمين.
-    - «عميلغلاف»: 14pt أسفل العنوان يمين.
+    - «عنوان» و«غلاف»: 24pt bold أعلى يمين.
+    - «عميلغلاف»: 16pt bold أسفل العنوان يمين.
     «عنوانغ» و«عنواناصل» ترث تنسيق الفقرة المحيطة دون فرض تنسيق الغلاف.
     """
     norm = normalize_bookmark_name(bookmark_name)
@@ -812,12 +818,7 @@ def cover_bookmark_font_size(bookmark_name: str) -> int | None:
 
 
 def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: etree._Element | None) -> etree._Element | None:
-    norm = normalize_bookmark_name(bookmark_name)
     size = cover_bookmark_font_size(bookmark_name)
-    is_regular_cover_title = norm in {
-        normalize_bookmark_name("عنوان"),
-        normalize_bookmark_name("غلاف"),
-    }
     if size is None:
         # عناوين داخل النص (عنوانغ / عنواناصل …): أبقِ rPr المجاور كما هو ليتناسق مع الفقرة
         return rpr
@@ -844,11 +845,8 @@ def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: e
     set_rpr_value(styled, "lang", {"val": "ar-SA", "bidi": "ar-SA"})
     set_rpr_value(styled, "sz", {"val": str(size)})
     set_rpr_value(styled, "szCs", {"val": str(size)})
-    if is_regular_cover_title:
-        clear_rpr_flags(styled, "b", "bCs")
-    else:
-        set_rpr_flag(styled, "b")
-        set_rpr_flag(styled, "bCs")
+    set_rpr_flag(styled, "b")
+    set_rpr_flag(styled, "bCs")
     set_rpr_flag(styled, "rtl")
     return styled
 
@@ -878,32 +876,71 @@ def resolve_document_page_width_emu(root: etree._Element) -> int:
     return DEFAULT_PAGE_WIDTH_EMU
 
 
+def _resolve_drawing_width_emu(parent: etree._Element) -> int:
+    extent = parent.find(f"{{{WP_NS}}}extent")
+    if extent is not None:
+        try:
+            cx = int(extent.get("cx") or "0")
+            if cx > 0:
+                return cx
+        except (TypeError, ValueError):
+            pass
+    for ext in parent.iter(f"{{{A_NS}}}ext"):
+        try:
+            cx = int(ext.get("cx") or "0")
+            if cx > 0:
+                return cx
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def _set_wp_position_h_page_right(parent: etree._Element, page_width_emu: int) -> None:
-    """يعيد تمكين موضع أفقي يمين الصفحة مع هامش 12px إن أمكن معرفة عرض الشكل."""
+    """يثبّت الشكل على يمين الصفحة مع هامش صريح — لا نستخدم align=right وحده لأنه يلتصق بالحافة."""
     for old in list(parent.findall(f"{{{WP_NS}}}positionH")):
         parent.remove(old)
 
     position_h = etree.Element(f"{{{WP_NS}}}positionH")
     position_h.set("relativeFrom", "page")
-    extent = parent.find(f"{{{WP_NS}}}extent")
-    cx = 0
-    if extent is not None:
-        try:
-            cx = int(extent.get("cx") or "0")
-        except (TypeError, ValueError):
-            cx = 0
-    if cx > 0 and page_width_emu > cx + COVER_EDGE_MARGIN_EMU:
-        offset = etree.SubElement(position_h, f"{{{WP_NS}}}posOffset")
-        offset.text = str(max(0, page_width_emu - cx - COVER_EDGE_MARGIN_EMU))
-    else:
-        align = etree.SubElement(position_h, f"{{{WP_NS}}}align")
-        align.text = "right"
+    cx = _resolve_drawing_width_emu(parent)
+    # إن كان الصندوق أعرض من الصفحة تقريباً، قلّص العرض الفعّال حتى يبقى هامش يمين.
+    max_cx = max(1, page_width_emu - COVER_EDGE_MARGIN_EMU)
+    if cx <= 0:
+        cx = max_cx
+    elif cx > max_cx:
+        cx = max_cx
+        extent = parent.find(f"{{{WP_NS}}}extent")
+        if extent is not None:
+            extent.set("cx", str(cx))
+    offset = etree.SubElement(position_h, f"{{{WP_NS}}}posOffset")
+    offset.text = str(max(0, page_width_emu - cx - COVER_EDGE_MARGIN_EMU))
 
     simple_pos = parent.find(f"{{{WP_NS}}}simplePos")
     if simple_pos is not None:
         simple_pos.addnext(position_h)
     else:
         parent.insert(0, position_h)
+
+    # مسافة لفّ من اليمين كشبكة أمان إضافية في Word
+    if parent.tag == f"{{{WP_NS}}}anchor" or str(parent.tag).endswith("}anchor"):
+        parent.set("distR", str(COVER_EDGE_MARGIN_EMU))
+
+
+def ensure_cover_textbox_internal_margin(container: etree._Element) -> None:
+    """حشوة داخلية لمربع النص حتى لا يلامس النص إطار الصندوق/حافة الصفحة."""
+    inset = str(COVER_EDGE_MARGIN_EMU)
+    # DrawingML / Word 2010 shapes
+    for body_pr in list(container.iter(f"{{{A_NS}}}bodyPr")) + list(container.iter(f"{{{WPS_NS}}}bodyPr")):
+        body_pr.set("rIns", inset)
+        body_pr.set("lIns", str(max(PIXEL_EMU * 8, COVER_EDGE_MARGIN_EMU // 4)))
+        body_pr.set("tIns", str(PIXEL_EMU * 6))
+        body_pr.set("bIns", str(PIXEL_EMU * 6))
+    # VML textbox
+    inset_pt = f"{COVER_EDGE_MARGIN_PT}pt"
+    for el in container.iter():
+        tag = el.tag if isinstance(el.tag, str) else ""
+        if tag.endswith("}textbox") or tag == "textbox" or tag.endswith("}TextBox"):
+            el.set("inset", f"{COVER_EDGE_MARGIN_PT * 0.35:.2f}pt,{COVER_EDGE_MARGIN_PT * 0.25:.2f}pt,{inset_pt},{COVER_EDGE_MARGIN_PT * 0.25:.2f}pt")
 
 
 def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu: int) -> None:
@@ -912,6 +949,7 @@ def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu:
         if anchor.get("simplePos") in ("1", "true", "True"):
             anchor.set("simplePos", "0")
         _set_wp_position_h_page_right(anchor, page_width_emu)
+        ensure_cover_textbox_internal_margin(drawing)
         return
 
     inline = drawing.find(f"{{{WP_NS}}}inline")
@@ -930,7 +968,7 @@ def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu:
     anchor.set("distT", anchor.get("distT") or "0")
     anchor.set("distB", anchor.get("distB") or "0")
     anchor.set("distL", anchor.get("distL") or "0")
-    anchor.set("distR", anchor.get("distR") or "0")
+    anchor.set("distR", str(COVER_EDGE_MARGIN_EMU))
 
     simple = etree.SubElement(anchor, f"{{{WP_NS}}}simplePos")
     simple.set("x", "0")
@@ -957,17 +995,20 @@ def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu:
             anchor.append(wrap)
 
     _set_wp_position_h_page_right(anchor, page_width_emu)
+    ensure_cover_textbox_internal_margin(anchor)
     parent = inline.getparent()
     if parent is not None:
         parent.replace(inline, anchor)
 
 
 def reposition_vml_shape_to_page_right(pict: etree._Element) -> None:
+    margin_css = f"{COVER_EDGE_MARGIN_PT}pt"
     for el in pict.iter():
         tag = el.tag if isinstance(el.tag, str) else ""
         if not tag.endswith("}shape") and tag != "shape":
             continue
         style = el.get("style") or ""
+        # لا تستخدم right وحده (يلتصق بالحافة) — أضف margin-right صريحاً
         style = re.sub(
             r"mso-position-horizontal\s*:\s*[^;]+",
             "mso-position-horizontal:right",
@@ -985,12 +1026,15 @@ def reposition_vml_shape_to_page_right(pict: etree._Element) -> None:
         if re.search(r"mso-position-horizontal-relative\s*:", style, flags=re.I) is None:
             style = (style.rstrip(";") + ";mso-position-horizontal-relative:page").lstrip(";")
         style = re.sub(r"margin-left\s*:\s*[^;]+;?", "", style, flags=re.I)
+        style = re.sub(r"margin-right\s*:\s*[^;]+;?", "", style, flags=re.I)
+        style = (style.rstrip(";") + f";margin-right:{margin_css}").lstrip(";")
         style = re.sub(r";{2,}", ";", style).strip(" ;")
         el.set("style", style)
+    ensure_cover_textbox_internal_margin(pict)
 
 
 def force_cover_shapes_to_page_right(root: etree._Element) -> None:
-    """ينقل مربعات نص الغلاف (عنوان/عميل) إلى يمين الصفحة — محاذاة الفقرة وحدها لا تكفي للصناديق العائمة."""
+    """ينقل مربعات نص الغلاف (عنوان/عميل) إلى يمين الصفحة مع هامش واضح من الحافة."""
     wanted = {normalize_bookmark_name(name) for name in COVER_SHAPE_BOOKMARK_NAMES}
     page_width_emu = resolve_document_page_width_emu(root)
     seen: set[int] = set()
@@ -1002,6 +1046,10 @@ def force_cover_shapes_to_page_right(root: etree._Element) -> None:
         pict = None if drawing is not None else find_ancestor(start, w("pict"))
         target = drawing if drawing is not None else pict
         if target is None:
+            # فقرة عادية بدون مربع نص — طبّق الهامش على الفقرة مباشرة
+            para = find_ancestor(start, w("p"))
+            if para is not None:
+                set_paragraph_cover_alignment(para)
             continue
         target_id = id(target)
         if target_id in seen:
@@ -1014,6 +1062,9 @@ def force_cover_shapes_to_page_right(root: etree._Element) -> None:
         outer_para = find_cover_outer_paragraph(start)
         if outer_para is not None:
             set_paragraph_cover_alignment(outer_para)
+        inner_para = find_ancestor(start, w("p"))
+        if inner_para is not None:
+            set_paragraph_cover_alignment(inner_para)
 
 
 def run_has_meaningful_content(run: etree._Element) -> bool:
