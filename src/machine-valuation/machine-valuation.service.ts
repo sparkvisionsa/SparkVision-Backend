@@ -810,9 +810,7 @@ function sanitizeValuationAccountingWorkspaceForPersist(raw: unknown): Record<st
   if (Array.isArray(sources)) {
     for (const s of sources) {
       if (s && typeof s === "object") {
-        const row = s as Record<string, unknown>;
-        const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
-        if (fid) delete row.dataUrl;
+        delete (s as Record<string, unknown>).dataUrl;
       }
     }
   }
@@ -821,13 +819,20 @@ function sanitizeValuationAccountingWorkspaceForPersist(raw: unknown): Record<st
     throw new BadRequestException("valuationAccountingWorkspace.images invalid");
   }
   if (Array.isArray(images)) {
-    for (const im of images) {
-      if (im && typeof im === "object") {
+    // لا نخزّن base64 في مستند المشروع — فقط صور لها fileId على GridFS/Spaces
+    obj.images = images
+      .filter((im) => {
+        if (!im || typeof im !== "object") return false;
+        const fid = typeof (im as Record<string, unknown>).fileId === "string"
+          ? String((im as Record<string, unknown>).fileId).trim()
+          : "";
+        return Boolean(fid);
+      })
+      .map((im) => {
         const row = im as Record<string, unknown>;
-        const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
-        if (fid) delete row.dataUrl;
-      }
-    }
+        delete row.dataUrl;
+        return row;
+      });
   }
   obj.version = 1;
   if (typeof obj.includeInReport !== "boolean") {

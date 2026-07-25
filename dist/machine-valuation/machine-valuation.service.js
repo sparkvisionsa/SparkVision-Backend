@@ -712,10 +712,7 @@ function sanitizeValuationAccountingWorkspaceForPersist(raw) {
     if (Array.isArray(sources)) {
         for (const s of sources) {
             if (s && typeof s === "object") {
-                const row = s;
-                const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
-                if (fid)
-                    delete row.dataUrl;
+                delete s.dataUrl;
             }
         }
     }
@@ -724,14 +721,20 @@ function sanitizeValuationAccountingWorkspaceForPersist(raw) {
         throw new common_1.BadRequestException("valuationAccountingWorkspace.images invalid");
     }
     if (Array.isArray(images)) {
-        for (const im of images) {
-            if (im && typeof im === "object") {
-                const row = im;
-                const fid = typeof row.fileId === "string" ? row.fileId.trim() : "";
-                if (fid)
-                    delete row.dataUrl;
-            }
-        }
+        obj.images = images
+            .filter((im) => {
+            if (!im || typeof im !== "object")
+                return false;
+            const fid = typeof im.fileId === "string"
+                ? String(im.fileId).trim()
+                : "";
+            return Boolean(fid);
+        })
+            .map((im) => {
+            const row = im;
+            delete row.dataUrl;
+            return row;
+        });
     }
     obj.version = 1;
     if (typeof obj.includeInReport !== "boolean") {

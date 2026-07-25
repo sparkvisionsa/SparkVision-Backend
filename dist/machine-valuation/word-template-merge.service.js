@@ -188,17 +188,24 @@ function closeWriteStream(stream) {
         stream.end((err) => (err ? reject(err) : resolve()));
     });
 }
+function mergeTimeoutMs(payload) {
+    const imageCount = payload.assetImagesBase64.length +
+        payload.valuationImagesBase64.length +
+        payload.clientImagesBase64.length;
+    return Math.min(900_000, Math.max(180_000, 120_000 + imageCount * 1_500));
+}
 function spawnMergeOnce(payload) {
     const python = findPythonBin();
     const script = findMergeScriptPath();
     const estimatedSize = estimateMergePayloadSize(payload);
+    const timeoutMs = mergeTimeoutMs(payload);
     const payloadPath = estimatedSize > 4_000_000
         ? path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
         : null;
     const runChild = (args) => new Promise((resolve, reject) => {
         const child = (0, child_process_1.spawn)(python, args, {
             cwd: process.cwd(),
-            timeout: 180_000,
+            timeout: timeoutMs,
             stdio: ["pipe", "pipe", "pipe"],
         });
         const chunks = [];
@@ -206,12 +213,16 @@ function spawnMergeOnce(payload) {
         child.stdout.on("data", (d) => chunks.push(d));
         child.stderr.on("data", (d) => errChunks.push(d));
         child.on("error", (err) => reject(new Error(`Python: ${err.message}`)));
-        child.on("close", (code) => {
+        child.on("close", (code, signal) => {
             const stderr = Buffer.concat(errChunks).toString("utf8");
             if (stderr)
                 console.log("[docx-worker]\n" + stderr);
             if (code !== 0) {
-                reject(new Error(`docx-worker exited ${code}: ${stderr.slice(0, 500)}`));
+                const signalHint = signal ? ` signal=${signal}` : code == null ? " signal=unknown(killed)" : "";
+                const timeoutHint = signal === "SIGTERM" || signal === "SIGKILL"
+                    ? ` (likely timeout ${timeoutMs}ms or OOM)`
+                    : "";
+                reject(new Error(`docx-worker exited ${code}${signalHint}${timeoutHint}: ${stderr.slice(0, 500)}`));
                 return;
             }
             const buf = Buffer.concat(chunks);
@@ -235,7 +246,13 @@ function spawnMergeOnce(payload) {
     const fileStream = fs.createWriteStream(payloadPath);
     return streamMergePayloadJson(payload, fileStream)
         .then(() => closeWriteStream(fileStream))
-        .then(() => runChild([script, payloadPath]))
+        .then(() => {
+        payload.assetImagesBase64.length = 0;
+        payload.valuationImagesBase64.length = 0;
+        payload.clientImagesBase64.length = 0;
+        payload.templateBase64 = "";
+        return runChild([script, payloadPath]);
+    })
         .finally(() => fs.unlink(payloadPath, () => undefined));
 }
 function isMissingPythonDependencyError(message) {
@@ -275,22 +292,30 @@ function installDocxWorkerDependencies() {
     });
     return dependencyInstallPromise;
 }
-async function runDocxMergeWorker(payload) {
-    try {
-        return await spawnMergeOnce(payload);
-    }
-    catch (err) {
-        const message = err.message || "";
-        if (!isMissingPythonDependencyError(message))
-            throw err;
-        console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
-        const installed = await installDocxWorkerDependencies();
-        if (!installed)
-            throw err;
-        return spawnMergeOnce(payload);
-    }
+let mergeQueueTail = Promise.resolve();
+function enqueueDocxMerge(task) {
+    const run = mergeQueueTail.then(task, task);
+    mergeQueueTail = run.then(() => undefined, () => undefined);
+    return run;
 }
-const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 12;
+async function runDocxMergeWorker(payload) {
+    return enqueueDocxMerge(async () => {
+        try {
+            return await spawnMergeOnce(payload);
+        }
+        catch (err) {
+            const message = err.message || "";
+            if (!isMissingPythonDependencyError(message))
+                throw err;
+            console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
+            const installed = await installDocxWorkerDependencies();
+            if (!installed)
+                throw err;
+            return spawnMergeOnce(payload);
+        }
+    });
+}
+const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 6;
 async function mapWithConcurrency(items, limit, fn) {
     if (items.length === 0)
         return [];

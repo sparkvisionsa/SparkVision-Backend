@@ -197,10 +197,20 @@ function closeWriteStream(stream: fs.WriteStream): Promise<void> {
   });
 }
 
+/** مهلة دمج تتناسب مع عدد الصور — 180s كانت تقتل مشاريع بمئات الصور (exited null / SIGTERM). */
+function mergeTimeoutMs(payload: MergePayload): number {
+  const imageCount =
+    payload.assetImagesBase64.length +
+    payload.valuationImagesBase64.length +
+    payload.clientImagesBase64.length;
+  return Math.min(900_000, Math.max(180_000, 120_000 + imageCount * 1_500));
+}
+
 function spawnMergeOnce(payload: MergePayload): Promise<MergeWorkerResult> {
   const python = findPythonBin();
   const script = findMergeScriptPath();
   const estimatedSize = estimateMergePayloadSize(payload);
+  const timeoutMs = mergeTimeoutMs(payload);
   const payloadPath =
     estimatedSize > 4_000_000
       ? path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
@@ -210,7 +220,7 @@ function spawnMergeOnce(payload: MergePayload): Promise<MergeWorkerResult> {
     new Promise((resolve, reject) => {
       const child = spawn(python, args, {
         cwd: process.cwd(),
-        timeout: 180_000,
+        timeout: timeoutMs,
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -220,11 +230,20 @@ function spawnMergeOnce(payload: MergePayload): Promise<MergeWorkerResult> {
       child.stdout.on("data", (d: Buffer) => chunks.push(d));
       child.stderr.on("data", (d: Buffer) => errChunks.push(d));
       child.on("error", (err) => reject(new Error(`Python: ${err.message}`)));
-      child.on("close", (code) => {
+      child.on("close", (code, signal) => {
         const stderr = Buffer.concat(errChunks).toString("utf8");
         if (stderr) console.log("[docx-worker]\n" + stderr);
         if (code !== 0) {
-          reject(new Error(`docx-worker exited ${code}: ${stderr.slice(0, 500)}`));
+          const signalHint = signal ? ` signal=${signal}` : code == null ? " signal=unknown(killed)" : "";
+          const timeoutHint =
+            signal === "SIGTERM" || signal === "SIGKILL"
+              ? ` (likely timeout ${timeoutMs}ms or OOM)`
+              : "";
+          reject(
+            new Error(
+              `docx-worker exited ${code}${signalHint}${timeoutHint}: ${stderr.slice(0, 500)}`,
+            ),
+          );
           return;
         }
         const buf = Buffer.concat(chunks);
@@ -253,7 +272,14 @@ function spawnMergeOnce(payload: MergePayload): Promise<MergeWorkerResult> {
   const fileStream = fs.createWriteStream(payloadPath);
   return streamMergePayloadJson(payload, fileStream)
     .then(() => closeWriteStream(fileStream))
-    .then(() => runChild([script, payloadPath]))
+    .then(() => {
+      // حرّر نسخ Node من الصور بعد كتابتها للقرص — يقلّل ضغط الذاكرة قبل تشغيل بايثون.
+      payload.assetImagesBase64.length = 0;
+      payload.valuationImagesBase64.length = 0;
+      payload.clientImagesBase64.length = 0;
+      payload.templateBase64 = "";
+      return runChild([script, payloadPath]);
+    })
     .finally(() => fs.unlink(payloadPath, () => undefined));
 }
 
@@ -308,25 +334,42 @@ function installDocxWorkerDependencies(): Promise<boolean> {
 }
 
 /**
+ * طابور دمج واحد لكل عملية — على خادم 4GB تشغيل دمجين متوازيين يضاعف الذاكرة
+ * ويؤدي غالباً إلى OOM أو ‎exited null‎.
+ */
+let mergeQueueTail: Promise<unknown> = Promise.resolve();
+
+function enqueueDocxMerge<T>(task: () => Promise<T>): Promise<T> {
+  const run = mergeQueueTail.then(task, task);
+  mergeQueueTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
  * يشغّل عامل دمج Word، ويُحاول تلقائياً — مرة واحدة فقط — تثبيت متطلبات بايثون الناقصة
  * (‎lxml‎/‎Pillow‎/…) وإعادة الدمج إن فشلت المحاولة الأولى بسبب حزمة غير مثبَّتة، بدل
  * فشل كل عمليات تنزيل/تحديث ملفات Word حتى يتدخّل أحد يدوياً على الخادم.
  */
 async function runDocxMergeWorker(payload: MergePayload): Promise<MergeWorkerResult> {
-  try {
-    return await spawnMergeOnce(payload);
-  } catch (err) {
-    const message = (err as Error).message || "";
-    if (!isMissingPythonDependencyError(message)) throw err;
-    console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
-    const installed = await installDocxWorkerDependencies();
-    if (!installed) throw err;
-    return spawnMergeOnce(payload);
-  }
+  return enqueueDocxMerge(async () => {
+    try {
+      return await spawnMergeOnce(payload);
+    } catch (err) {
+      const message = (err as Error).message || "";
+      if (!isMissingPythonDependencyError(message)) throw err;
+      console.warn(`[docx-worker] missing Python dependency detected, attempting auto-install: ${message}`);
+      const installed = await installDocxWorkerDependencies();
+      if (!installed) throw err;
+      return spawnMergeOnce(payload);
+    }
+  });
 }
 
 /** يحدّ عدد تنزيلات صور الأصول المتوازية (GridFS/DigitalOcean) أثناء تجهيز دمج Word. */
-const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 12;
+const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 6;
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],

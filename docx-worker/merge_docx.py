@@ -100,12 +100,12 @@ IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_CONTENT_WIDTH_RATIO = 0.95
 ASSET_IMAGE_GAP_DXA = IMAGE_HORIZONTAL_MARGIN_DXA
 ASSET_IMAGE_GAP_EMU = IMAGE_HORIZONTAL_MARGIN_EMU
-# خلية صور الأصول ~2 بوصة؛ 1800px ≈ 900dpi على العرض — حاد بعد التمطيط عالي الجودة.
-ASSET_IMAGE_MAX_SQUARE_PX = 1800
+# خلية صور الأصول ~2 بوصة؛ 1200px ≈ 600dpi على العرض — توازن جودة/سرعة/ذاكرة لمشاريع بمئات الصور.
+ASSET_IMAGE_MAX_SQUARE_PX = 1200
 # صور حسابات القيمة / المستندات النصية — دقة عالية للطباعة (~300DPI على عرض الصفحة)
-VALUATION_IMAGE_MAX_DIMENSION_PX = 4800
-DOCUMENT_IMAGE_JPEG_QUALITY = 96
-ASSET_IMAGE_JPEG_QUALITY = 95
+VALUATION_IMAGE_MAX_DIMENSION_PX = 3600
+DOCUMENT_IMAGE_JPEG_QUALITY = 90
+ASSET_IMAGE_JPEG_QUALITY = 85
 DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
@@ -1635,16 +1635,18 @@ def _canvas_pixel_size_for_cell(
 
 def _high_quality_stretch(img: Image.Image, canvas_w: int, canvas_h: int) -> Image.Image:
     """
-    تمطيط (stretch) عالي الجودة إلى مقاس ثابت — مثل Fit Content to Frame / Free Transform:
-    محورا العرض والارتفاع يُعدَّلان بشكل مستقل لملء الإطار بالكامل بدون قصّ وبدون فراغات.
-    التصغير الكبير يتم على خطوات LANCZOS لتقليل التشويش قبل الضبط النهائي.
+    تمطيط (stretch) إلى مقاس ثابت — محورا العرض والارتفاع يُعدَّلان بشكل مستقل
+    لملء الإطار بالكامل بدون قصّ وبدون فراغات.
+    خطوة تصغير واحدة وسيطة كافية للصور الكبيرة جداً؛ تجنّب حلقات LANCZOS المتعددة
+    التي كانت تبطّئ دمج مئات الصور وتستهلك الذاكرة على خوادم 4GB.
     """
+    if img.size == (canvas_w, canvas_h):
+        return img
     work = img
-    # خطوات تصغير عندما المصدر أكبر بكثير من الهدف على كلا المحورين
-    while work.width > canvas_w * 2 and work.height > canvas_h * 2:
+    if work.width > canvas_w * 3 and work.height > canvas_h * 3:
         work = work.resize(
             (max(canvas_w, work.width // 2), max(canvas_h, work.height // 2)),
-            Image.LANCZOS,
+            Image.BILINEAR,
         )
     if work.size != (canvas_w, canvas_h):
         work = work.resize((canvas_w, canvas_h), Image.LANCZOS)
@@ -2374,7 +2376,22 @@ def apply_image_bookmarks_docx_api(
     out = io.BytesIO()
     doc.save(out)
     result = normalize_docx_drawing_ids(out.getvalue())
-    validate_docx_package(result)
+    # التحقق الكامل (parse لكل جزء XML) مكلف جداً مع مئات الصور؛ يكفي فحص الحزمة الأساسي.
+    image_total = (
+        (stats.get("asset") or 0)
+        + (stats.get("valuation") or 0)
+        + (stats.get("client") or 0)
+    )
+    if image_total <= 40:
+        validate_docx_package(result)
+    else:
+        with zipfile.ZipFile(io.BytesIO(result), "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                raise ValueError(f"Corrupt zip member: {bad}")
+            names = set(zf.namelist())
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise ValueError("Invalid docx package: required parts are missing")
     return result, stats
 
 
