@@ -184,10 +184,30 @@ def set_w_attrs(el: etree._Element, attrs: dict[str, Any]) -> etree._Element:
 
 def log(msg: str) -> None:
     try:
-        sys.stderr.buffer.write((msg + "\n").encode("utf-8"))
+        sys.stderr.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
         sys.stderr.buffer.flush()
     except Exception:
         print(msg, file=sys.stderr)
+
+
+def log_exception(prefix: str, exc: BaseException) -> None:
+    log(f"{prefix}: {type(exc).__name__}: {exc!r}")
+
+
+# حد رسم Word العملي (~22 بوصة). صور Excel الطويلة كانت تتجاوزه فتفشل add_picture بصمت.
+MAX_DRAWING_HEIGHT_EMU = int(20 * EMU_PER_INCH)
+
+
+def ensure_jpeg_bytes(img_bytes: bytes, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
+    """أعد ترميز أي صورة إلى JPEG/RGB نظيف قبل الإدراج في Word."""
+    try:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            img.load()
+            rgb = img.convert("RGB") if img.mode != "RGB" else img
+            return _save_print_jpeg(rgb, quality)
+    except Exception as exc:
+        log_exception("ensure_jpeg_bytes failed", exc)
+        return img_bytes
 
 
 def normalize_bookmark_name(name: str) -> str:
@@ -1823,31 +1843,68 @@ def validate_docx_package(docx_bytes: bytes) -> None:
             validate_part_xml(zf.read(part_name), part_name)
 
 
+def _renumber_drawing_ids_in_xml(raw: bytes, next_id: int) -> tuple[bytes | None, int]:
+    try:
+        root = etree.fromstring(raw)
+    except Exception:
+        return None, next_id
+    changed = False
+    for el in root.iter():
+        local = etree.QName(el).localname
+        if local not in ("docPr", "cNvPr") or el.get("id") is None:
+            continue
+        el.set("id", str(next_id))
+        next_id += 1
+        changed = True
+    if not changed:
+        return None, next_id
+    return (
+        etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes"),
+        next_id,
+    )
+
+
 def normalize_docx_drawing_ids(docx_bytes: bytes) -> bytes:
+    """يعيد ترقيم معرّفات الرسم لتفادي التعارض مع صور الرأس/التذييل (مشكلة Word شائعة)."""
     modified: dict[str, bytes] = {}
     next_id = 1
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
         for name in zin.namelist():
             if not (name.startswith("word/") and name.endswith(".xml")):
                 continue
-            raw = zin.read(name)
-            try:
-                root = etree.fromstring(raw)
-            except Exception:
-                continue
-            changed = False
-            for el in root.iter():
-                local = etree.QName(el).localname
-                if local not in ("docPr", "cNvPr") or el.get("id") is None:
-                    continue
-                el.set("id", str(next_id))
-                next_id += 1
-                changed = True
-            if changed:
-                modified[name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
+            rewritten, next_id = _renumber_drawing_ids_in_xml(zin.read(name), next_id)
+            if rewritten is not None:
+                modified[name] = rewritten
         if not modified:
             return docx_bytes
         return write_docx_zip(zin, modified)
+
+
+def normalize_docx_drawing_ids_inplace(docx_path: str) -> None:
+    """نفس التطبيع على ملف كبير دون بناء نسخة Base64/Buffer كاملة في Node."""
+    tmp_path = f"{docx_path}.norm.tmp"
+    next_id = 1
+    changed_any = False
+    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+                rewritten, next_id = _renumber_drawing_ids_in_xml(data, next_id)
+                if rewritten is not None:
+                    data = rewritten
+                    changed_any = True
+            # الحفاظ على نوع الضغط الأصلي قدر الإمكان
+            if info.filename == "mimetype":
+                zout.writestr(info, data, compress_type=zipfile.ZIP_STORED)
+            else:
+                zout.writestr(info, data)
+    if changed_any:
+        os.replace(tmp_path, docx_path)
+    else:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def docx_qn(tag: str) -> str:
@@ -2080,13 +2137,22 @@ def configure_rtl_valuation_image_paragraph(paragraph, indent_left: int, indent_
     p_pr.append(ind)
 
 
-def scaled_image_size_for_width_only(img_bytes: bytes, target_width_emu: int) -> tuple[int, int]:
+def scaled_image_size_for_width_only(
+    img_bytes: bytes,
+    target_width_emu: int,
+    max_height_emu: int | None = None,
+) -> tuple[int, int]:
     with Image.open(io.BytesIO(img_bytes)) as img:
         width_px, height_px = img.size
     if width_px <= 0 or height_px <= 0:
         raise ValueError("invalid image dimensions")
     cx = max(1, int(target_width_emu))
     cy = max(1, int(cx * height_px / width_px))
+    limit = max_height_emu if max_height_emu and max_height_emu > 0 else MAX_DRAWING_HEIGHT_EMU
+    if cy > limit:
+        scale = limit / cy
+        cx = max(1, int(cx * scale))
+        cy = max(1, int(cy * scale))
     return cx, cy
 
 
@@ -2241,38 +2307,37 @@ def make_docx_image_table_element(
                 continue
             img_bytes: bytes | None = None
             try:
-                img_bytes = resolve_image_bytes(images[img_index])
+                img_bytes = ensure_jpeg_bytes(resolve_image_bytes(images[img_index]))
                 if contain_images:
                     fit_w, fit_h = scaled_image_size_for_width(
                         img_bytes,
                         cell_width_emu,
-                        image_emu,
+                        min(image_emu, MAX_DRAWING_HEIGHT_EMU),
                     )
-                    img_buf = io.BytesIO(img_bytes)
+                    if fit_w <= 0 or fit_h <= 0:
+                        raise ValueError(f"invalid fit size {fit_w}x{fit_h}")
                     para.add_run().add_picture(
-                        img_buf,
+                        io.BytesIO(img_bytes),
                         width=Emu(fit_w),
                         height=Emu(fit_h),
                     )
                 else:
                     # صور الأصول: تمطيط لملء الخلية (المصدر مضغوط مسبقاً من Node)
-                    img_buf = io.BytesIO(
-                        stretch_to_fill_canvas_jpeg_bytes(
-                            img_bytes,
-                            cell_width_emu,
-                            image_emu,
-                            max_side_px=asset_max_side_px,
-                            quality=ASSET_IMAGE_JPEG_QUALITY,
-                        )
+                    stretched = stretch_to_fill_canvas_jpeg_bytes(
+                        img_bytes,
+                        cell_width_emu,
+                        image_emu,
+                        max_side_px=asset_max_side_px,
+                        quality=ASSET_IMAGE_JPEG_QUALITY,
                     )
                     para.add_run().add_picture(
-                        img_buf,
-                        width=Emu(cell_width_emu),
-                        height=Emu(image_emu),
+                        io.BytesIO(stretched),
+                        width=Emu(max(1, cell_width_emu)),
+                        height=Emu(max(1, min(image_emu, MAX_DRAWING_HEIGHT_EMU))),
                     )
                 inserted += 1
             except Exception as exc:
-                log(f"image insert skipped: {exc}")
+                log_exception("image insert skipped", exc)
             finally:
                 img_bytes = None
             img_index += 1
@@ -2288,21 +2353,23 @@ def make_docx_valuation_image_element(
 ) -> tuple[Any, int]:
     from docx.shared import Emu, Pt
 
-    img_bytes = resolve_image_bytes(image)
-    img_bytes = downscale_jpeg_bytes(img_bytes, VALUATION_IMAGE_MAX_DIMENSION_PX)
-    target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
-    cx, cy = scaled_image_size_for_width_only(img_bytes, target_width)
-
     p = doc.add_paragraph()
-    configure_rtl_valuation_image_paragraph(p, indent_left, indent_right)
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(0)
     try:
+        img_bytes = ensure_jpeg_bytes(resolve_image_bytes(image))
+        img_bytes = downscale_jpeg_bytes(img_bytes, VALUATION_IMAGE_MAX_DIMENSION_PX)
+        img_bytes = ensure_jpeg_bytes(img_bytes)
+        target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
+        _content_width, content_height = document_content_box_emu(doc, title_reserve_emu=0)
+        max_height = min(MAX_DRAWING_HEIGHT_EMU, max(1, int(content_height * 0.98)))
+        cx, cy = scaled_image_size_for_width_only(img_bytes, target_width, max_height)
+        configure_rtl_valuation_image_paragraph(p, indent_left, indent_right)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
         p.add_run().add_picture(io.BytesIO(img_bytes), width=Emu(cx), height=Emu(cy))
+        return detach_docx_body_element(p._element), 1
     except Exception as exc:
-        log(f"Skipped valuation image: {exc}")
+        log_exception("Skipped valuation image", exc)
         return detach_docx_body_element(p._element), 0
-    return detach_docx_body_element(p._element), 1
 
 
 def block_contains_bookmark(block, bookmark_name: str) -> bool:
@@ -2340,7 +2407,11 @@ def replace_image_bookmark_with_docx_elements(
         if block_contains_bookmark(child, bookmark_name):
             target_idx = idx
             break
-    if target_idx is None or not images:
+    if not images:
+        log(f"image bookmark {bookmark_name!r}: no images to insert")
+        return 0
+    if target_idx is None:
+        log(f"image bookmark {bookmark_name!r}: not found in document body")
         return 0
 
     start_idx = target_idx
@@ -2362,12 +2433,14 @@ def replace_image_bookmark_with_docx_elements(
 
     if layout == "valuation_pages":
         for image_idx, image in enumerate(images):
-            if image_idx > 0:
-                insert_elem(make_docx_page_break_element(doc))
             image_elem, count = make_docx_valuation_image_element(doc, image, section_metrics)
+            if count <= 0:
+                continue
+            if inserted > 0:
+                insert_elem(make_docx_page_break_element(doc))
             insert_elem(image_elem)
             inserted += count
-            if image_idx % 25 == 24:
+            if inserted % 25 == 0:
                 gc.collect()
     else:
         image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
@@ -2417,20 +2490,8 @@ def apply_image_bookmarks_docx_api(
     asset_max_side = adaptive_asset_max_side(len(asset_images))
     doc = Document(io.BytesIO(docx_bytes))
     stats = {"asset": 0, "valuation": 0, "client": 0}
-    stats["asset"] = replace_image_bookmark_with_docx_elements(
-        doc,
-        "صوراصول",
-        asset_images,
-        True,
-        "asset_grid",
-        images_per_row,
-        images_per_page,
-        asset_max_side,
-    )
-    # حرّر مراجع قوائم الصور الكبيرة مبكراً بعد الإدراج
-    asset_images.clear()
-    gc.collect()
-
+    # الأهم أولاً: حسابات القيمة + مستندات العميل قبل مئات صور الأصول،
+    # حتى لا تفشل إضافتها بعد تضخّم المستند/تعارض معرّفات الرسم.
     stats["valuation"] = replace_image_bookmark_with_docx_elements(
         doc,
         "صورحسابات",
@@ -2440,6 +2501,7 @@ def apply_image_bookmarks_docx_api(
     )
     valuation_images.clear()
     gc.collect()
+    log(f"valuation images inserted: {stats['valuation']}")
 
     stats["client"] = replace_image_bookmark_with_docx_elements(
         doc,
@@ -2453,6 +2515,21 @@ def apply_image_bookmarks_docx_api(
     if client_images is not None:
         client_images.clear()
     gc.collect()
+    log(f"client images inserted: {stats['client']}")
+
+    stats["asset"] = replace_image_bookmark_with_docx_elements(
+        doc,
+        "صوراصول",
+        asset_images,
+        True,
+        "asset_grid",
+        images_per_row,
+        images_per_page,
+        asset_max_side,
+    )
+    asset_images.clear()
+    gc.collect()
+    log(f"asset images inserted: {stats['asset']}")
 
     image_total = (
         (stats.get("asset") or 0)
@@ -2464,14 +2541,16 @@ def apply_image_bookmarks_docx_api(
         doc.save(output_path)
         del doc
         gc.collect()
-        # مع آلاف الصور تجنّب إعادة تحميل الملف للتحقق/تطبيع المعرفات في الذاكرة.
+        try:
+            normalize_docx_drawing_ids_inplace(output_path)
+        except Exception as exc:
+            log_exception("normalize_docx_drawing_ids_inplace failed", exc)
         if image_total <= 40:
-            with open(output_path, "rb") as fh:
-                raw = fh.read()
-            normalized = normalize_docx_drawing_ids(raw)
-            validate_docx_package(normalized)
-            with open(output_path, "wb") as fh:
-                fh.write(normalized)
+            try:
+                with open(output_path, "rb") as fh:
+                    validate_docx_package(fh.read())
+            except Exception as exc:
+                log_exception("validate_docx_package failed", exc)
         return None, stats
 
     out = io.BytesIO()
