@@ -7,19 +7,23 @@ Usage: python merge_docx.py < payload.json > output.docx
 from __future__ import annotations
 
 import base64
+import gc
 import io
 import json
 import math
+import os
 import posixpath
 import re
 import sys
 import traceback
 import zipfile
 from copy import deepcopy
-from typing import Any
+from typing import Any, Union
 
 from lxml import etree
 from PIL import Image
+
+ImageSource = Union[bytes, str]
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -100,12 +104,55 @@ IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_CONTENT_WIDTH_RATIO = 0.95
 ASSET_IMAGE_GAP_DXA = IMAGE_HORIZONTAL_MARGIN_DXA
 ASSET_IMAGE_GAP_EMU = IMAGE_HORIZONTAL_MARGIN_EMU
-# خلية صور الأصول ~2 بوصة؛ 1200px ≈ 600dpi على العرض — توازن جودة/سرعة/ذاكرة لمشاريع بمئات الصور.
-ASSET_IMAGE_MAX_SQUARE_PX = 1200
-# صور حسابات القيمة / المستندات النصية — دقة عالية للطباعة (~300DPI على عرض الصفحة)
-VALUATION_IMAGE_MAX_DIMENSION_PX = 3600
-DOCUMENT_IMAGE_JPEG_QUALITY = 90
-ASSET_IMAGE_JPEG_QUALITY = 85
+# قيم افتراضية؛ تُخفَّض تلقائياً في merge_package عند آلاف الصور.
+ASSET_IMAGE_MAX_SQUARE_PX = 1100
+VALUATION_IMAGE_MAX_DIMENSION_PX = 2800
+DOCUMENT_IMAGE_JPEG_QUALITY = 86
+ASSET_IMAGE_JPEG_QUALITY = 80
+
+
+def resolve_image_bytes(source: ImageSource) -> bytes:
+    """حمّل بايتات صورة من مسار ملف أو من bytes جاهزة — بدون الإبقاء على كل الصور في الذاكرة."""
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        return bytes(source)
+    path = str(source)
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def collect_image_sources(payload: dict[str, Any], paths_key: str, b64_key: str) -> list[ImageSource]:
+    paths = payload.get(paths_key) or []
+    if isinstance(paths, list) and paths:
+        out: list[ImageSource] = []
+        for item in paths:
+            if isinstance(item, str) and item.strip() and os.path.isfile(item):
+                out.append(item)
+        if out:
+            return out
+    encoded = payload.get(b64_key) or []
+    if not isinstance(encoded, list):
+        return []
+    out_b64: list[ImageSource] = []
+    for item in encoded:
+        try:
+            raw = base64.b64decode(item)
+            if raw:
+                out_b64.append(raw)
+        except Exception:
+            continue
+    return out_b64
+
+
+def adaptive_asset_max_side(count: int) -> int:
+    if count <= 80:
+        return ASSET_IMAGE_MAX_SQUARE_PX
+    if count <= 250:
+        return 900
+    if count <= 800:
+        return 780
+    if count <= 2000:
+        return 680
+    return 600
 DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
@@ -2114,7 +2161,7 @@ def scaled_image_size_for_width(img_bytes: bytes, target_width_emu: int, max_hei
 
 def make_docx_image_table_element(
     doc,
-    images: list[bytes],
+    images: list[ImageSource],
     images_per_row: int,
     image_rows_per_page: int,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
@@ -2127,6 +2174,7 @@ def make_docx_image_table_element(
     gap_dxa: int = ASSET_IMAGE_GAP_DXA,
     gap_emu: int = ASSET_IMAGE_GAP_EMU,
     title_reserve_emu: int | None = None,
+    asset_max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
 ) -> tuple[Any, int]:
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -2191,26 +2239,30 @@ def make_docx_image_table_element(
             para.paragraph_format.space_after = Pt(0)
             if img_index >= len(images):
                 continue
+            img_bytes: bytes | None = None
             try:
+                img_bytes = resolve_image_bytes(images[img_index])
                 if contain_images:
                     fit_w, fit_h = scaled_image_size_for_width(
-                        images[img_index],
+                        img_bytes,
                         cell_width_emu,
                         image_emu,
                     )
-                    img_buf = io.BytesIO(images[img_index])
+                    img_buf = io.BytesIO(img_bytes)
                     para.add_run().add_picture(
                         img_buf,
                         width=Emu(fit_w),
                         height=Emu(fit_h),
                     )
                 else:
-                    # صور الأصول: تمطيط عالي الجودة لملء الخلية بالكامل (بدون قصّ وبدون فراغات)
+                    # صور الأصول: تمطيط لملء الخلية (المصدر مضغوط مسبقاً من Node)
                     img_buf = io.BytesIO(
                         stretch_to_fill_canvas_jpeg_bytes(
-                            images[img_index],
+                            img_bytes,
                             cell_width_emu,
                             image_emu,
+                            max_side_px=asset_max_side_px,
+                            quality=ASSET_IMAGE_JPEG_QUALITY,
                         )
                     )
                     para.add_run().add_picture(
@@ -2221,6 +2273,8 @@ def make_docx_image_table_element(
                 inserted += 1
             except Exception as exc:
                 log(f"image insert skipped: {exc}")
+            finally:
+                img_bytes = None
             img_index += 1
 
     # python-docx leaves the table attached to the document body; detach for bookmark splice.
@@ -2229,11 +2283,12 @@ def make_docx_image_table_element(
 
 def make_docx_valuation_image_element(
     doc,
-    img_bytes: bytes,
+    image: ImageSource,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
 ) -> tuple[Any, int]:
     from docx.shared import Emu, Pt
 
+    img_bytes = resolve_image_bytes(image)
     img_bytes = downscale_jpeg_bytes(img_bytes, VALUATION_IMAGE_MAX_DIMENSION_PX)
     target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
     cx, cy = scaled_image_size_for_width_only(img_bytes, target_width)
@@ -2271,11 +2326,12 @@ def block_is_placeholder_image(block) -> bool:
 def replace_image_bookmark_with_docx_elements(
     doc,
     bookmark_name: str,
-    images: list[bytes],
+    images: list[ImageSource],
     remove_placeholder: bool,
     layout: str = "asset_grid",
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
+    asset_max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
 ) -> int:
     body = doc.element.body
     children = list(body)
@@ -2295,22 +2351,31 @@ def replace_image_bookmark_with_docx_elements(
     for idx in range(target_idx, start_idx - 1, -1):
         body.remove(children[idx])
 
-    elements: list[Any] = []
     inserted = 0
+    insert_at = start_idx
     section_metrics = first_section_metrics_at_or_after(children, target_idx)
+
+    def insert_elem(elem: Any) -> None:
+        nonlocal insert_at
+        body.insert(insert_at, elem)
+        insert_at += 1
+
     if layout == "valuation_pages":
         for image_idx, image in enumerate(images):
             if image_idx > 0:
-                elements.append(make_docx_page_break_element(doc))
+                insert_elem(make_docx_page_break_element(doc))
             image_elem, count = make_docx_valuation_image_element(doc, image, section_metrics)
-            elements.append(image_elem)
+            insert_elem(image_elem)
             inserted += count
+            if image_idx % 25 == 24:
+                gc.collect()
     else:
         image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
         fill_client = layout == "client_grid"
+        page_number = 0
         for page_idx in range(0, len(images), images_per_page):
             if page_idx > 0:
-                elements.append(make_docx_page_break_element(doc))
+                insert_elem(make_docx_page_break_element(doc))
             table_elem, count = make_docx_image_table_element(
                 doc,
                 images[page_idx : page_idx + images_per_page],
@@ -2325,27 +2390,31 @@ def replace_image_bookmark_with_docx_elements(
                 gap_dxa=CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
                 gap_emu=CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
                 title_reserve_emu=CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None,
+                asset_max_side_px=asset_max_side_px,
             )
-            elements.append(table_elem)
+            insert_elem(table_elem)
             inserted += count
+            page_number += 1
+            if page_number % 10 == 0:
+                gc.collect()
 
-    for offset, elem in enumerate(elements):
-        body.insert(start_idx + offset, elem)
     return inserted
 
 
 def apply_image_bookmarks_docx_api(
     docx_bytes: bytes,
-    asset_images: list[bytes],
-    valuation_images: list[bytes],
-    client_images: list[bytes] | None = None,
+    asset_images: list[ImageSource],
+    valuation_images: list[ImageSource],
+    client_images: list[ImageSource] | None = None,
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
     client_images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
     client_images_per_page: int = CLIENT_DOCS_IMAGES_PER_PAGE,
-) -> tuple[bytes, dict[str, int]]:
+    output_path: str | None = None,
+) -> tuple[bytes | None, dict[str, int]]:
     from docx import Document
 
+    asset_max_side = adaptive_asset_max_side(len(asset_images))
     doc = Document(io.BytesIO(docx_bytes))
     stats = {"asset": 0, "valuation": 0, "client": 0}
     stats["asset"] = replace_image_bookmark_with_docx_elements(
@@ -2356,7 +2425,12 @@ def apply_image_bookmarks_docx_api(
         "asset_grid",
         images_per_row,
         images_per_page,
+        asset_max_side,
     )
+    # حرّر مراجع قوائم الصور الكبيرة مبكراً بعد الإدراج
+    asset_images.clear()
+    gc.collect()
+
     stats["valuation"] = replace_image_bookmark_with_docx_elements(
         doc,
         "صورحسابات",
@@ -2364,6 +2438,9 @@ def apply_image_bookmarks_docx_api(
         True,
         "valuation_pages",
     )
+    valuation_images.clear()
+    gc.collect()
+
     stats["client"] = replace_image_bookmark_with_docx_elements(
         doc,
         "مستنداتعميل",
@@ -2373,15 +2450,34 @@ def apply_image_bookmarks_docx_api(
         client_images_per_row,
         client_images_per_page,
     )
-    out = io.BytesIO()
-    doc.save(out)
-    result = normalize_docx_drawing_ids(out.getvalue())
-    # التحقق الكامل (parse لكل جزء XML) مكلف جداً مع مئات الصور؛ يكفي فحص الحزمة الأساسي.
+    if client_images is not None:
+        client_images.clear()
+    gc.collect()
+
     image_total = (
         (stats.get("asset") or 0)
         + (stats.get("valuation") or 0)
         + (stats.get("client") or 0)
     )
+
+    if output_path:
+        doc.save(output_path)
+        del doc
+        gc.collect()
+        # مع آلاف الصور تجنّب إعادة تحميل الملف للتحقق/تطبيع المعرفات في الذاكرة.
+        if image_total <= 40:
+            with open(output_path, "rb") as fh:
+                raw = fh.read()
+            normalized = normalize_docx_drawing_ids(raw)
+            validate_docx_package(normalized)
+            with open(output_path, "wb") as fh:
+                fh.write(normalized)
+        return None, stats
+
+    out = io.BytesIO()
+    doc.save(out)
+    del doc
+    result = normalize_docx_drawing_ids(out.getvalue())
     if image_total <= 40:
         validate_docx_package(result)
     else:
@@ -2395,17 +2491,24 @@ def apply_image_bookmarks_docx_api(
     return result, stats
 
 
-def merge_package(payload: dict[str, Any]) -> bytes:
+def merge_package(payload: dict[str, Any]) -> bytes | None:
+    output_path = str(payload.get("outputPath") or "").strip() or None
+    template_path = str(payload.get("templatePath") or "").strip()
     template_b64 = payload.get("templateBase64") or ""
-    if not template_b64:
-        raise ValueError("templateBase64 missing")
 
-    template_bytes = base64.b64decode(template_b64)
+    if template_path and os.path.isfile(template_path):
+        with open(template_path, "rb") as fh:
+            template_bytes = fh.read()
+    elif template_b64:
+        template_bytes = base64.b64decode(template_b64)
+    else:
+        raise ValueError("templatePath or templateBase64 missing")
+
     text_values = payload.get("textValues") or {}
     name_to_text = build_name_to_text(text_values, payload.get("textByBookmarkName") or {})
-    asset_images = [base64.b64decode(x) for x in (payload.get("assetImagesBase64") or [])]
-    valuation_images = [base64.b64decode(x) for x in (payload.get("valuationImagesBase64") or [])]
-    client_images = [base64.b64decode(x) for x in (payload.get("clientImagesBase64") or [])]
+    asset_images = collect_image_sources(payload, "assetImagePaths", "assetImagesBase64")
+    valuation_images = collect_image_sources(payload, "valuationImagePaths", "valuationImagesBase64")
+    client_images = collect_image_sources(payload, "clientImagePaths", "clientImagesBase64")
     image_layout = payload.get("imageLayout") if isinstance(payload.get("imageLayout"), dict) else {}
     try:
         images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
@@ -2425,7 +2528,13 @@ def merge_package(payload: dict[str, Any]) -> bytes:
         client_images_per_row = CLIENT_DOCS_IMAGES_PER_ROW
     client_images_per_page = client_images_per_row * client_images_per_row
 
+    log(
+        f"merge start: assets={len(asset_images)} valuation={len(valuation_images)} "
+        f"client={len(client_images)} output={'disk' if output_path else 'stdout'}"
+    )
+
     in_buf = io.BytesIO(template_bytes)
+    del template_bytes
     modified: dict[str, bytes] = {}
     total_text = 0
     all_bookmarks: list[str] = []
@@ -2447,6 +2556,9 @@ def merge_package(payload: dict[str, Any]) -> bytes:
 
         result = write_docx_zip(zin, modified)
 
+    del in_buf
+    gc.collect()
+
     if asset_images or valuation_images or client_images:
         result, img_stats = apply_image_bookmarks_docx_api(
             result,
@@ -2457,9 +2569,15 @@ def merge_package(payload: dict[str, Any]) -> bytes:
             images_per_page,
             client_images_per_row,
             client_images_per_page,
+            output_path=output_path,
         )
     else:
-        validate_docx_package(result)
+        if output_path:
+            with open(output_path, "wb") as fh:
+                fh.write(result)
+            result = None
+        else:
+            validate_docx_package(result)
 
     log(
         json.dumps(
@@ -2483,7 +2601,11 @@ def main() -> None:
                 payload = json.load(fh)
         else:
             payload = json.load(sys.stdin)
-        sys.stdout.buffer.write(merge_package(payload))
+        result = merge_package(payload)
+        if result is not None:
+            sys.stdout.buffer.write(result)
+        else:
+            sys.stdout.write("OK\n")
     except Exception:
         log(traceback.format_exc())
         sys.exit(1)

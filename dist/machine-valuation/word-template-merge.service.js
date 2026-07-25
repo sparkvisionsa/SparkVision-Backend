@@ -41,6 +41,9 @@ var __importStar = (this && this.__importStar) || (function () {
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 var WordTemplateMergeService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WordTemplateMergeService = void 0;
@@ -50,6 +53,7 @@ const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const child_process_1 = require("child_process");
 const mongodb_1 = require("mongodb");
+const sharp_1 = __importDefault(require("sharp"));
 const machine_valuation_service_1 = require("./machine-valuation.service");
 const collections_1 = require("../server/auth-tracking/collections");
 const service_1 = require("../server/auth-tracking/service");
@@ -76,17 +80,43 @@ function sanitizeImageLayout(value) {
         clientImagesPerPage: clientImagesPerRow * clientImagesPerRow,
     };
 }
-function findPythonBin() {
+function adaptiveImageSettings(imageCount) {
+    if (imageCount <= 80)
+        return { maxSide: 1100, quality: 82 };
+    if (imageCount <= 250)
+        return { maxSide: 900, quality: 78 };
+    if (imageCount <= 800)
+        return { maxSide: 780, quality: 74 };
+    if (imageCount <= 2000)
+        return { maxSide: 680, quality: 70 };
+    return { maxSide: 600, quality: 66 };
+}
+function findDocxWorkerVenvPython() {
     const venvPaths = [
         path.join(process.cwd(), "docx-worker", "venv", "bin", "python"),
         path.join(process.cwd(), "docx-worker", "venv", "Scripts", "python.exe"),
-        path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"),
-        path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
     ];
     for (const p of venvPaths) {
         if (fs.existsSync(p))
             return p;
     }
+    return null;
+}
+function findPythonBin() {
+    const dedicated = findDocxWorkerVenvPython();
+    if (dedicated)
+        return dedicated;
+    const fallbacks = [
+        path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"),
+        path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
+    ];
+    for (const p of fallbacks) {
+        if (fs.existsSync(p))
+            return p;
+    }
+    return process.platform === "win32" ? "python" : "python3";
+}
+function systemPythonBin() {
     return process.platform === "win32" ? "python" : "python3";
 }
 function findMergeScriptPath() {
@@ -128,89 +158,50 @@ function parseWorkerStats(stderr) {
         bookmarksFound: [],
     };
 }
-function estimateMergePayloadSize(payload) {
-    let size = payload.templateBase64.length;
-    for (const img of payload.assetImagesBase64)
-        size += img.length;
-    for (const img of payload.valuationImagesBase64)
-        size += img.length;
-    for (const img of payload.clientImagesBase64)
-        size += img.length;
-    return size;
+function mergeTimeoutMs(imageCount) {
+    return Math.min(45 * 60_000, Math.max(240_000, 120_000 + imageCount * 900));
 }
-function writeAsync(stream, chunk) {
-    return new Promise((resolve, reject) => {
-        let settled = false;
-        const ok = stream.write(chunk, "utf8", (err) => {
-            if (err && !settled) {
-                settled = true;
-                reject(err);
-            }
-        });
-        if (ok) {
-            if (!settled) {
-                settled = true;
-                resolve();
-            }
-            return;
+async function writeOptimizedJpegFile(input, destPath, maxSide, quality) {
+    try {
+        await (0, sharp_1.default)(input)
+            .rotate()
+            .resize({
+            width: maxSide,
+            height: maxSide,
+            fit: "inside",
+            withoutEnlargement: true,
+        })
+            .jpeg({ quality, mozjpeg: true, chromaSubsampling: "4:2:0" })
+            .toFile(destPath);
+        return true;
+    }
+    catch {
+        try {
+            await fs.promises.writeFile(destPath, input);
+            return true;
         }
-        stream.once("drain", () => {
-            if (!settled) {
-                settled = true;
-                resolve();
-            }
-        });
-    });
-}
-async function streamMergePayloadJson(payload, stream) {
-    await writeAsync(stream, `{"templateBase64":${JSON.stringify(payload.templateBase64)}`);
-    await writeAsync(stream, `,"textValues":${JSON.stringify(payload.textValues)}`);
-    await writeAsync(stream, `,"textByBookmarkName":${JSON.stringify(payload.textByBookmarkName)}`);
-    await writeAsync(stream, `,"imageLayout":${JSON.stringify(payload.imageLayout)}`);
-    await writeAsync(stream, `,"assetImagesBase64":[`);
-    for (let i = 0; i < payload.assetImagesBase64.length; i++) {
-        await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.assetImagesBase64[i])}`);
+        catch {
+            return false;
+        }
     }
-    await writeAsync(stream, `]`);
-    await writeAsync(stream, `,"valuationImagesBase64":[`);
-    for (let i = 0; i < payload.valuationImagesBase64.length; i++) {
-        await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.valuationImagesBase64[i])}`);
-    }
-    await writeAsync(stream, `]`);
-    await writeAsync(stream, `,"clientImagesBase64":[`);
-    for (let i = 0; i < payload.clientImagesBase64.length; i++) {
-        await writeAsync(stream, `${i > 0 ? "," : ""}${JSON.stringify(payload.clientImagesBase64[i])}`);
-    }
-    await writeAsync(stream, `]}`);
 }
-function closeWriteStream(stream) {
-    return new Promise((resolve, reject) => {
-        stream.end((err) => (err ? reject(err) : resolve()));
-    });
-}
-function mergeTimeoutMs(payload) {
-    const imageCount = payload.assetImagesBase64.length +
-        payload.valuationImagesBase64.length +
-        payload.clientImagesBase64.length;
-    return Math.min(900_000, Math.max(180_000, 120_000 + imageCount * 1_500));
-}
-function spawnMergeOnce(payload) {
+function spawnDiskMergeOnce(manifest, timeoutMs) {
     const python = findPythonBin();
     const script = findMergeScriptPath();
-    const estimatedSize = estimateMergePayloadSize(payload);
-    const timeoutMs = mergeTimeoutMs(payload);
-    const payloadPath = estimatedSize > 4_000_000
-        ? path.join(os.tmpdir(), `mv-docx-merge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
-        : null;
-    const runChild = (args) => new Promise((resolve, reject) => {
-        const child = (0, child_process_1.spawn)(python, args, {
+    const manifestPath = path.join(path.dirname(manifest.outputPath), "manifest.json");
+    return fs.promises
+        .writeFile(manifestPath, JSON.stringify(manifest), "utf8")
+        .then(() => new Promise((resolve, reject) => {
+        const child = (0, child_process_1.spawn)(python, [script, manifestPath], {
             cwd: process.cwd(),
             timeout: timeoutMs,
-            stdio: ["pipe", "pipe", "pipe"],
+            stdio: ["ignore", "pipe", "pipe"],
+            env: {
+                ...process.env,
+                PYTHONUNBUFFERED: "1",
+            },
         });
-        const chunks = [];
         const errChunks = [];
-        child.stdout.on("data", (d) => chunks.push(d));
         child.stderr.on("data", (d) => errChunks.push(d));
         child.on("error", (err) => reject(new Error(`Python: ${err.message}`)));
         child.on("close", (code, signal) => {
@@ -218,78 +209,109 @@ function spawnMergeOnce(payload) {
             if (stderr)
                 console.log("[docx-worker]\n" + stderr);
             if (code !== 0) {
-                const signalHint = signal ? ` signal=${signal}` : code == null ? " signal=unknown(killed)" : "";
+                const signalHint = signal
+                    ? ` signal=${signal}`
+                    : code == null
+                        ? " signal=unknown(killed)"
+                        : "";
                 const timeoutHint = signal === "SIGTERM" || signal === "SIGKILL"
                     ? ` (likely timeout ${timeoutMs}ms or OOM)`
                     : "";
                 reject(new Error(`docx-worker exited ${code}${signalHint}${timeoutHint}: ${stderr.slice(0, 500)}`));
                 return;
             }
-            const buf = Buffer.concat(chunks);
-            if (buf.length < 100) {
-                reject(new Error("docx-worker returned empty output"));
+            if (!fs.existsSync(manifest.outputPath)) {
+                reject(new Error("docx-worker finished but output file is missing"));
                 return;
             }
-            resolve({ buffer: buf, stats: parseWorkerStats(stderr) });
+            const stat = fs.statSync(manifest.outputPath);
+            if (stat.size < 100) {
+                reject(new Error("docx-worker returned empty output file"));
+                return;
+            }
+            resolve({ outputPath: manifest.outputPath, stats: parseWorkerStats(stderr) });
         });
-        if (payloadPath) {
-            child.stdin.end();
-        }
-        else {
-            streamMergePayloadJson(payload, child.stdin)
-                .then(() => child.stdin.end())
-                .catch((err) => reject(new Error(`payload write failed: ${err.message}`)));
-        }
+    }));
+}
+function pipeFileToResponse(filePath, res) {
+    return new Promise((resolve, reject) => {
+        const stream = fs.createReadStream(filePath);
+        let settled = false;
+        const done = (err) => {
+            if (settled)
+                return;
+            settled = true;
+            if (err)
+                reject(err);
+            else
+                resolve();
+        };
+        stream.on("error", (err) => done(err));
+        res.on("finish", () => done());
+        res.on("close", () => {
+            if (!res.writableEnded) {
+                stream.destroy();
+                done(new Error("response closed before Word download finished"));
+            }
+        });
+        stream.pipe(res);
     });
-    if (!payloadPath)
-        return runChild([script]);
-    const fileStream = fs.createWriteStream(payloadPath);
-    return streamMergePayloadJson(payload, fileStream)
-        .then(() => closeWriteStream(fileStream))
-        .then(() => {
-        payload.assetImagesBase64.length = 0;
-        payload.valuationImagesBase64.length = 0;
-        payload.clientImagesBase64.length = 0;
-        payload.templateBase64 = "";
-        return runChild([script, payloadPath]);
-    })
-        .finally(() => fs.unlink(payloadPath, () => undefined));
 }
 function isMissingPythonDependencyError(message) {
     return /ModuleNotFoundError|No module named|ImportError/i.test(message);
 }
 let dependencyInstallPromise = null;
-function installDocxWorkerDependencies() {
-    if (dependencyInstallPromise)
-        return dependencyInstallPromise;
-    dependencyInstallPromise = new Promise((resolve) => {
-        const python = findPythonBin();
-        const workerDir = path.dirname(findMergeScriptPath());
-        const requirementsPath = path.join(workerDir, "requirements.txt");
-        if (!fs.existsSync(requirementsPath)) {
-            resolve(false);
-            return;
-        }
-        const child = (0, child_process_1.spawn)(python, ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", requirementsPath], { cwd: workerDir, timeout: 180_000, stdio: ["ignore", "pipe", "pipe"] });
+function runProcess(command, args, options) {
+    return new Promise((resolve) => {
+        const child = (0, child_process_1.spawn)(command, args, {
+            cwd: options.cwd,
+            timeout: options.timeout ?? 180_000,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
         const chunks = [];
         child.stdout.on("data", (d) => chunks.push(d));
         child.stderr.on("data", (d) => chunks.push(d));
         child.on("error", (err) => {
-            console.error(`[docx-worker] pip install failed to start: ${err.message}`);
-            resolve(false);
+            resolve({ code: 1, output: err.message });
         });
         child.on("close", (code) => {
-            const output = Buffer.concat(chunks).toString("utf8");
-            if (code === 0) {
-                console.log(`[docx-worker] dependencies installed via pip (${python}):\n${output.slice(-2000)}`);
-                resolve(true);
-            }
-            else {
-                console.error(`[docx-worker] pip install exited ${code}:\n${output.slice(-2000)}`);
-                resolve(false);
-            }
+            resolve({ code, output: Buffer.concat(chunks).toString("utf8") });
         });
     });
+}
+async function ensureDocxWorkerVenv() {
+    const existing = findDocxWorkerVenvPython();
+    if (existing)
+        return existing;
+    const workerDir = path.dirname(findMergeScriptPath());
+    const venvDir = path.join(workerDir, "venv");
+    const created = await runProcess(systemPythonBin(), ["-m", "venv", venvDir], {
+        cwd: workerDir,
+        timeout: 120_000,
+    });
+    if (created.code !== 0) {
+        console.error(`[docx-worker] failed to create venv:\n${created.output.slice(-2000)}`);
+        return null;
+    }
+    return findDocxWorkerVenvPython();
+}
+function installDocxWorkerDependencies() {
+    if (dependencyInstallPromise)
+        return dependencyInstallPromise;
+    dependencyInstallPromise = (async () => {
+        const workerDir = path.dirname(findMergeScriptPath());
+        const requirementsPath = path.join(workerDir, "requirements.txt");
+        if (!fs.existsSync(requirementsPath))
+            return false;
+        const python = (await ensureDocxWorkerVenv()) ?? findPythonBin();
+        const result = await runProcess(python, ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", requirementsPath], { cwd: workerDir, timeout: 300_000 });
+        if (result.code === 0) {
+            console.log(`[docx-worker] dependencies installed via pip (${python}):\n${result.output.slice(-2000)}`);
+            return true;
+        }
+        console.error(`[docx-worker] pip install exited ${result.code}:\n${result.output.slice(-2000)}`);
+        return false;
+    })();
     return dependencyInstallPromise;
 }
 let mergeQueueTail = Promise.resolve();
@@ -298,10 +320,11 @@ function enqueueDocxMerge(task) {
     mergeQueueTail = run.then(() => undefined, () => undefined);
     return run;
 }
-async function runDocxMergeWorker(payload) {
+async function runDiskDocxMergeWorker(manifest, imageCount) {
     return enqueueDocxMerge(async () => {
+        const timeoutMs = mergeTimeoutMs(imageCount);
         try {
-            return await spawnMergeOnce(payload);
+            return await spawnDiskMergeOnce(manifest, timeoutMs);
         }
         catch (err) {
             const message = err.message || "";
@@ -311,11 +334,11 @@ async function runDocxMergeWorker(payload) {
             const installed = await installDocxWorkerDependencies();
             if (!installed)
                 throw err;
-            return spawnMergeOnce(payload);
+            return spawnDiskMergeOnce(manifest, timeoutMs);
         }
     });
 }
-const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 6;
+const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 3;
 async function mapWithConcurrency(items, limit, fn) {
     if (items.length === 0)
         return [];
@@ -326,7 +349,7 @@ async function mapWithConcurrency(items, limit, fn) {
             const i = nextIndex++;
             if (i >= items.length)
                 return;
-            results[i] = await fn(items[i]);
+            results[i] = await fn(items[i], i);
         }
     }
     await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker()));
@@ -498,72 +521,189 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
         if (!templateBuffer) {
             throw new common_1.BadRequestException("لم يُعثر على قالب Word المضمّن أو المرفوع. تأكد من وجود assets/mv-word-template.docx على السيرفر، أو ارفع قالباً من إعدادات الشركة ثم أعد المحاولة.");
         }
-        let assetImagesBase64 = [...(body.assetImagesBase64 ?? [])];
-        let valuationImagesBase64 = [...(body.valuationImagesBase64 ?? [])];
-        let clientImagesBase64 = [...(body.clientImagesBase64 ?? [])];
-        const assetImageUrlsProvided = Array.isArray(body.assetImageUrls);
-        const valuationImageUrlsProvided = Array.isArray(body.valuationImageUrls);
-        const clientImageUrlsProvided = Array.isArray(body.clientImageUrls);
-        if (assetImagesBase64.length === 0 && (body.assetImageUrls?.length ?? 0) > 0) {
-            const loaded = await mapWithConcurrency(body.assetImageUrls ?? [], MV_MERGE_IMAGE_FETCH_CONCURRENCY, (url) => this.fetchImageBuffer(url, ctx));
-            for (const buf of loaded) {
-                if (buf)
-                    assetImagesBase64.push(buf.toString("base64"));
-            }
-        }
-        if (assetImagesBase64.length === 0 && !assetImageUrlsProvided) {
-            assetImagesBase64 = await this.loadStoredAssetImagesBase64(projectId, ctx);
-        }
-        if (valuationImagesBase64.length === 0 && (body.valuationImageUrls?.length ?? 0) > 0) {
-            const loaded = await mapWithConcurrency(body.valuationImageUrls ?? [], MV_MERGE_IMAGE_FETCH_CONCURRENCY, (url) => this.fetchImageBuffer(url, ctx));
-            for (const buf of loaded) {
-                if (buf)
-                    valuationImagesBase64.push(buf.toString("base64"));
-            }
-        }
-        if (valuationImagesBase64.length === 0 && !valuationImageUrlsProvided) {
-            valuationImagesBase64 = await this.loadStoredValuationImagesBase64(project, ctx);
-        }
-        if (clientImagesBase64.length === 0 && (body.clientImageUrls?.length ?? 0) > 0) {
-            const loaded = await mapWithConcurrency(body.clientImageUrls ?? [], MV_MERGE_IMAGE_FETCH_CONCURRENCY, (url) => this.fetchImageBuffer(url, ctx));
-            for (const buf of loaded) {
-                if (buf)
-                    clientImagesBase64.push(buf.toString("base64"));
-            }
-        }
-        if (clientImagesBase64.length === 0 && !clientImageUrlsProvided) {
-            clientImagesBase64 = await this.loadStoredClientImagesBase64(project, ctx);
-        }
-        const storedTextValues = buildTextValues(reportData, project.name || "");
-        const requestTextValues = sanitizeTextRecord(body.textValues, { dropEmpty: true });
-        const textValues = Object.keys(requestTextValues).length > 0
-            ? { ...storedTextValues, ...requestTextValues }
-            : storedTextValues;
-        const textByBookmarkName = sanitizeTextRecord(body.textByBookmarkName, { dropEmpty: true });
-        const payload = {
-            templateBase64: templateBuffer.toString("base64"),
-            textValues,
-            textByBookmarkName,
-            assetImagesBase64,
-            valuationImagesBase64,
-            clientImagesBase64,
-            imageLayout: sanitizeImageLayout(body.imageLayout),
-        };
-        this.logger.log(`Merging Word for ${projectId}: ${assetImagesBase64.length} asset, ${valuationImagesBase64.length} valuation, ${clientImagesBase64.length} client images`);
-        let mergeResult;
+        const assetSources = await this.resolveImageSources({
+            projectId,
+            ctx,
+            urls: body.assetImageUrls,
+            base64List: body.assetImagesBase64,
+            urlsProvided: Array.isArray(body.assetImageUrls),
+            fallback: "assets",
+        });
+        const valuationSources = await this.resolveImageSources({
+            projectId,
+            ctx,
+            urls: body.valuationImageUrls,
+            base64List: body.valuationImagesBase64,
+            urlsProvided: Array.isArray(body.valuationImageUrls),
+            fallback: "valuation",
+            project,
+        });
+        const clientSources = await this.resolveImageSources({
+            projectId,
+            ctx,
+            urls: body.clientImageUrls,
+            base64List: body.clientImagesBase64,
+            urlsProvided: Array.isArray(body.clientImageUrls),
+            fallback: "client",
+            project,
+        });
+        const imageCount = assetSources.length + valuationSources.length + clientSources.length;
+        const assetSettings = adaptiveImageSettings(assetSources.length || imageCount);
+        const valuationSettings = adaptiveImageSettings(Math.max(40, valuationSources.length));
+        const clientSettings = adaptiveImageSettings(Math.max(40, clientSources.length));
+        const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `mv-docx-${projectId.slice(-8)}-`));
+        const templatePath = path.join(workDir, "template.docx");
+        const outputPath = path.join(workDir, "output.docx");
         try {
-            mergeResult = await runDocxMergeWorker(payload);
+            await fs.promises.writeFile(templatePath, templateBuffer);
+            templateBuffer = null;
+            const assetDir = path.join(workDir, "asset");
+            const valuationDir = path.join(workDir, "valuation");
+            const clientDir = path.join(workDir, "client");
+            await fs.promises.mkdir(assetDir, { recursive: true });
+            await fs.promises.mkdir(valuationDir, { recursive: true });
+            await fs.promises.mkdir(clientDir, { recursive: true });
+            this.logger.log(`Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, maxSide≈${assetSettings.maxSide})`);
+            const [assetImagePaths, valuationImagePaths, clientImagePaths] = await Promise.all([
+                this.materializeImagesToDisk(assetSources, assetDir, "a", assetSettings, projectId, ctx),
+                this.materializeImagesToDisk(valuationSources, valuationDir, "v", valuationSettings, projectId, ctx),
+                this.materializeImagesToDisk(clientSources, clientDir, "c", clientSettings, projectId, ctx),
+            ]);
+            const storedTextValues = buildTextValues(reportData, project.name || "");
+            const requestTextValues = sanitizeTextRecord(body.textValues, { dropEmpty: true });
+            const textValues = Object.keys(requestTextValues).length > 0
+                ? { ...storedTextValues, ...requestTextValues }
+                : storedTextValues;
+            const textByBookmarkName = sanitizeTextRecord(body.textByBookmarkName, { dropEmpty: true });
+            const manifest = {
+                templatePath,
+                outputPath,
+                textValues,
+                textByBookmarkName,
+                assetImagePaths,
+                valuationImagePaths,
+                clientImagePaths,
+                imageLayout: sanitizeImageLayout(body.imageLayout),
+            };
+            this.logger.log(`Merging Word for ${projectId}: ${assetImagePaths.length} asset, ${valuationImagePaths.length} valuation, ${clientImagePaths.length} client images`);
+            let mergeResult;
+            try {
+                mergeResult = await runDiskDocxMergeWorker(manifest, imageCount);
+            }
+            catch (err) {
+                this.logger.error(`docx-worker failed: ${err.message}`);
+                throw new common_1.BadRequestException(`تعذر دمج ملف Word: ${err.message}`);
+            }
+            const stats = mergeResult.stats;
+            const safeName = (project.name || "report").replace(/[\\/:*?"<>|]+/g, "-");
+            const fileStat = await fs.promises.stat(mergeResult.outputPath);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+            res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(`${safeName}-updated-report.docx`)}"`);
+            res.setHeader("Content-Length", String(fileStat.size));
+            res.setHeader("X-Word-Merge-Stats", encodeURIComponent(JSON.stringify(stats)));
+            await pipeFileToResponse(mergeResult.outputPath, res);
+        }
+        finally {
+            fs.rm(workDir, { recursive: true, force: true }, () => undefined);
+        }
+    }
+    async resolveImageSources(opts) {
+        const fromBase64 = [];
+        for (const item of opts.base64List ?? []) {
+            try {
+                const buffer = Buffer.from(item, "base64");
+                if (buffer.byteLength > 0)
+                    fromBase64.push({ kind: "buffer", buffer });
+            }
+            catch {
+            }
+        }
+        if (fromBase64.length > 0)
+            return fromBase64;
+        if ((opts.urls?.length ?? 0) > 0) {
+            return (opts.urls ?? [])
+                .map((url) => url.trim())
+                .filter(Boolean)
+                .map((url) => ({ kind: "url", url }));
+        }
+        if (opts.urlsProvided)
+            return [];
+        if (opts.fallback === "assets") {
+            const fileIds = await this.listReportAssetFileIds(opts.projectId, opts.ctx);
+            return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
+        }
+        if (opts.fallback === "valuation") {
+            const fileIds = this.listWorkspaceImageFileIds(opts.project?.valuationAccountingWorkspace);
+            return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
+        }
+        const fileIds = this.listWorkspaceImageFileIds(opts.project?.clientDocumentsWorkspace);
+        return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
+    }
+    async materializeImagesToDisk(sources, destDir, prefix, settings, projectId, ctx) {
+        if (sources.length === 0)
+            return [];
+        const paths = await mapWithConcurrency(sources, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (source, index) => {
+            try {
+                let buffer = null;
+                if (source.kind === "buffer") {
+                    buffer = source.buffer;
+                }
+                else if (source.kind === "fileId") {
+                    const download = await this.mvService.getProjectFileDownload(projectId, source.fileId, ctx);
+                    buffer = await bufferFromStream(download.stream);
+                }
+                else {
+                    buffer = await this.fetchImageBuffer(source.url, ctx);
+                }
+                if (!buffer || buffer.byteLength === 0)
+                    return null;
+                const destPath = path.join(destDir, `${prefix}-${String(index + 1).padStart(5, "0")}.jpg`);
+                const ok = await writeOptimizedJpegFile(buffer, destPath, settings.maxSide, settings.quality);
+                buffer = null;
+                return ok ? destPath : null;
+            }
+            catch {
+                return null;
+            }
+        });
+        return paths.filter((item) => Boolean(item));
+    }
+    async listReportAssetFileIds(projectId, ctx) {
+        try {
+            const files = await this.mvService.listProjectAssetImageFiles(projectId, ctx);
+            return files
+                .filter((file) => {
+                const mimeType = String(file.mimeType || "").toLowerCase();
+                const extension = String(file.extension || "").toLowerCase();
+                const isImage = !mimeType.startsWith("video/") &&
+                    (mimeType.startsWith("image/") ||
+                        ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension));
+                return isImage && file.includeInReport === true;
+            })
+                .map((file) => String(file._id || "").trim())
+                .filter(Boolean);
         }
         catch (err) {
-            this.logger.error(`docx-worker failed: ${err.message}`);
-            throw new common_1.BadRequestException(`تعذر دمج ملف Word: ${err.message}`);
+            this.logger.warn(`Could not list asset images for Word merge: ${err.message}`);
+            return [];
         }
-        const { buffer: docxBuffer, stats } = mergeResult;
-        const safeName = (project.name || "report").replace(/[\\/:*?"<>|]+/g, "-");
-        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-        res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(`${safeName}-updated-report.docx`)}"`);
-        res.setHeader("X-Word-Merge-Stats", encodeURIComponent(JSON.stringify(stats)));
-        res.end(docxBuffer);
+    }
+    listWorkspaceImageFileIds(workspace) {
+        if (!workspace || typeof workspace !== "object")
+            return [];
+        const store = workspace;
+        if (store.includeInReport === false || !Array.isArray(store.images))
+            return [];
+        return store.images
+            .map((item) => {
+            if (!item || typeof item !== "object")
+                return "";
+            const row = item;
+            if (row.includeInReport === false)
+                return "";
+            return typeof row.fileId === "string" ? row.fileId.trim() : "";
+        })
+            .filter(Boolean);
     }
     resolveCompanyId(project, ctx) {
         const raw = project.companyId ?? ctx.companyId;
@@ -609,91 +749,6 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             this.logger.warn(`Company Word template metadata exists (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}) but file is missing on disk/GridFS for company ${String(companyId)}`);
         }
         return null;
-    }
-    async loadStoredAssetImagesBase64(projectId, ctx) {
-        try {
-            const files = await this.mvService.listProjectAssetImageFiles(projectId, ctx);
-            const reportImages = files.filter((file) => {
-                const mimeType = String(file.mimeType || "").toLowerCase();
-                const extension = String(file.extension || "").toLowerCase();
-                const isImage = !mimeType.startsWith("video/") &&
-                    (mimeType.startsWith("image/") ||
-                        ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"].includes(extension));
-                return isImage && file.includeInReport === true;
-            });
-            const loaded = await mapWithConcurrency(reportImages, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (file) => {
-                try {
-                    const fileId = String(file._id || "").trim();
-                    if (!fileId)
-                        return null;
-                    const download = await this.mvService.getProjectFileDownload(projectId, fileId, ctx);
-                    const buffer = await bufferFromStream(download.stream);
-                    return buffer.byteLength > 0 ? buffer.toString("base64") : null;
-                }
-                catch {
-                    return null;
-                }
-            });
-            return loaded.filter((item) => Boolean(item));
-        }
-        catch (err) {
-            this.logger.warn(`Could not load stored asset images for Word merge: ${err.message}`);
-            return [];
-        }
-    }
-    async loadWorkspaceImagesBase64(projectId, workspace, ctx) {
-        if (!workspace || typeof workspace !== "object")
-            return [];
-        const store = workspace;
-        if (store.includeInReport === false || !Array.isArray(store.images))
-            return [];
-        const fileIds = store.images
-            .map((item) => {
-            if (!item || typeof item !== "object")
-                return "";
-            const row = item;
-            if (row.includeInReport === false)
-                return "";
-            return typeof row.fileId === "string" ? row.fileId.trim() : "";
-        })
-            .filter(Boolean);
-        if (fileIds.length === 0)
-            return [];
-        const loaded = await mapWithConcurrency(fileIds, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (fileId) => {
-            try {
-                const download = await this.mvService.getProjectFileDownload(projectId, fileId, ctx);
-                const buffer = await bufferFromStream(download.stream);
-                return buffer.byteLength > 0 ? buffer.toString("base64") : null;
-            }
-            catch {
-                return null;
-            }
-        });
-        return loaded.filter((item) => Boolean(item));
-    }
-    async loadStoredValuationImagesBase64(project, ctx) {
-        const projectId = String(project._id ?? "").trim();
-        if (!projectId)
-            return [];
-        try {
-            return await this.loadWorkspaceImagesBase64(projectId, project.valuationAccountingWorkspace, ctx);
-        }
-        catch (err) {
-            this.logger.warn(`Could not load valuation images for Word merge: ${err.message}`);
-            return [];
-        }
-    }
-    async loadStoredClientImagesBase64(project, ctx) {
-        const projectId = String(project._id ?? "").trim();
-        if (!projectId)
-            return [];
-        try {
-            return await this.loadWorkspaceImagesBase64(projectId, project.clientDocumentsWorkspace, ctx);
-        }
-        catch (err) {
-            this.logger.warn(`Could not load client document images for Word merge: ${err.message}`);
-            return [];
-        }
     }
     async fetchImageBuffer(url, ctx) {
         const trimmed = url.trim();
