@@ -67,13 +67,44 @@ function sanitizeImageLayout(value: unknown): MergeImageLayout {
   };
 }
 
-/** أبعاد/جودة تتقلّص تلقائياً مع ازدياد عدد الصور حتى تتحمل آلاف الصور على 4GB. */
-function adaptiveImageSettings(imageCount: number): { maxSide: number; quality: number } {
-  if (imageCount <= 80) return { maxSide: 1100, quality: 82 };
-  if (imageCount <= 250) return { maxSide: 900, quality: 78 };
-  if (imageCount <= 800) return { maxSide: 780, quality: 74 };
-  if (imageCount <= 2000) return { maxSide: 680, quality: 70 };
-  return { maxSide: 600, quality: 66 };
+type OptimizeImageSettings = {
+  maxWidth: number;
+  maxHeight: number;
+  quality: number;
+  /** 4:4:4 للنصوص/الجداول، 4:2:0 لصور الأصول الكثيرة */
+  chromaSubsampling: "4:4:4" | "4:2:0";
+};
+
+/** صور الأصول — تُخفَّض مع ازدياد العدد لتتحمل آلاف الصور. */
+function adaptiveAssetImageSettings(imageCount: number): OptimizeImageSettings {
+  if (imageCount <= 80) return { maxWidth: 1100, maxHeight: 1100, quality: 82, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 250) return { maxWidth: 900, maxHeight: 900, quality: 78, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 800) return { maxWidth: 780, maxHeight: 780, quality: 74, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 2000) return { maxWidth: 680, maxHeight: 680, quality: 70, chromaSubsampling: "4:2:0" };
+  return { maxWidth: 600, maxHeight: 600, quality: 66, chromaSubsampling: "4:2:0" };
+}
+
+/**
+ * صور حسابات القيمة / الجداول النصية — أعلى دقة ممكنة للطباعة والزوم.
+ * لا نربطها بعدد صور الأصول؛ عددها عادة صغير نسبياً.
+ */
+function valuationPrintImageSettings(): OptimizeImageSettings {
+  return {
+    maxWidth: 4800,
+    maxHeight: 14000,
+    quality: 96,
+    chromaSubsampling: "4:4:4",
+  };
+}
+
+/** مستندات العميل — جودة عالية للنصوص مع سقف معقول للذاكرة. */
+function clientDocumentImageSettings(): OptimizeImageSettings {
+  return {
+    maxWidth: 3600,
+    maxHeight: 10000,
+    quality: 92,
+    chromaSubsampling: "4:4:4",
+  };
 }
 
 function findDocxWorkerVenvPython(): string | null {
@@ -162,19 +193,26 @@ function mergeTimeoutMs(imageCount: number): number {
 async function writeOptimizedJpegFile(
   input: Buffer,
   destPath: string,
-  maxSide: number,
-  quality: number,
+  settings: OptimizeImageSettings,
 ): Promise<boolean> {
   try {
     await sharp(input)
       .rotate()
       .resize({
-        width: maxSide,
-        height: maxSide,
+        width: settings.maxWidth,
+        height: settings.maxHeight,
         fit: "inside",
         withoutEnlargement: true,
       })
-      .jpeg({ quality, mozjpeg: true, chromaSubsampling: "4:2:0" })
+      .jpeg({
+        quality: settings.quality,
+        mozjpeg: true,
+        chromaSubsampling: settings.chromaSubsampling,
+        // جداول/نصوص: تجنّب تنعيم إضافي يطمس الحواف
+        trellisQuantisation: settings.chromaSubsampling === "4:4:4",
+        overshootDeringing: settings.chromaSubsampling === "4:4:4",
+        optimizeScans: true,
+      })
       .toFile(destPath);
     return true;
   } catch {
@@ -633,9 +671,9 @@ export class WordTemplateMergeService {
     });
 
     const imageCount = assetSources.length + valuationSources.length + clientSources.length;
-    const assetSettings = adaptiveImageSettings(assetSources.length || imageCount);
-    const valuationSettings = adaptiveImageSettings(Math.max(40, valuationSources.length));
-    const clientSettings = adaptiveImageSettings(Math.max(40, clientSources.length));
+    const assetSettings = adaptiveAssetImageSettings(assetSources.length || imageCount);
+    const valuationSettings = valuationPrintImageSettings();
+    const clientSettings = clientDocumentImageSettings();
 
     const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `mv-docx-${projectId.slice(-8)}-`));
     const templatePath = path.join(workDir, "template.docx");
@@ -653,7 +691,7 @@ export class WordTemplateMergeService {
       await fs.promises.mkdir(clientDir, { recursive: true });
 
       this.logger.log(
-        `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, maxSide≈${assetSettings.maxSide})`,
+        `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, valuation≤${valuationSettings.maxWidth}x${valuationSettings.maxHeight}@q${valuationSettings.quality})`,
       );
 
       const [assetImagePaths, valuationImagePaths, clientImagePaths] = await Promise.all([
@@ -765,12 +803,17 @@ export class WordTemplateMergeService {
     sources: ImageSource[],
     destDir: string,
     prefix: string,
-    settings: { maxSide: number; quality: number },
+    settings: OptimizeImageSettings,
     projectId: string,
     ctx: MvAccessContext,
   ): Promise<string[]> {
     if (sources.length === 0) return [];
-    const paths = await mapWithConcurrency(sources, MV_MERGE_IMAGE_FETCH_CONCURRENCY, async (source, index) => {
+    // حسابات القيمة تحتاج توازي أقل قليلاً لأنها أكبر حجماً (جودة طباعة)
+    const concurrency =
+      settings.chromaSubsampling === "4:4:4"
+        ? Math.min(2, MV_MERGE_IMAGE_FETCH_CONCURRENCY)
+        : MV_MERGE_IMAGE_FETCH_CONCURRENCY;
+    const paths = await mapWithConcurrency(sources, concurrency, async (source, index) => {
       try {
         let buffer: Buffer | null = null;
         if (source.kind === "buffer") {
@@ -783,12 +826,7 @@ export class WordTemplateMergeService {
         }
         if (!buffer || buffer.byteLength === 0) return null;
         const destPath = path.join(destDir, `${prefix}-${String(index + 1).padStart(5, "0")}.jpg`);
-        const ok = await writeOptimizedJpegFile(
-          buffer,
-          destPath,
-          settings.maxSide,
-          settings.quality,
-        );
+        const ok = await writeOptimizedJpegFile(buffer, destPath, settings);
         buffer = null;
         return ok ? destPath : null;
       } catch {

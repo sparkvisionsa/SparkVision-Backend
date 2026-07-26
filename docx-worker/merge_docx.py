@@ -104,10 +104,11 @@ IMAGE_HORIZONTAL_MARGIN_EMU = PIXEL_EMU * IMAGE_HORIZONTAL_MARGIN_PX
 IMAGE_CONTENT_WIDTH_RATIO = 0.95
 ASSET_IMAGE_GAP_DXA = IMAGE_HORIZONTAL_MARGIN_DXA
 ASSET_IMAGE_GAP_EMU = IMAGE_HORIZONTAL_MARGIN_EMU
-# قيم افتراضية؛ تُخفَّض تلقائياً في merge_package عند آلاف الصور.
+# صور الأصول تُخفَّض مع كثرة العدد. حسابات القيمة تبقى بدقة طباعة عالية للزوم الواضح.
 ASSET_IMAGE_MAX_SQUARE_PX = 1100
-VALUATION_IMAGE_MAX_DIMENSION_PX = 2800
-DOCUMENT_IMAGE_JPEG_QUALITY = 86
+VALUATION_IMAGE_MAX_DIMENSION_PX = 5200
+VALUATION_IMAGE_JPEG_QUALITY = 96
+DOCUMENT_IMAGE_JPEG_QUALITY = 92
 ASSET_IMAGE_JPEG_QUALITY = 80
 
 
@@ -1633,24 +1634,57 @@ def write_docx_zip(zin: zipfile.ZipFile, modified: dict[str, bytes]) -> bytes:
     return out_buf.getvalue()
 
 
-def downscale_jpeg_bytes(img_bytes: bytes, max_dimension: int) -> bytes:
-    """يحدّ البعد الأطول مع الإبقاء على جودة طباعة عالية (بدون chroma subsampling)."""
+def downscale_jpeg_bytes(
+    img_bytes: bytes,
+    max_dimension: int,
+    *,
+    quality: int = DOCUMENT_IMAGE_JPEG_QUALITY,
+    max_width: int | None = None,
+    max_height: int | None = None,
+) -> bytes:
+    """يحدّ الأبعاد مع الإبقاء على جودة طباعة عالية (بدون chroma subsampling)."""
     try:
         img = Image.open(io.BytesIO(img_bytes))
         source_format = img.format
         img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
         width, height = img.size
-        longest = max(width, height)
-        if longest > max_dimension > 0:
-            scale = max_dimension / longest
-            img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
-            return _save_print_jpeg(img, DOCUMENT_IMAGE_JPEG_QUALITY)
+        scale = 1.0
+        if max_dimension > 0:
+            longest = max(width, height)
+            if longest > max_dimension:
+                scale = min(scale, max_dimension / longest)
+        if max_width and width > max_width:
+            scale = min(scale, max_width / width)
+        if max_height and height > max_height:
+            scale = min(scale, max_height / height)
+        if scale < 1.0:
+            img = img.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.LANCZOS,
+            )
+            return _save_print_jpeg(img, quality)
         if source_format == "JPEG":
             # ضمن الحد وJPEG أصلاً — أعد البايتات كما هي لتفادي جيل ضغط إضافي
             return img_bytes
-        return _save_print_jpeg(img, DOCUMENT_IMAGE_JPEG_QUALITY)
+        return _save_print_jpeg(img, quality)
     except Exception:
         return img_bytes
+
+
+def prepare_valuation_image_bytes(img_bytes: bytes) -> bytes:
+    """
+    إعداد صورة حسابات قيمة للطباعة:
+    - دقة بكسل عالية للزوم الواضح داخل Word
+    - تصغير فقط إن تجاوزت الحد الأقصى
+    - ترميز JPEG واحد عالي الجودة (بدون إعادة ضغط مزدوجة)
+    """
+    return downscale_jpeg_bytes(
+        img_bytes,
+        VALUATION_IMAGE_MAX_DIMENSION_PX,
+        quality=VALUATION_IMAGE_JPEG_QUALITY,
+        max_width=4800,
+        max_height=14000,
+    )
 
 
 def crop_to_fill_jpeg_bytes(
@@ -2355,9 +2389,8 @@ def make_docx_valuation_image_element(
 
     p = doc.add_paragraph()
     try:
-        img_bytes = ensure_jpeg_bytes(resolve_image_bytes(image))
-        img_bytes = downscale_jpeg_bytes(img_bytes, VALUATION_IMAGE_MAX_DIMENSION_PX)
-        img_bytes = ensure_jpeg_bytes(img_bytes)
+        # بكسل عالي للدقة عند الزوم؛ حجم العرض (EMU) فقط يُقيَّد لحدود صفحة Word.
+        img_bytes = prepare_valuation_image_bytes(resolve_image_bytes(image))
         target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
         _content_width, content_height = document_content_box_emu(doc, title_reserve_emu=0)
         max_height = min(MAX_DRAWING_HEIGHT_EMU, max(1, int(content_height * 0.98)))
