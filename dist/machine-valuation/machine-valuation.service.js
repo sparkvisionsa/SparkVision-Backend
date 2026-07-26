@@ -6857,6 +6857,19 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
                     return;
                 }
                 catch (error) {
+                    const errName = error && typeof error === "object" && "name" in error
+                        ? String(error.name || "")
+                        : "";
+                    const errCode = error && typeof error === "object" && "Code" in error
+                        ? String(error.Code || "")
+                        : "";
+                    const httpStatus = error &&
+                        typeof error === "object" &&
+                        "$metadata" in error &&
+                        error.$metadata?.httpStatusCode;
+                    if (errName === "NoSuchKey" || errCode === "NoSuchKey" || httpStatus === 404) {
+                        throw new common_1.NotFoundException("ملف التخزين غير موجود أو تم حذفه.");
+                    }
                     if (attempt >= maxAttempts)
                         throw error;
                     await new Promise((resolve) => setTimeout(resolve, 200 * attempt));

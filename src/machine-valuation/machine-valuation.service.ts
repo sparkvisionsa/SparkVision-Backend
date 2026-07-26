@@ -8490,6 +8490,23 @@ export class MachineValuationService implements OnModuleInit {
           }
           return;
         } catch (error) {
+          const errName =
+            error && typeof error === "object" && "name" in error
+              ? String((error as { name?: unknown }).name || "")
+              : "";
+          const errCode =
+            error && typeof error === "object" && "Code" in error
+              ? String((error as { Code?: unknown }).Code || "")
+              : "";
+          const httpStatus =
+            error &&
+            typeof error === "object" &&
+            "$metadata" in error &&
+            (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+          // الملف غير موجود في Spaces — لا جدوى من إعادة المحاولة
+          if (errName === "NoSuchKey" || errCode === "NoSuchKey" || httpStatus === 404) {
+            throw new NotFoundException("ملف التخزين غير موجود أو تم حذفه.");
+          }
           if (attempt >= maxAttempts) throw error;
           await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
         }

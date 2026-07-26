@@ -17,6 +17,20 @@ let ApiErrorFilter = ApiErrorFilter_1 = class ApiErrorFilter {
     }
     catch(exception, host) {
         const response = host.switchToHttp().getResponse();
+        if (response.headersSent || response.writableEnded) {
+            const text = exception instanceof Error
+                ? exception.message
+                : typeof exception === "string"
+                    ? exception
+                    : "stream_error";
+            this.logger.error(`Unhandled API error after response started: ${text}`);
+            try {
+                response.destroy();
+            }
+            catch {
+            }
+            return;
+        }
         if (exception instanceof service_1.HttpError) {
             response.status(exception.status).json({
                 error: exception.code,

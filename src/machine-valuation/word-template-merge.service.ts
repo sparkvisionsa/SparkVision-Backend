@@ -51,11 +51,19 @@ function sanitizeImageLayout(value: unknown): MergeImageLayout {
     ? Math.max(1, Math.min(6, imagesPerRow))
     : 4;
   const providedPerPage = Math.trunc(Number(input.imagesPerPage));
-  const autoPerPage = safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4);
+  const autoPerPage =
+    safeImagesPerRow <= 1
+      ? 2
+      : safeImagesPerRow === 2
+        ? 4
+        : safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4);
+  // صف واحد → صورتان/صفحة، صفّان → 4/صفحة (لا تعتمد على قيم قديمة من الواجهة)
   const safeImagesPerPage =
-    Number.isFinite(providedPerPage) && providedPerPage > 0
-      ? Math.max(safeImagesPerRow, Math.min(60, providedPerPage))
-      : autoPerPage;
+    safeImagesPerRow <= 2
+      ? autoPerPage
+      : Number.isFinite(providedPerPage) && providedPerPage > 0
+        ? Math.max(safeImagesPerRow, Math.min(60, providedPerPage))
+        : autoPerPage;
   const clientRaw = Math.trunc(Number(input.clientImagesPerRow));
   const clientImagesPerRow =
     clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
@@ -85,14 +93,15 @@ function adaptiveAssetImageSettings(imageCount: number): OptimizeImageSettings {
 }
 
 /**
- * صور حسابات القيمة / الجداول النصية — أعلى دقة ممكنة للطباعة والزوم.
- * لا نربطها بعدد صور الأصول؛ عددها عادة صغير نسبياً.
+ * صور حسابات القيمة — دقة طباعة عالية.
+ * نستخدم JPEG أساسي (baseline) متوافقاً مع python-docx؛ mozjpeg/optimizeScans
+ * كانت تنتج Progressive JPEG فيفشل الإدراج بـ UnrecognizedImageError.
  */
 function valuationPrintImageSettings(): OptimizeImageSettings {
   return {
     maxWidth: 4800,
     maxHeight: 14000,
-    quality: 96,
+    quality: 95,
     chromaSubsampling: "4:4:4",
   };
 }
@@ -195,28 +204,48 @@ async function writeOptimizedJpegFile(
   destPath: string,
   settings: OptimizeImageSettings,
 ): Promise<boolean> {
+  const isPrintImage = settings.chromaSubsampling === "4:4:4";
   try {
-    await sharp(input)
-      .rotate()
+    // صور الطباعة: تصغير سريع في Node (Pillow يعيد ترميزاً آمناً لاحقاً)
+    // صور الأصول: mozjpeg أخف حجماً
+    let pipeline = sharp(input, { failOn: "none", sequentialRead: true }).rotate();
+    if (isPrintImage) {
+      pipeline = pipeline.toColourspace("srgb");
+    }
+    await pipeline
       .resize({
         width: settings.maxWidth,
         height: settings.maxHeight,
         fit: "inside",
         withoutEnlargement: true,
+        // أسرع من lanczos3 الافتراضي مع فرق ضئيل بعد حدّ الأبعاد
+        kernel: isPrintImage ? sharp.kernel.lanczos3 : sharp.kernel.mitchell,
       })
-      .jpeg({
-        quality: settings.quality,
-        mozjpeg: true,
-        chromaSubsampling: settings.chromaSubsampling,
-        // جداول/نصوص: تجنّب تنعيم إضافي يطمس الحواف
-        trellisQuantisation: settings.chromaSubsampling === "4:4:4",
-        overshootDeringing: settings.chromaSubsampling === "4:4:4",
-        optimizeScans: true,
-      })
+      .jpeg(
+        isPrintImage
+          ? {
+              quality: settings.quality,
+              mozjpeg: false,
+              chromaSubsampling: "4:4:4",
+              progressive: false,
+              optimizeScans: false,
+              trellisQuantisation: false,
+              overshootDeringing: false,
+              force: true,
+            }
+          : {
+              quality: settings.quality,
+              mozjpeg: true,
+              chromaSubsampling: "4:2:0",
+              progressive: false,
+              force: true,
+            },
+      )
       .toFile(destPath);
     return true;
   } catch {
     try {
+      // احتياطي: Pillow على بايثون سيعيد الترميز؛ احفظ الأصل إن فشل sharp
       await fs.promises.writeFile(destPath, input);
       return true;
     } catch {
@@ -418,8 +447,15 @@ async function runDiskDocxMergeWorker(
   });
 }
 
-/** تنزيل/ضغط صور متوازي محدود — أعلى من ذلك يضغط الذاكرة على Droplet 4GB. */
-const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 3;
+/**
+ * توازي التحميل/الضغط أثناء تجهيز الدمج.
+ * الأصول صغيرة نسبياً فتحتمل توازياً أعلى؛ صور الطباعة أكبر فتبقى معتدلة.
+ */
+const MV_MERGE_ASSET_FETCH_CONCURRENCY = Math.max(
+  4,
+  Math.min(10, typeof os.cpus === "function" ? os.cpus().length : 4),
+);
+const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(2, Math.min(4, MV_MERGE_ASSET_FETCH_CONCURRENCY));
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -808,11 +844,10 @@ export class WordTemplateMergeService {
     ctx: MvAccessContext,
   ): Promise<string[]> {
     if (sources.length === 0) return [];
-    // حسابات القيمة تحتاج توازي أقل قليلاً لأنها أكبر حجماً (جودة طباعة)
     const concurrency =
       settings.chromaSubsampling === "4:4:4"
-        ? Math.min(2, MV_MERGE_IMAGE_FETCH_CONCURRENCY)
-        : MV_MERGE_IMAGE_FETCH_CONCURRENCY;
+        ? MV_MERGE_PRINT_FETCH_CONCURRENCY
+        : MV_MERGE_ASSET_FETCH_CONCURRENCY;
     const paths = await mapWithConcurrency(sources, concurrency, async (source, index) => {
       try {
         let buffer: Buffer | null = null;
@@ -829,7 +864,18 @@ export class WordTemplateMergeService {
         const ok = await writeOptimizedJpegFile(buffer, destPath, settings);
         buffer = null;
         return ok ? destPath : null;
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
+        if (name === "NoSuchKey" || /NoSuchKey|not found|404/i.test(msg)) {
+          this.logger.warn(
+            `Word merge skipped missing image ${prefix}-${index + 1} for ${projectId}: ${name || msg}`,
+          );
+        } else {
+          this.logger.warn(
+            `Word merge skipped image ${prefix}-${index + 1} for ${projectId}: ${msg}`,
+          );
+        }
         return null;
       }
     });

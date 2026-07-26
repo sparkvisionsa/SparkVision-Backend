@@ -67,10 +67,16 @@ function sanitizeImageLayout(value) {
         ? Math.max(1, Math.min(6, imagesPerRow))
         : 4;
     const providedPerPage = Math.trunc(Number(input.imagesPerPage));
-    const autoPerPage = safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4);
-    const safeImagesPerPage = Number.isFinite(providedPerPage) && providedPerPage > 0
-        ? Math.max(safeImagesPerRow, Math.min(60, providedPerPage))
-        : autoPerPage;
+    const autoPerPage = safeImagesPerRow <= 1
+        ? 2
+        : safeImagesPerRow === 2
+            ? 4
+            : safeImagesPerRow * (safeImagesPerRow >= 4 ? 5 : 4);
+    const safeImagesPerPage = safeImagesPerRow <= 2
+        ? autoPerPage
+        : Number.isFinite(providedPerPage) && providedPerPage > 0
+            ? Math.max(safeImagesPerRow, Math.min(60, providedPerPage))
+            : autoPerPage;
     const clientRaw = Math.trunc(Number(input.clientImagesPerRow));
     const clientImagesPerRow = clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
     return {
@@ -95,7 +101,7 @@ function valuationPrintImageSettings() {
     return {
         maxWidth: 4800,
         maxHeight: 14000,
-        quality: 96,
+        quality: 95,
         chromaSubsampling: "4:4:4",
     };
 }
@@ -178,23 +184,38 @@ function mergeTimeoutMs(imageCount) {
     return Math.min(45 * 60_000, Math.max(240_000, 120_000 + imageCount * 900));
 }
 async function writeOptimizedJpegFile(input, destPath, settings) {
+    const isPrintImage = settings.chromaSubsampling === "4:4:4";
     try {
-        await (0, sharp_1.default)(input)
-            .rotate()
+        let pipeline = (0, sharp_1.default)(input, { failOn: "none", sequentialRead: true }).rotate();
+        if (isPrintImage) {
+            pipeline = pipeline.toColourspace("srgb");
+        }
+        await pipeline
             .resize({
             width: settings.maxWidth,
             height: settings.maxHeight,
             fit: "inside",
             withoutEnlargement: true,
+            kernel: isPrintImage ? sharp_1.default.kernel.lanczos3 : sharp_1.default.kernel.mitchell,
         })
-            .jpeg({
-            quality: settings.quality,
-            mozjpeg: true,
-            chromaSubsampling: settings.chromaSubsampling,
-            trellisQuantisation: settings.chromaSubsampling === "4:4:4",
-            overshootDeringing: settings.chromaSubsampling === "4:4:4",
-            optimizeScans: true,
-        })
+            .jpeg(isPrintImage
+            ? {
+                quality: settings.quality,
+                mozjpeg: false,
+                chromaSubsampling: "4:4:4",
+                progressive: false,
+                optimizeScans: false,
+                trellisQuantisation: false,
+                overshootDeringing: false,
+                force: true,
+            }
+            : {
+                quality: settings.quality,
+                mozjpeg: true,
+                chromaSubsampling: "4:2:0",
+                progressive: false,
+                force: true,
+            })
             .toFile(destPath);
         return true;
     }
@@ -361,7 +382,8 @@ async function runDiskDocxMergeWorker(manifest, imageCount) {
         }
     });
 }
-const MV_MERGE_IMAGE_FETCH_CONCURRENCY = 3;
+const MV_MERGE_ASSET_FETCH_CONCURRENCY = Math.max(4, Math.min(10, typeof os.cpus === "function" ? os.cpus().length : 4));
+const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(2, Math.min(4, MV_MERGE_ASSET_FETCH_CONCURRENCY));
 async function mapWithConcurrency(items, limit, fn) {
     if (items.length === 0)
         return [];
@@ -666,8 +688,8 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
         if (sources.length === 0)
             return [];
         const concurrency = settings.chromaSubsampling === "4:4:4"
-            ? Math.min(2, MV_MERGE_IMAGE_FETCH_CONCURRENCY)
-            : MV_MERGE_IMAGE_FETCH_CONCURRENCY;
+            ? MV_MERGE_PRINT_FETCH_CONCURRENCY
+            : MV_MERGE_ASSET_FETCH_CONCURRENCY;
         const paths = await mapWithConcurrency(sources, concurrency, async (source, index) => {
             try {
                 let buffer = null;
@@ -688,7 +710,15 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
                 buffer = null;
                 return ok ? destPath : null;
             }
-            catch {
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const name = err && typeof err === "object" && "name" in err ? String(err.name) : "";
+                if (name === "NoSuchKey" || /NoSuchKey|not found|404/i.test(msg)) {
+                    this.logger.warn(`Word merge skipped missing image ${prefix}-${index + 1} for ${projectId}: ${name || msg}`);
+                }
+                else {
+                    this.logger.warn(`Word merge skipped image ${prefix}-${index + 1} for ${projectId}: ${msg}`);
+                }
                 return null;
             }
         });

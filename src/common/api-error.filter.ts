@@ -16,6 +16,22 @@ export class ApiErrorFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost) {
     const response = host.switchToHttp().getResponse<Response>();
+    // تنزيل الملفات قد يبدأ الـ stream ثم يفشل (مثل NoSuchKey) — لا تحاول إرسال JSON بعدها.
+    if (response.headersSent || response.writableEnded) {
+      const text =
+        exception instanceof Error
+          ? exception.message
+          : typeof exception === "string"
+            ? exception
+            : "stream_error";
+      this.logger.error(`Unhandled API error after response started: ${text}`);
+      try {
+        response.destroy();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
 
     if (exception instanceof HttpError) {
       response.status(exception.status).json({

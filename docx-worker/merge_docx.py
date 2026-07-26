@@ -77,13 +77,20 @@ IMAGE_BOOKMARKS: dict[str, dict[str, Any]] = {
 }
 CLIENT_DOCS_IMAGES_PER_ROW = 2
 CLIENT_DOCS_IMAGES_PER_PAGE = 4
-# مرفق 3 (مستندات العميل): أقصى ملء للصفحة — هوامش شبه معدومة حتى تغلب الصور.
-CLIENT_DOCS_CONTENT_WIDTH_RATIO = 0.99
-CLIENT_DOCS_CONTENT_HEIGHT_RATIO = 0.995
+# مرفق 3: ملء صفحة عمودية (طولية) مثل القالب الأساسي — ليس عرضية.
+CLIENT_DOCS_CONTENT_WIDTH_RATIO = 0.95
+CLIENT_DOCS_CONTENT_HEIGHT_RATIO = 0.92
 CLIENT_DOCS_BOTTOM_MARGIN_PX = 0
 CLIENT_DOCS_GAP_PX = 1
-# احتياطي علوي ضئيل لأي عنوان مرفق متبقٍ في القالب (بدل ~0.65 بوصة الافتراضي).
-CLIENT_DOCS_TITLE_RESERVE_PX = 8
+CLIENT_DOCS_TITLE_RESERVE_PX = 28
+CLIENT_DOCS_SECTION_TITLE = "مرفق 3: المستندات المستلمة من العميل"
+CLIENT_IMAGE_BOOKMARK_ALIASES = (
+    "مستنداتعميل",
+    "مستنداتالعميل",
+    "ملفاتعميل",
+    "ملفاتالعميل",
+    "مرفقاتعميل",
+)
 
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
@@ -1373,16 +1380,28 @@ def ensure_jpeg(data: bytes, *, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> b
 
 
 def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
+    """JPEG أساسي (baseline) — python-docx يرفض غالباً Progressive/mozjpeg المعقّد."""
     if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    elif img.mode == "L":
         img = img.convert("RGB")
     out = io.BytesIO()
     img.save(
         out,
         format="JPEG",
         quality=max(80, min(98, int(quality))),
-        optimize=True,
-        subsampling=0,
+        optimize=False,
+        progressive=False,
+        subsampling=0,  # 4:4:4 — أوضح للنصوص والجداول
     )
+    return out.getvalue()
+
+
+def _save_docx_safe_png(img: Image.Image) -> bytes:
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGB")
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=False)
     return out.getvalue()
 
 
@@ -1641,13 +1660,17 @@ def downscale_jpeg_bytes(
     quality: int = DOCUMENT_IMAGE_JPEG_QUALITY,
     max_width: int | None = None,
     max_height: int | None = None,
+    force_reencode: bool = False,
 ) -> bytes:
-    """يحدّ الأبعاد مع الإبقاء على جودة طباعة عالية (بدون chroma subsampling)."""
+    """يحدّ الأبعاد ويعيد ترميز JPEG أساسي متوافق مع python-docx عند الحاجة."""
     try:
         img = Image.open(io.BytesIO(img_bytes))
+        img.load()
         source_format = img.format
-        img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+        img = img.convert("RGB")
         width, height = img.size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"invalid image size {width}x{height}")
         scale = 1.0
         if max_dimension > 0:
             longest = max(width, height)
@@ -1663,28 +1686,72 @@ def downscale_jpeg_bytes(
                 Image.LANCZOS,
             )
             return _save_print_jpeg(img, quality)
-        if source_format == "JPEG":
-            # ضمن الحد وJPEG أصلاً — أعد البايتات كما هي لتفادي جيل ضغط إضافي
-            return img_bytes
-        return _save_print_jpeg(img, quality)
-    except Exception:
+        # حسابات القيمة: دائماً أعد الترميز إلى baseline JPEG حتى لو المصدر JPEG
+        # (ملفات sharp/mozjpeg progressive كانت تسبب UnrecognizedImageError).
+        if force_reencode or source_format != "JPEG":
+            return _save_print_jpeg(img, quality)
+        return img_bytes
+    except Exception as exc:
+        log_exception("downscale_jpeg_bytes failed", exc)
         return img_bytes
 
 
-def prepare_valuation_image_bytes(img_bytes: bytes) -> bytes:
+def prepare_valuation_image_bytes(img_bytes: bytes) -> tuple[bytes, int, int]:
     """
     إعداد صورة حسابات قيمة للطباعة:
-    - دقة بكسل عالية للزوم الواضح داخل Word
-    - تصغير فقط إن تجاوزت الحد الأقصى
-    - ترميز JPEG واحد عالي الجودة (بدون إعادة ضغط مزدوجة)
+    - دائماً JPEG أساسي عبر Pillow (متوافق مع python-docx)
+    - تخطي ترميز sharp كان يسبب UnrecognizedImageError ثم PNG ضخم بطيء جداً
+    يعيد (bytes, width_px, height_px)
     """
-    return downscale_jpeg_bytes(
-        img_bytes,
-        VALUATION_IMAGE_MAX_DIMENSION_PX,
-        quality=VALUATION_IMAGE_JPEG_QUALITY,
-        max_width=4800,
-        max_height=14000,
-    )
+    if not img_bytes or len(img_bytes) < 32:
+        raise ValueError(f"valuation image empty or too small ({0 if not img_bytes else len(img_bytes)} bytes)")
+
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        img.load()
+        img = img.convert("RGB")
+        width, height = img.size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"invalid valuation size {width}x{height}")
+        scale = 1.0
+        longest = max(width, height)
+        if longest > VALUATION_IMAGE_MAX_DIMENSION_PX:
+            scale = min(scale, VALUATION_IMAGE_MAX_DIMENSION_PX / longest)
+        if width > 4800:
+            scale = min(scale, 4800 / width)
+        if height > 14000:
+            scale = min(scale, 14000 / height)
+        if scale < 1.0:
+            width = max(1, int(width * scale))
+            height = max(1, int(height * scale))
+            img = img.resize((width, height), Image.LANCZOS)
+        prepared = _save_print_jpeg(img, VALUATION_IMAGE_JPEG_QUALITY)
+        if not prepared or len(prepared) < 32:
+            raise ValueError("valuation image re-encode produced empty output")
+        return prepared, width, height
+    except Exception:
+        # مسار احتياطي بنفس الضمانات
+        prepared = downscale_jpeg_bytes(
+            img_bytes,
+            VALUATION_IMAGE_MAX_DIMENSION_PX,
+            quality=VALUATION_IMAGE_JPEG_QUALITY,
+            max_width=4800,
+            max_height=14000,
+            force_reencode=True,
+        )
+        if not prepared or len(prepared) < 32:
+            raise ValueError("valuation image re-encode produced empty output")
+        with Image.open(io.BytesIO(prepared)) as check:
+            check.load()
+            return prepared, check.size[0], check.size[1]
+
+
+def prepare_valuation_image_png_fallback(img_bytes: bytes) -> bytes:
+    """احتياطي نادر جداً — يُفضَّل JPEG؛ يُستدعى فقط إن رُفض JPEG بعد Pillow."""
+    img = Image.open(io.BytesIO(img_bytes))
+    img.load()
+    img = img.convert("RGB")
+    return _save_docx_safe_png(img)
 
 
 def crop_to_fill_jpeg_bytes(
@@ -1766,11 +1833,13 @@ def stretch_to_fill_canvas_jpeg_bytes(
     توحيد مساحة صور الأصول بدون اقتطاع وبدون هوامش داخلية:
     - الصورة كاملة تُمطَّط لتملأ الخلية 100%
     - كل الخلايا بنفس المقاس
-    - إعادة عيّنة LANCZOS متعددة الخطوات (جودة برامج الصور المحترفة)
+    - المصدر مضغوط مسبقاً من Node؛ إعادة عيّنة واحدة عند الحاجة فقط
     """
     try:
         img = Image.open(io.BytesIO(img_bytes))
-        img = img.convert("RGB")
+        img.load()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
     except Exception:
         return img_bytes
 
@@ -1783,6 +1852,9 @@ def stretch_to_fill_canvas_jpeg_bytes(
         target_height_emu,
         max_side_px,
     )
+    # إن طابقت الأبعاد اللوحة: ترميز Pillow آمن لـ python-docx فقط (بدون إعادة تحجيم)
+    if src_w == canvas_w and src_h == canvas_h:
+        return _save_print_jpeg(img, quality)
     stretched = _high_quality_stretch(img, canvas_w, canvas_h)
     return _save_print_jpeg(stretched, quality)
 
@@ -1915,23 +1987,28 @@ def normalize_docx_drawing_ids(docx_bytes: bytes) -> bytes:
 
 
 def normalize_docx_drawing_ids_inplace(docx_path: str) -> None:
-    """نفس التطبيع على ملف كبير دون بناء نسخة Base64/Buffer كاملة في Node."""
+    """
+    تطبيع معرّفات الرسم على القرص.
+    الصور (media) تُحفظ ZIP_STORED لأنها JPEG مضغوطة أصلاً — أسرع بكثير من إعادة deflate لمئات الملفات.
+    """
     tmp_path = f"{docx_path}.norm.tmp"
     next_id = 1
     changed_any = False
-    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
         for info in zin.infolist():
-            data = zin.read(info.filename)
-            if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+            name = info.filename
+            is_media = name.startswith("word/media/")
+            is_xml = name.startswith("word/") and name.endswith(".xml")
+            data = zin.read(name)
+            if is_xml:
                 rewritten, next_id = _renumber_drawing_ids_in_xml(data, next_id)
                 if rewritten is not None:
                     data = rewritten
                     changed_any = True
-            # الحفاظ على نوع الضغط الأصلي قدر الإمكان
-            if info.filename == "mimetype":
+            if name == "mimetype" or is_media:
                 zout.writestr(info, data, compress_type=zipfile.ZIP_STORED)
             else:
-                zout.writestr(info, data)
+                zout.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED)
     if changed_any:
         os.replace(tmp_path, docx_path)
     else:
@@ -2129,6 +2206,96 @@ def first_section_metrics_at_or_after(children: list[Any], start_idx: int):
     return None
 
 
+def portrait_a4_metrics() -> tuple[int, int, int, int, int, int]:
+    """مقاييس صفحة A4 طولية (مثل القالب الأساسي mv-word-template)."""
+    return (
+        DEFAULT_PAGE_WIDTH_EMU,
+        DEFAULT_PAGE_HEIGHT_EMU,
+        DEFAULT_PAGE_MARGIN_EMU,
+        DEFAULT_PAGE_MARGIN_EMU,
+        DEFAULT_PAGE_MARGIN_EMU,
+        DEFAULT_PAGE_MARGIN_EMU,
+    )
+
+
+def is_landscape_metrics(metrics: tuple[int, int, int, int, int, int] | None) -> bool:
+    if metrics is None:
+        return False
+    return metrics[0] > metrics[1]
+
+
+def ensure_portrait_metrics(
+    metrics: tuple[int, int, int, int, int, int] | None,
+) -> tuple[int, int, int, int, int, int]:
+    """أبقِ الهوامش إن أمكن لكن افرض عرضاً أصغر من الارتفاع (طولي)."""
+    if metrics is None:
+        return portrait_a4_metrics()
+    page_width, page_height, left_m, right_m, top_m, bottom_m = metrics
+    if page_width > page_height:
+        page_width, page_height = page_height, page_width
+    if page_width <= 0 or page_height <= 0:
+        return portrait_a4_metrics()
+    return page_width, page_height, left_m, right_m, top_m, bottom_m
+
+
+def apply_portrait_a4_to_sect_pr(sect_pr) -> None:
+    """حوّل إعدادات القسم إلى A4 طولي بدون اتجاه landscape."""
+    if sect_pr is None:
+        return
+    pg_sz = sect_pr.find(docx_qn("w:pgSz"))
+    if pg_sz is None:
+        pg_sz = make_docx_element("w:pgSz")
+        sect_pr.insert(0, pg_sz)
+    pg_sz.set(docx_qn("w:w"), str(emu_to_twips(DEFAULT_PAGE_WIDTH_EMU)))
+    pg_sz.set(docx_qn("w:h"), str(emu_to_twips(DEFAULT_PAGE_HEIGHT_EMU)))
+    orient_key = docx_qn("w:orient")
+    if orient_key in pg_sz.attrib:
+        del pg_sz.attrib[orient_key]
+
+    pg_mar = sect_pr.find(docx_qn("w:pgMar"))
+    if pg_mar is None:
+        pg_mar = make_docx_element("w:pgMar")
+        sect_pr.append(pg_mar)
+    margin_twips = str(emu_to_twips(DEFAULT_PAGE_MARGIN_EMU))
+    for side in ("top", "right", "bottom", "left", "header", "footer", "gutter"):
+        if pg_mar.get(docx_qn(f"w:{side}")) is None:
+            pg_mar.set(docx_qn(f"w:{side}"), margin_twips)
+
+
+def body_final_sect_pr(body):
+    children = list(body)
+    if not children:
+        return None
+    last = children[-1]
+    if getattr(last, "tag", None) == docx_qn("w:sectPr"):
+        return last
+    return None
+
+
+def make_section_break_paragraph_from_sect_pr(sect_pr, *, next_page: bool = True):
+    """فقرة فاصل أقسام: الـ sectPr هنا يغلق القسم السابق بخصائصه."""
+    break_p = make_docx_element("w:p")
+    p_pr = make_docx_element("w:pPr")
+    sect_copy = deepcopy(sect_pr)
+    if next_page:
+        type_el = sect_copy.find(docx_qn("w:type"))
+        if type_el is None:
+            type_el = make_docx_element("w:type")
+            sect_copy.insert(0, type_el)
+        type_el.set(docx_qn("w:val"), "nextPage")
+    p_pr.append(sect_copy)
+    break_p.append(p_pr)
+    return break_p
+
+
+def find_body_bookmark_index(children: list[Any], bookmark_names: tuple[str, ...] | list[str]):
+    for name in bookmark_names:
+        for idx, child in enumerate(children):
+            if block_contains_bookmark(child, name):
+                return idx, name
+    return None, None
+
+
 def document_valuation_image_layout_emu(
     doc,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
@@ -2175,9 +2342,13 @@ def scaled_image_size_for_width_only(
     img_bytes: bytes,
     target_width_emu: int,
     max_height_emu: int | None = None,
+    *,
+    width_px: int | None = None,
+    height_px: int | None = None,
 ) -> tuple[int, int]:
-    with Image.open(io.BytesIO(img_bytes)) as img:
-        width_px, height_px = img.size
+    if width_px is None or height_px is None:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            width_px, height_px = img.size
     if width_px <= 0 or height_px <= 0:
         raise ValueError("invalid image dimensions")
     cx = max(1, int(target_width_emu))
@@ -2341,8 +2512,11 @@ def make_docx_image_table_element(
                 continue
             img_bytes: bytes | None = None
             try:
-                img_bytes = ensure_jpeg_bytes(resolve_image_bytes(images[img_index]))
+                # المصدر جاهز JPEG من Node — لا تعيد الترميز مرتين قبل الإدراج
+                img_bytes = resolve_image_bytes(images[img_index])
                 if contain_images:
+                    # مستندات العميل: ترميز Pillow واحد متوافق مع python-docx
+                    img_bytes = ensure_jpeg_bytes(img_bytes, DOCUMENT_IMAGE_JPEG_QUALITY)
                     fit_w, fit_h = scaled_image_size_for_width(
                         img_bytes,
                         cell_width_emu,
@@ -2356,7 +2530,7 @@ def make_docx_image_table_element(
                         height=Emu(fit_h),
                     )
                 else:
-                    # صور الأصول: تمطيط لملء الخلية (المصدر مضغوط مسبقاً من Node)
+                    # صور الأصول: تمطيط لملء الخلية (يعيد الترميز مرة واحدة فقط)
                     stretched = stretch_to_fill_canvas_jpeg_bytes(
                         img_bytes,
                         cell_width_emu,
@@ -2384,21 +2558,53 @@ def make_docx_valuation_image_element(
     doc,
     image: ImageSource,
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
+    *,
+    layout_cache: dict[str, Any] | None = None,
 ) -> tuple[Any, int]:
     from docx.shared import Emu, Pt
 
     p = doc.add_paragraph()
+    raw = resolve_image_bytes(image)
     try:
-        # بكسل عالي للدقة عند الزوم؛ حجم العرض (EMU) فقط يُقيَّد لحدود صفحة Word.
-        img_bytes = prepare_valuation_image_bytes(resolve_image_bytes(image))
-        target_width, indent_left, indent_right = document_valuation_image_layout_emu(doc, section_metrics)
-        _content_width, content_height = document_content_box_emu(doc, title_reserve_emu=0)
-        max_height = min(MAX_DRAWING_HEIGHT_EMU, max(1, int(content_height * 0.98)))
-        cx, cy = scaled_image_size_for_width_only(img_bytes, target_width, max_height)
+        # بكسل عالي + JPEG Pillow أساسي (مرة واحدة) — بدون مسار PNG الثقيل
+        img_bytes, width_px, height_px = prepare_valuation_image_bytes(raw)
+        raw = None  # حرر مبكراً
+        cache = layout_cache if layout_cache is not None else {}
+        if "target_width" not in cache:
+            target_width, indent_left, indent_right = document_valuation_image_layout_emu(
+                doc, section_metrics
+            )
+            _content_width, content_height = document_content_box_emu(doc, title_reserve_emu=0)
+            cache["target_width"] = target_width
+            cache["indent_left"] = indent_left
+            cache["indent_right"] = indent_right
+            cache["max_height"] = min(MAX_DRAWING_HEIGHT_EMU, max(1, int(content_height * 0.98)))
+        target_width = cache["target_width"]
+        indent_left = cache["indent_left"]
+        indent_right = cache["indent_right"]
+        max_height = cache["max_height"]
+        cx, cy = scaled_image_size_for_width_only(
+            img_bytes,
+            target_width,
+            max_height,
+            width_px=width_px,
+            height_px=height_px,
+        )
         configure_rtl_valuation_image_paragraph(p, indent_left, indent_right)
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
-        p.add_run().add_picture(io.BytesIO(img_bytes), width=Emu(cx), height=Emu(cy))
+        try:
+            p.add_run().add_picture(io.BytesIO(img_bytes), width=Emu(cx), height=Emu(cy))
+        except Exception as jpeg_exc:
+            # نادر بعد Pillow — PNG من البايتات الجاهزة (بدون إعادة تحجيم من المصدر)
+            log_exception("valuation JPEG insert failed, trying PNG", jpeg_exc)
+            for run in list(p.runs):
+                el = run._element
+                parent = el.getparent()
+                if parent is not None:
+                    parent.remove(el)
+            png_bytes = prepare_valuation_image_png_fallback(img_bytes)
+            p.add_run().add_picture(io.BytesIO(png_bytes), width=Emu(cx), height=Emu(cy))
         return detach_docx_body_element(p._element), 1
     except Exception as exc:
         log_exception("Skipped valuation image", exc)
@@ -2421,6 +2627,71 @@ def block_is_placeholder_image(block) -> bool:
         return False
     text = "".join(node.text or "" for node in block.iter(docx_qn("w:t")))
     return not text.strip()
+
+
+def insert_image_grid_pages(
+    doc,
+    body,
+    insert_at: int,
+    images: list[ImageSource],
+    layout: str,
+    images_per_row: int,
+    images_per_page: int,
+    section_metrics: tuple[int, int, int, int, int, int] | None,
+    asset_max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+) -> tuple[int, int]:
+    """يدرج صفحات صور عند insert_at. يعيد (عدد المدرج, موضع الإدراج التالي)."""
+    inserted = 0
+
+    def insert_elem(elem: Any) -> None:
+        nonlocal insert_at
+        body.insert(insert_at, elem)
+        insert_at += 1
+
+    if layout == "valuation_pages":
+        layout_cache: dict[str, Any] = {}
+        for image in images:
+            image_elem, count = make_docx_valuation_image_element(
+                doc, image, section_metrics, layout_cache=layout_cache
+            )
+            if count <= 0:
+                continue
+            if inserted > 0:
+                insert_elem(make_docx_page_break_element(doc))
+            insert_elem(image_elem)
+            inserted += count
+            if inserted % 40 == 0:
+                gc.collect()
+        return inserted, insert_at
+
+    image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
+    fill_client = layout == "client_grid"
+    page_number = 0
+    for page_idx in range(0, len(images), images_per_page):
+        if page_idx > 0:
+            insert_elem(make_docx_page_break_element(doc))
+        table_elem, count = make_docx_image_table_element(
+            doc,
+            images[page_idx : page_idx + images_per_page],
+            images_per_row,
+            image_rows_per_page,
+            section_metrics,
+            fill_content_height=fill_client,
+            content_height_ratio=CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0,
+            bottom_margin_emu=CLIENT_DOCS_BOTTOM_MARGIN_EMU if fill_client else 0,
+            contain_images=fill_client,
+            content_width_ratio=CLIENT_DOCS_CONTENT_WIDTH_RATIO if fill_client else IMAGE_CONTENT_WIDTH_RATIO,
+            gap_dxa=CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
+            gap_emu=CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
+            title_reserve_emu=CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None,
+            asset_max_side_px=asset_max_side_px,
+        )
+        insert_elem(table_elem)
+        inserted += count
+        page_number += 1
+        if page_number % 10 == 0:
+            gc.collect()
+    return inserted, insert_at
 
 
 def replace_image_bookmark_with_docx_elements(
@@ -2455,55 +2726,106 @@ def replace_image_bookmark_with_docx_elements(
     for idx in range(target_idx, start_idx - 1, -1):
         body.remove(children[idx])
 
-    inserted = 0
     insert_at = start_idx
     section_metrics = first_section_metrics_at_or_after(children, target_idx)
+    inserted, _ = insert_image_grid_pages(
+        doc,
+        body,
+        insert_at,
+        images,
+        layout,
+        images_per_row,
+        images_per_page,
+        section_metrics,
+        asset_max_side_px,
+    )
+    return inserted
 
-    def insert_elem(elem: Any) -> None:
-        nonlocal insert_at
-        body.insert(insert_at, elem)
+
+def insert_client_images_docx(
+    doc,
+    images: list[ImageSource],
+    images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
+    images_per_page: int = CLIENT_DOCS_IMAGES_PER_PAGE,
+) -> int:
+    """
+    إدراج مستندات العميل:
+    - يبحث عن الإشارة المرجعية بعدة أسماء شائعة
+    - إن وُجدت داخل قسم عرضي يُغلق ويُفتح قسم A4 طولي
+    - إن لم تُوجد تُضاف في نهاية المستند كقسم طولي جديد (مثل القالب الأساسي)
+    """
+    if not images:
+        log("image bookmark 'مستنداتعميل': no images to insert")
+        return 0
+
+    body = doc.element.body
+    children = list(body)
+    target_idx, found_name = find_body_bookmark_index(children, CLIENT_IMAGE_BOOKMARK_ALIASES)
+
+    if target_idx is None:
+        log(
+            "image bookmark 'مستنداتعميل': not found in document body; "
+            "appending portrait A4 client section at end"
+        )
+        final_sect = body_final_sect_pr(body)
+        insert_at = len(list(body)) - (1 if final_sect is not None else 0)
+        if final_sect is not None:
+            body.insert(insert_at, make_section_break_paragraph_from_sect_pr(final_sect, next_page=True))
+            insert_at += 1
+            apply_portrait_a4_to_sect_pr(final_sect)
+        else:
+            # مستند بلا sectPr نهائي — أضف واحداً طولياً
+            final_sect = make_docx_element("w:sectPr")
+            apply_portrait_a4_to_sect_pr(final_sect)
+            body.append(final_sect)
+
+        section_metrics = portrait_a4_metrics()
+        title_elem = make_docx_title_element(doc, CLIENT_DOCS_SECTION_TITLE)
+        body.insert(insert_at, title_elem)
         insert_at += 1
+        inserted, _ = insert_image_grid_pages(
+            doc,
+            body,
+            insert_at,
+            images,
+            "client_grid",
+            images_per_row,
+            images_per_page,
+            section_metrics,
+        )
+        return inserted
 
-    if layout == "valuation_pages":
-        for image_idx, image in enumerate(images):
-            image_elem, count = make_docx_valuation_image_element(doc, image, section_metrics)
-            if count <= 0:
-                continue
-            if inserted > 0:
-                insert_elem(make_docx_page_break_element(doc))
-            insert_elem(image_elem)
-            inserted += count
-            if inserted % 25 == 0:
-                gc.collect()
-    else:
-        image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
-        fill_client = layout == "client_grid"
-        page_number = 0
-        for page_idx in range(0, len(images), images_per_page):
-            if page_idx > 0:
-                insert_elem(make_docx_page_break_element(doc))
-            table_elem, count = make_docx_image_table_element(
-                doc,
-                images[page_idx : page_idx + images_per_page],
-                images_per_row,
-                image_rows_per_page,
-                section_metrics,
-                fill_content_height=fill_client,
-                content_height_ratio=CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0,
-                bottom_margin_emu=CLIENT_DOCS_BOTTOM_MARGIN_EMU if fill_client else 0,
-                contain_images=fill_client,
-                content_width_ratio=CLIENT_DOCS_CONTENT_WIDTH_RATIO if fill_client else IMAGE_CONTENT_WIDTH_RATIO,
-                gap_dxa=CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
-                gap_emu=CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
-                title_reserve_emu=CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None,
-                asset_max_side_px=asset_max_side_px,
-            )
-            insert_elem(table_elem)
-            inserted += count
-            page_number += 1
-            if page_number % 10 == 0:
-                gc.collect()
+    log(f"client image bookmark found: {found_name!r}")
+    start_idx = target_idx
+    while start_idx > 0 and block_is_placeholder_image(children[start_idx - 1]):
+        start_idx -= 1
+    for idx in range(target_idx, start_idx - 1, -1):
+        body.remove(children[idx])
 
+    insert_at = start_idx
+    raw_metrics = first_section_metrics_at_or_after(children, target_idx)
+    section_metrics = ensure_portrait_metrics(raw_metrics)
+
+    if is_landscape_metrics(raw_metrics):
+        final_sect = body_final_sect_pr(body)
+        if final_sect is not None:
+            # أغلق القسم العرضي السابق ثم اجعل بقية المستند (مرفق العميل) طولياً
+            body.insert(insert_at, make_section_break_paragraph_from_sect_pr(final_sect, next_page=True))
+            insert_at += 1
+            apply_portrait_a4_to_sect_pr(final_sect)
+            section_metrics = portrait_a4_metrics()
+            log("client docs section forced to portrait A4 (was landscape)")
+
+    inserted, _ = insert_image_grid_pages(
+        doc,
+        body,
+        insert_at,
+        images,
+        "client_grid",
+        images_per_row,
+        images_per_page,
+        section_metrics,
+    )
     return inserted
 
 
@@ -2536,12 +2858,9 @@ def apply_image_bookmarks_docx_api(
     gc.collect()
     log(f"valuation images inserted: {stats['valuation']}")
 
-    stats["client"] = replace_image_bookmark_with_docx_elements(
+    stats["client"] = insert_client_images_docx(
         doc,
-        "مستنداتعميل",
         client_images or [],
-        True,
-        "client_grid",
         client_images_per_row,
         client_images_per_page,
     )
@@ -2626,12 +2945,21 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
     except (TypeError, ValueError):
         images_per_row = IMAGES_PER_ROW
-    auto_images_per_page = images_per_row * (5 if images_per_row >= 4 else 4)
-    try:
-        images_per_page = max(1, int(image_layout.get("imagesPerPage", auto_images_per_page)))
-    except (TypeError, ValueError):
+    if images_per_row <= 1:
+        auto_images_per_page = 2
+    elif images_per_row == 2:
+        auto_images_per_page = 4
+    else:
+        auto_images_per_page = images_per_row * (5 if images_per_row >= 4 else 4)
+    # لصف واحد أو اثنين نفرض التخطيط المطلوب حتى لو وصلت قيمة قديمة من الواجهة
+    if images_per_row <= 2:
         images_per_page = auto_images_per_page
-    images_per_page = max(images_per_row, images_per_page)
+    else:
+        try:
+            images_per_page = max(1, int(image_layout.get("imagesPerPage", auto_images_per_page)))
+        except (TypeError, ValueError):
+            images_per_page = auto_images_per_page
+        images_per_page = max(images_per_row, images_per_page)
     try:
         client_images_per_row = int(image_layout.get("clientImagesPerRow", CLIENT_DOCS_IMAGES_PER_ROW))
     except (TypeError, ValueError):
