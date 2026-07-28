@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-دمج تقرير Word عبر الإشارات المرجعية (Bookmarks) — lxml.
+دمج تقرير Word عبر المتغيرات المرئية داخل قالب «تقرير تقييم.docx».
 Usage: python merge_docx.py < payload.json > output.docx
 """
 
@@ -28,53 +28,95 @@ ImageSource = Union[bytes, str]
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+WP14_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
-REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
+IMAGE_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+)
 
-TEXT_BOOKMARKS: dict[str, list[str]] = {
-    "reportTitle": ["عنوان", "عنوانغ", "غلاف", "عنواناصل"],
-    "clientName": ["عميل", "عميلاستخدام", "عميلغلاف"],
-    "clientIdentity": ["عميلهوية"],
-    "valuationBasis": ["اساس", "أساس", "اساسالقيمة", "أساسالقيمة"],
-    "valuationPurpose": ["الغرض", "غرضالتقييم"],
-    "agreementDate": [
-        "تاريخاتفاق",
-        "تاريخالاتفاق",
-        "تاريخاتفاقية",
-        "تاريخالاتفاقية",
-        "تاريخالتعاقد",
-        "تاريخاتفاقتاريخاصدار",
-    ],
-    "reportIssueDate": [
-        "تاريخاصدار",
-        "تاريخالإصدار",
-        "تاريخاصدارالتقرير",
-        "تاريخإصدارالتقرير",
-        "تاريخالتقرير",
-    ],
-    "valuationDate": ["تاريختقييم", "تاريختقييمت", "تاريختقييمق", "تاريخالتقييم"],
-    "inspectionDate": ["تاريخمعاين", "تاريخمعاينة", "تاريخالمعاين", "تاريخالمعاينة", "تاريخفحص", "تاريخالفحص"],
-    "valuePremise": ["فرضية", "فرضية1"],
-    "finalValue": ["قيمةنهائية", "قيمة", "القيمة", "رأيالقيمة", "رايالقيمة"],
-    "finalValueAmount": ["قيمةرقم", "رقمالقيمة", "قيمةعدد", "رأيالقيمةرقم"],
-    "finalValueWords": ["قيمةاحرف"],
-    "inspectionLocation": ["موقع"],
-    "inspectionMapUrl": ["قوقل"],
+# متغيرات قالب «تقرير تقييم.docx». المصدر الوحيد هو النص الظاهر بين « » أو << >>.
+# القيم هي مفاتيح textValues القادمة من الخادم؛ لا تُقرأ أسماء حقول Word لتحديد القيمة.
+PLACEHOLDER_FIELDS: dict[str, str] = {
+    "عنوان_التقرير": "reportTitle",
+    "العميل": "clientName",
+    "تاريخ_إصدار_التقرير": "reportIssueDate",
+    "الرقم_المرجعي": "reportReference",
+    "اسلوب_التقييم": "valuationMethod",
+    "أسلوب_التقييم": "valuationMethod",
+    "الأسلوب_المستخدم": "valuationMethod",
+    "الغرض_من_التقييم": "valuationPurpose",
+    "اساس_القيمة": "valuationBasis",
+    "تاريخ_التقييم": "valuationDate",
+    "تاريخ_الاتفاقية": "agreementDate",
+    "تاريخ_المعاينة": "inspectionDate",
+    "أصلأصول": "assetSingularPlural",
+    "نشاط_الشركة": "clientActivity",
+    "ممثل_العميل": "clientRepresentativeName",
+    "صفتة": "clientRepresentativeRole",
+    "هوية_المستخدمين_الأخرين": "intendedUsers",
+    "الأصل_المعنية_الأصل_محل_التقييم": "assetSubjectDescription",
+    "أساس_القيمة_المستخدم": "valuationBasisDefinition",
+    "فرضية_القيمة": "valuePremiseDefinition",
+    "المدينة": "inspectionLocation",
+    "رابط_قوقل_ماب": "inspectionMapUrl",
+    "رأي_القيمة_رقما_وكتابتا": "finalValueOpinion",
 }
 
-IMAGE_BOOKMARKS: dict[str, dict[str, Any]] = {
-    "صوراصول": {"field": "asset", "layout": "paged_grid3", "remove_placeholder": True},
-    "صورحسابات": {"field": "valuation", "layout": "paged_grid3", "remove_placeholder": True},
-    "مستنداتعميل": {
-        "field": "client",
-        "layout": "client_grid",
-        "remove_placeholder": True,
-        "images_per_row": 2,
-        "images_per_page": 4,
-    },
+IMAGE_SECTION_HEADINGS: dict[str, tuple[str, ...]] = {
+    "valuation": (
+        "مرفق 1: الوصف الجزئي وحسابات القيمة",
+        "مرفق1: الوصف الجزئي وحسابات القيمة",
+    ),
+    "asset": (
+        "مرفق 2: الصور الفوتوغرافية",
+        "مرفق2: الصور الفوتوغرافية",
+    ),
+    "client": (
+        "مرفق 3: المستندات المستلمة من العميل",
+        "مرفق3: المستندات المستلمة من العميل",
+    ),
 }
+
+REPORT_PREPARER_TABLE_HEADERS = (
+    "بيانات المقيم",
+    "دور المقيم",
+    "التوقيع",
+)
+REPORT_PREPARER_DEFAULT_ROLES = (
+    "الإدارة التنفيذية وتعميد ومراجعة المخرجات النهائية",
+    "إعداد التقرير",
+    "المعاينة",
+)
+REPORT_PREPARER_MAX_ROWS = 100
+REPORT_SIGNATURE_MAX_SOURCE_BYTES = 20 * 1024 * 1024
+# لوحة PNG بنسبة صورة القالب (~1.743) بدقة أعلى لطباعة أوضح بعد تكبير العرض.
+REPORT_SIGNATURE_CANVAS_SIZE = (1400, 803)
+# تكبير مساحة التوقيع الظاهرة في Word أمام كل مُعدّ (بالنسبة لأبعاد wp:extent في القالب).
+REPORT_SIGNATURE_DISPLAY_SCALE = 1.85
+
+# خط التقرير بعد الدمج: Tajawal لكل النص، مع الإبقاء على Cocon أسفل الغلاف فقط.
+REPORT_BODY_FONT = "Tajawal"
+REPORT_COVER_FOOTER_FONT = "CoconNextArabic-Light"
+REPORT_COCON_FONT_NAMES = {
+    "CoconNextArabic-Light",
+    "Cocon® Next Arabic",
+    "Cocon Next Arabic",
+}
+REPORT_COVER_FOOTER_MARKERS = (
+    "الرقم المرجعي",
+    "الرقم_المرجعي",
+    "تاريخ التقرير",
+    "تاريخ_إصدار_التقرير",
+    "تاريخ إصدار التقرير",
+)
+
+VISIBLE_VARIABLE_RE = re.compile(
+    r"«(?P<guillemet>[^»\r\n]+)»|<<(?P<ascii>[^<>\r\n]+)>>"
+)
 CLIENT_DOCS_IMAGES_PER_ROW = 2
 CLIENT_DOCS_IMAGES_PER_PAGE = 4
 # مرفق 3: ملء صفحة عمودية (طولية) مثل القالب الأساسي — ليس عرضية.
@@ -84,13 +126,6 @@ CLIENT_DOCS_BOTTOM_MARGIN_PX = 0
 CLIENT_DOCS_GAP_PX = 1
 CLIENT_DOCS_TITLE_RESERVE_PX = 28
 CLIENT_DOCS_SECTION_TITLE = "مرفق 3: المستندات المستلمة من العميل"
-CLIENT_IMAGE_BOOKMARK_ALIASES = (
-    "مستنداتعميل",
-    "مستنداتالعميل",
-    "ملفاتعميل",
-    "ملفاتالعميل",
-    "مرفقاتعميل",
-)
 
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
@@ -161,33 +196,32 @@ def adaptive_asset_max_side(count: int) -> int:
     if count <= 2000:
         return 680
     return 600
+
+
+def adaptive_asset_quality(count: int, requested_quality: int) -> int:
+    """اعتبر اختيار المستخدم سقفاً، وخفّضه فقط للتقارير ذات الصور الكثيرة جداً."""
+    if count <= 80:
+        ceiling = 95
+    elif count <= 250:
+        ceiling = 90
+    elif count <= 800:
+        ceiling = 84
+    elif count <= 2000:
+        ceiling = 78
+    else:
+        ceiling = 72
+    return min(requested_quality, ceiling)
+
+
 DEFAULT_PAGE_WIDTH_EMU = int(8.27 * EMU_PER_INCH)
 DEFAULT_PAGE_HEIGHT_EMU = int(11.69 * EMU_PER_INCH)
 DEFAULT_PAGE_MARGIN_EMU = int(0.5 * EMU_PER_INCH)
-COVER_BOOKMARK_FONT_FAMILY = "Tajawal"
-# غلاف: عنوان أكبر وأفخم (24pt bold)، اسم العميل (16pt bold)،
-# هامش يمين واضح من حافة الصفحة (~40px) + حشوة داخلية لمربع النص.
-COVER_TITLE_FONT_SIZE_HALF_POINTS = 48  # 24pt
-COVER_CLIENT_FONT_SIZE_HALF_POINTS = 32  # 16pt
-COVER_EDGE_MARGIN_PX = 40
-COVER_EDGE_MARGIN_TWIPS = PIXEL_DXA * COVER_EDGE_MARGIN_PX
-COVER_EDGE_MARGIN_EMU = PIXEL_EMU * COVER_EDGE_MARGIN_PX
-COVER_EDGE_MARGIN_PT = round(COVER_EDGE_MARGIN_PX * 72 / 96, 2)
-COVER_SHAPE_BOOKMARK_NAMES = ("عنوان", "غلاف", "عميلغلاف")
-WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
-VML_NS = "urn:schemas-microsoft-com:vml"
 ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
 MOJIBAKE_RE = re.compile(r"[ØÙÃÂÐÑ]")
 
 
 def w(tag: str) -> str:
     return f"{{{W_NS}}}{tag}"
-
-
-def set_w_attrs(el: etree._Element, attrs: dict[str, Any]) -> etree._Element:
-    for key, value in attrs.items():
-        el.set(w(key), str(value))
-    return el
 
 
 def log(msg: str) -> None:
@@ -218,7 +252,7 @@ def ensure_jpeg_bytes(img_bytes: bytes, quality: int = DOCUMENT_IMAGE_JPEG_QUALI
         return img_bytes
 
 
-def normalize_bookmark_name(name: str) -> str:
+def normalize_heading_text(name: str) -> str:
     cleaned = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", repair_mojibake_text(name or ""))
     return re.sub(r"[\s_\-.،؛:\u060c\u061b\u0640]+", "", cleaned).strip().lower()
 
@@ -263,136 +297,570 @@ def sanitize_xml_text(value: str, strip: bool = True) -> str:
     return cleaned.strip() if strip else cleaned
 
 
-def build_name_to_text(text_values: dict[str, str], text_by_name: dict[str, str]) -> dict[str, str]:
-    out = {
-        k: sanitize_xml_text(v)
-        for k, v in text_by_name.items()
-        if v and sanitize_xml_text(str(v))
+def serialize_word_xml(root: etree._Element) -> bytes:
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
+    )
+
+
+def normalize_header_floating_wraps(xml_bytes: bytes) -> tuple[bytes, int]:
+    """
+    اجعل رسومات الرأس خلف النص بلا التفاف.
+
+    القالب يحتوي صورة رأس بطول الصفحة مع wrapTight؛ Word كان يلف جداول الصور
+    حولها فيسمح بصف واحد فقط لكل صفحة ويضاعف فواصل الصفحات.
+    """
+    root = etree.fromstring(xml_bytes)
+    changed = 0
+    wrap_tags = {
+        f"{{{WP_NS}}}wrapTight",
+        f"{{{WP_NS}}}wrapSquare",
+        f"{{{WP_NS}}}wrapThrough",
+        f"{{{WP_NS}}}wrapTopAndBottom",
     }
-    for field, names in TEXT_BOOKMARKS.items():
-        val = sanitize_xml_text(str(text_values.get(field, "")))
-        if not val:
+    for anchor in root.iter(f"{{{WP_NS}}}anchor"):
+        wrapping_children = [
+            child for child in list(anchor)
+            if child.tag in wrap_tags
+        ]
+        if not wrapping_children:
             continue
-        for name in names:
-            out.setdefault(name, val)
-    return out
+        for child in wrapping_children:
+            index = anchor.index(child)
+            anchor.remove(child)
+            anchor.insert(index, etree.Element(f"{{{WP_NS}}}wrapNone"))
+        if anchor.get("behindDoc") != "1":
+            anchor.set("behindDoc", "1")
+        if anchor.get("allowOverlap") != "1":
+            anchor.set("allowOverlap", "1")
+        changed += 1
+    return serialize_word_xml(root), changed
 
 
-CONTEXTUAL_TEXT_RULES: list[dict[str, Any]] = [
-    {
-        "field": "clientName",
-        "before": ["والعميل"],
-        "after": ["حسب نطاق"],
-    },
-    {
-        "field": "valuationPurpose",
-        "before": ["لغرض"],
-        "after": ["على أساس"],
-    },
-    {
-        "field": "valuationBasis",
-        "before": ["على أساس"],
-        "after": ["في تاريخ التقييم"],
-    },
-    {
-        "field": "valuationDate",
-        "before": ["في تاريخ التقييم"],
-        "after": [""],
-        "normalize_existing": True,
-    },
-    {
-        "field": "valuationDate",
-        "before": ["تاريخ التقييم هو"],
-        "after": ["م.", "م"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "valuationDate",
-        "before": ["تاريخ التقييم"],
-        "after": ["م.", "م"],
-        "not_contains": ["تاريخ التقييم هو"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "agreementDate",
-        "before": ["تاريخ الاتفاقية", "تاريخ اتفاقية"],
-        "after": ["م.", "م"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "inspectionDate",
-        "before": ["تاريخ المعاينة", "تاريخ معاينة"],
-        "after": ["م.", "م"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "reportIssueDate",
-        "before": ["تاريخ إصدار التقرير", "تاريخ اصدار التقرير", "تاريخ الإصدار", "تاريخ الاصدار"],
-        "after": ["م.", "م"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "clientIdentity",
-        "before": ["العميل هو"],
-        "after": ["ونوعها"],
-    },
-    {
-        "field": "valuationPurpose",
-        "before": ["نطاق التقييم هو"],
-        "after": ["حيث أن الغرض"],
-    },
-    {
-        "field": "clientName",
-        "before": ["للمستخدمين المقتصرين وهم العميل"],
-        "after": ["ومركز"],
-    },
-    {
-        "field": "inspectionLocation",
-        "before": ["مدينة"],
-        "after": ["،", ","],
-        "contains": ["تمت المعاينة"],
-        "normalize_existing": True,
-    },
-    {
-        "field": "inspectionDate",
-        "before": ["بتاريخ"],
-        "after": ["م.", "م"],
-        "contains": ["تمت المعاينة"],
-        "normalize_existing": True,
-        "overwrite": True,
-    },
-    {
-        "field": "finalValueAmount",
-        "before": ["("],
-        "after": ["ر.س", "ر.س.", "ريال"],
-        "contains": ["رأي قيمة"],
-        "overwrite": True,
-    },
-]
+def collect_report_preparers(payload: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
+    """
+    اقرأ صفوف معدّي التقرير من الحمولة.
+
+    وجود المفتاح له دلالة مستقلة عن محتواه: عند وجوده يجب حذف صفوف القالب
+    الثابتة حتى لو كانت القائمة فارغة. غيابه وحده يحافظ على القالب للتوافق
+    مع المستدعين القدامى.
+    """
+    if "reportPreparers" not in payload:
+        return False, []
+    raw_rows = payload.get("reportPreparers")
+    if not isinstance(raw_rows, list):
+        return True, []
+
+    rows: list[dict[str, Any]] = []
+    for item in raw_rows[:REPORT_PREPARER_MAX_ROWS]:
+        if not isinstance(item, dict):
+            continue
+
+        def text_field(*keys: str, limit: int) -> str:
+            for key in keys:
+                value = item.get(key)
+                if value is None:
+                    continue
+                cleaned = sanitize_xml_text(str(value))
+                if cleaned:
+                    return cleaned[:limit]
+            return ""
+
+        index = len(rows)
+        report_role = text_field("reportRole", "preparerRole", limit=2_000)
+        if not report_role and index < len(REPORT_PREPARER_DEFAULT_ROLES):
+            report_role = REPORT_PREPARER_DEFAULT_ROLES[index]
+
+        rows.append(
+            {
+                "userId": text_field("userId", "id", limit=200),
+                "name": text_field(
+                    "reportDisplayName",
+                    "displayName",
+                    "name",
+                    limit=500,
+                ),
+                "jobTitle": text_field("jobTitle", "roleLabel", limit=1_000),
+                "membershipNo": text_field(
+                    "membershipNo",
+                    "membershipNumber",
+                    limit=200,
+                ),
+                "reportRole": report_role,
+                "signaturePath": str(item.get("signaturePath") or "").strip(),
+                "signatureImageDataUrl": str(
+                    item.get("signatureImageDataUrl") or ""
+                ).strip(),
+                "signatureBase64": str(
+                    item.get("signatureBase64")
+                    or item.get("signatureImageBase64")
+                    or ""
+                ).strip(),
+            }
+        )
+    return True, rows
 
 
-def is_image_bookmark(name: str) -> bool:
-    norm = normalize_bookmark_name(name)
-    return any(normalize_bookmark_name(k) == norm for k in IMAGE_BOOKMARKS)
+def report_preparer_signature_bytes(row: dict[str, Any]) -> bytes | None:
+    path = str(row.get("signaturePath") or "").strip()
+    if path and os.path.isfile(path):
+        try:
+            if os.path.getsize(path) > REPORT_SIGNATURE_MAX_SOURCE_BYTES:
+                log(f"report signature skipped (too large): {path}")
+                return None
+            with open(path, "rb") as fh:
+                data = fh.read(REPORT_SIGNATURE_MAX_SOURCE_BYTES + 1)
+            return data if 0 < len(data) <= REPORT_SIGNATURE_MAX_SOURCE_BYTES else None
+        except OSError as exc:
+            log_exception("report signature path read failed", exc)
+
+    encoded = str(row.get("signatureImageDataUrl") or "").strip()
+    if encoded:
+        match = re.match(
+            r"^data:image/[a-z0-9.+-]+;base64,(?P<data>.+)$",
+            encoded,
+            flags=re.I | re.S,
+        )
+        encoded = match.group("data") if match else ""
+    if not encoded:
+        encoded = str(row.get("signatureBase64") or "").strip()
+    if not encoded:
+        return None
+    try:
+        compact = re.sub(r"\s+", "", encoded)
+        raw = base64.b64decode(compact, validate=True)
+        if 0 < len(raw) <= REPORT_SIGNATURE_MAX_SOURCE_BYTES:
+            return raw
+    except Exception as exc:
+        log_exception("report signature base64 decode failed", exc)
+    return None
 
 
-def paragraph_bookmark_names(para: etree._Element) -> list[str]:
-    return [bm.get(w("name")) or "" for bm in para.iter(w("bookmarkStart"))]
+def prepare_report_signature_png(source_bytes: bytes) -> bytes | None:
+    """
+    حوّل التوقيع إلى PNG شفاف بنسبة صورة القالب نفسها.
+
+    تثبيت نسبة اللوحة يحافظ على ملاءمة الصورة داخل wp:extent بعد التكبير.
+    """
+    if not source_bytes:
+        return None
+    try:
+        with Image.open(io.BytesIO(source_bytes)) as source:
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > 50_000_000:
+                return None
+            source.seek(0)
+            source.load()
+            rgba = source.convert("RGBA")
+
+        alpha_bounds = rgba.getchannel("A").getbbox()
+        if alpha_bounds is None:
+            return None
+        rgba = rgba.crop(alpha_bounds)
+
+        canvas_width, canvas_height = REPORT_SIGNATURE_CANVAS_SIZE
+        padding = max(8, int(min(canvas_width, canvas_height) * 0.035))
+        max_width = max(1, canvas_width - padding * 2)
+        max_height = max(1, canvas_height - padding * 2)
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        rgba.thumbnail((max_width, max_height), resampling)
+
+        canvas = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 0))
+        offset = (
+            (canvas_width - rgba.width) // 2,
+            (canvas_height - rgba.height) // 2,
+        )
+        canvas.alpha_composite(rgba, dest=offset)
+        output = io.BytesIO()
+        canvas.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+    except Exception as exc:
+        log_exception("report signature PNG preparation failed", exc)
+        return None
 
 
-def should_skip_text_bookmark_fill(name: str, start: etree._Element) -> bool:
-    norm = normalize_bookmark_name(name)
-    if norm != normalize_bookmark_name("تاريختقييمت"):
-        return False
-    para = find_ancestor(start, w("p"))
-    if para is None:
-        return False
-    names = [normalize_bookmark_name(item) for item in paragraph_bookmark_names(para)]
-    para_text = normalize_bookmark_name("".join(t.text or "" for t in para.iter(w("t"))))
+def _scale_numeric_attr(element: etree._Element, attr_name: str, scale: float) -> None:
+    raw = element.get(attr_name)
+    if raw is None:
+        # بعض القوالب تستخدم السمة بأسماء نطاق Word.
+        namespaced = f"{{{W_NS}}}{attr_name}"
+        raw = element.get(namespaced)
+        attr_name = namespaced if raw is not None else attr_name
+    if raw is None:
+        return
+    try:
+        element.set(attr_name, str(max(1, int(round(int(raw) * scale)))))
+    except ValueError:
+        return
+
+
+def scale_signature_drawing(drawing: etree._Element, scale: float) -> None:
+    """كبّر إطار رسم التوقيع (wp:extent + a:ext) داخل خلية المقيم."""
+    if abs(scale - 1.0) < 1e-6:
+        return
+    for extent in drawing.iter(f"{{{WP_NS}}}extent"):
+        _scale_numeric_attr(extent, "cx", scale)
+        _scale_numeric_attr(extent, "cy", scale)
+    for ext in drawing.iter(f"{{{A_NS}}}ext"):
+        _scale_numeric_attr(ext, "cx", scale)
+        _scale_numeric_attr(ext, "cy", scale)
+
+
+def scale_signature_cell_width(cell: etree._Element, scale: float) -> None:
+    """وسّع عمود التوقيع لاستيعاب الصورة الأكبر."""
+    if abs(scale - 1.0) < 1e-6:
+        return
+    for tc_pr in cell.findall(w("tcPr")):
+        for tc_w in tc_pr.findall(w("tcW")):
+            _scale_numeric_attr(tc_w, "w", scale)
+
+
+def scale_preparer_signature_grid_column(table: etree._Element, scale: float) -> None:
+    """وسّع عمود التوقيع في tblGrid (العمود الثالث)."""
+    if abs(scale - 1.0) < 1e-6:
+        return
+    grid = table.find(w("tblGrid"))
+    if grid is None:
+        return
+    cols = grid.findall(w("gridCol"))
+    if len(cols) < 3:
+        return
+    _scale_numeric_attr(cols[2], "w", scale)
+
+
+def _element_visible_text(element: etree._Element) -> str:
+    return "".join(node.text or "" for node in element.iter(w("t")))
+
+
+def find_report_preparer_table(root: etree._Element) -> etree._Element | None:
+    expected = tuple(normalize_heading_text(value) for value in REPORT_PREPARER_TABLE_HEADERS)
+    matches: list[etree._Element] = []
+    for table in root.iter(w("tbl")):
+        rows = table.findall(w("tr"))
+        if not rows:
+            continue
+        cells = rows[0].findall(w("tc"))
+        if len(cells) != len(expected):
+            continue
+        actual = tuple(
+            normalize_heading_text(_element_visible_text(cell))
+            for cell in cells
+        )
+        if actual == expected:
+            matches.append(table)
+    if len(matches) > 1:
+        raise ValueError("Ambiguous report preparer table: multiple matching tables")
+    return matches[0] if matches else None
+
+
+def set_paragraph_text_preserving_format(
+    paragraph: etree._Element,
+    value: str,
+) -> None:
+    """غيّر w:t فقط واترك pPr/rPr وبقية بنية الفقرة كما هي."""
+    clean_value = sanitize_xml_text(value, strip=False)
+    text_nodes = list(paragraph.iter(w("t")))
+    if not text_nodes:
+        if not clean_value:
+            return
+        runs = paragraph.findall(w("r"))
+        if runs:
+            run = runs[0]
+        else:
+            run = etree.Element(w("r"))
+            paragraph.append(run)
+        text_node = etree.Element(w("t"))
+        run_properties = run.find(w("rPr"))
+        run.insert(1 if run_properties is not None else 0, text_node)
+        text_nodes = [text_node]
+
+    for index, node in enumerate(text_nodes):
+        node.attrib.pop(f"{{{XML_NS}}}space", None)
+        set_text_preserve_space(node, clean_value if index == 0 else "")
+
+
+def _remove_drawings(container: etree._Element) -> None:
+    for drawing in list(container.iter(w("drawing"))):
+        parent = drawing.getparent()
+        if parent is not None:
+            parent.remove(drawing)
+
+
+def _relationship_xml(root: etree._Element) -> bytes:
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
+    )
+
+
+def _ensure_png_content_type(xml_bytes: bytes) -> bytes:
+    root = etree.fromstring(xml_bytes)
+    for child in root:
+        if (
+            etree.QName(child).localname == "Default"
+            and (child.get("Extension") or "").lower() == "png"
+        ):
+            return xml_bytes
+    node = etree.Element(f"{{{CONTENT_TYPES_NS}}}Default")
+    node.set("Extension", "png")
+    node.set("ContentType", "image/png")
+    root.append(node)
+    return _relationship_xml(root)
+
+
+def _next_relationship_id(used_ids: set[str], index: int) -> str:
+    suffix = max(1, index)
+    while True:
+        candidate = f"rIdReportPreparer{suffix}"
+        if candidate not in used_ids:
+            used_ids.add(candidate)
+            return candidate
+        suffix += 1
+
+
+def _next_media_part_name(used_names: set[str], index: int) -> tuple[str, str]:
+    suffix = max(1, index)
+    while True:
+        target = f"media/report-preparer-signature-{suffix}.png"
+        package_name = f"word/{target}"
+        if package_name not in used_names:
+            used_names.add(package_name)
+            return package_name, target
+        suffix += 1
+
+
+def _relationship_ids_used_in_document(root: etree._Element) -> set[str]:
+    used: set[str] = set()
+    for element in root.iter():
+        for attribute_name, value in element.attrib.items():
+            try:
+                if etree.QName(attribute_name).namespace == R_NS and value:
+                    used.add(value)
+            except ValueError:
+                continue
+    return used
+
+
+def inject_report_preparers(
+    document_xml: bytes,
+    document_rels_xml: bytes,
+    content_types_xml: bytes,
+    preparers: list[dict[str, Any]],
+    package_names: set[str],
+) -> tuple[bytes, bytes, bytes, dict[str, bytes], dict[str, int]]:
+    """
+    استبدل صفوف المقيمين الثابتة بصفوف ديناميكية مستنسخة من القالب.
+
+    لا تُعاد كتابة خصائص الجدول/الخلايا/الفقرات/الخطوط. التغييرات الوحيدة
+    داخل الصف المستنسخ هي النص الظاهر وعلاقة صورة التوقيع ومعرّفات الرسم.
+    """
+    root = etree.fromstring(document_xml)
+    table = find_report_preparer_table(root)
+    if table is None:
+        raise ValueError(
+            "Report preparer table not found (expected headers: "
+            + " / ".join(REPORT_PREPARER_TABLE_HEADERS)
+            + ")"
+        )
+
+    rows = table.findall(w("tr"))
+    if not rows:
+        raise ValueError("Report preparer table has no header row")
+    header_row = rows[0]
+    prototype = deepcopy(rows[1]) if len(rows) > 1 else None
+    if preparers and prototype is None:
+        raise ValueError("Report preparer table has no prototype data row")
+
+    old_relationship_ids: set[str] = set()
+    for old_row in rows[1:]:
+        for blip in old_row.iter(f"{{{A_NS}}}blip"):
+            relationship_id = blip.get(f"{{{R_NS}}}embed")
+            if relationship_id:
+                old_relationship_ids.add(relationship_id)
+        table.remove(old_row)
+
+    scale_preparer_signature_grid_column(table, REPORT_SIGNATURE_DISPLAY_SCALE)
+    # وسّع خلية التوقيع في صف الرأس أيضاً لتبقى الأعمدة متناسقة.
+    header_cells = header_row.findall(w("tc"))
+    if len(header_cells) >= 3:
+        scale_signature_cell_width(header_cells[2], REPORT_SIGNATURE_DISPLAY_SCALE)
+
+    try:
+        relationships_root = etree.fromstring(document_rels_xml)
+    except Exception:
+        relationships_root = etree.Element(f"{{{PACKAGE_REL_NS}}}Relationships")
+    relationship_nodes = [
+        node
+        for node in relationships_root
+        if etree.QName(node).localname == "Relationship"
+    ]
+    used_relationship_ids = {
+        node.get("Id") or ""
+        for node in relationship_nodes
+        if node.get("Id")
+    }
+
+    max_drawing_id = 0
+    for element in root.iter():
+        if etree.QName(element).localname not in ("docPr", "cNvPr"):
+            continue
+        try:
+            max_drawing_id = max(max_drawing_id, int(element.get("id") or "0"))
+        except ValueError:
+            continue
+    used_anchor_ids = {
+        str(anchor.get(f"{{{WP14_NS}}}anchorId") or "").upper()
+        for anchor in root.iter(f"{{{WP_NS}}}anchor")
+        if anchor.get(f"{{{WP14_NS}}}anchorId")
+    }
+    used_edit_ids = {
+        str(anchor.get(f"{{{WP14_NS}}}editId") or "").upper()
+        for anchor in root.iter(f"{{{WP_NS}}}anchor")
+        if anchor.get(f"{{{WP14_NS}}}editId")
+    }
+    next_anchor_number = 0x71000000
+    next_edit_number = 0x72000000
+
+    def unique_hex_id(used: set[str], start: int) -> tuple[str, int]:
+        number = start
+        while True:
+            candidate = f"{number & 0xFFFFFFFF:08X}"
+            number += 1
+            if candidate not in used:
+                used.add(candidate)
+                return candidate, number
+
+    added_parts: dict[str, bytes] = {}
+    signatures_inserted = 0
+    for index, preparer in enumerate(preparers, start=1):
+        assert prototype is not None
+        row = deepcopy(prototype)
+        cells = row.findall(w("tc"))
+        if len(cells) != 3:
+            raise ValueError("Report preparer prototype row must contain three cells")
+
+        identity_paragraphs = cells[0].findall(w("p"))
+        role_paragraphs = cells[1].findall(w("p"))
+        if len(identity_paragraphs) < 3 or not role_paragraphs:
+            raise ValueError("Report preparer prototype row has an unexpected structure")
+
+        set_paragraph_text_preserving_format(
+            identity_paragraphs[0],
+            str(preparer.get("name") or ""),
+        )
+        set_paragraph_text_preserving_format(
+            identity_paragraphs[1],
+            str(preparer.get("jobTitle") or ""),
+        )
+        membership_no = str(preparer.get("membershipNo") or "").strip()
+        set_paragraph_text_preserving_format(
+            identity_paragraphs[2],
+            f"عضوية رقم: {membership_no}" if membership_no else "",
+        )
+        for extra_paragraph in identity_paragraphs[3:]:
+            set_paragraph_text_preserving_format(extra_paragraph, "")
+        set_paragraph_text_preserving_format(
+            role_paragraphs[0],
+            str(preparer.get("reportRole") or ""),
+        )
+        for extra_paragraph in role_paragraphs[1:]:
+            set_paragraph_text_preserving_format(extra_paragraph, "")
+
+        signature_png = None
+        signature_source = report_preparer_signature_bytes(preparer)
+        if signature_source:
+            signature_png = prepare_report_signature_png(signature_source)
+
+        signature_cell = cells[2]
+        drawings = list(signature_cell.iter(w("drawing")))
+        if not signature_png or not drawings:
+            _remove_drawings(signature_cell)
+        else:
+            drawing = drawings[0]
+            for extra_drawing in drawings[1:]:
+                parent = extra_drawing.getparent()
+                if parent is not None:
+                    parent.remove(extra_drawing)
+            blips = list(drawing.iter(f"{{{A_NS}}}blip"))
+            if not blips:
+                _remove_drawings(signature_cell)
+            else:
+                package_name, relationship_target = _next_media_part_name(
+                    package_names,
+                    index,
+                )
+                relationship_id = _next_relationship_id(
+                    used_relationship_ids,
+                    index,
+                )
+                relationship = etree.Element(
+                    f"{{{PACKAGE_REL_NS}}}Relationship"
+                )
+                relationship.set("Id", relationship_id)
+                relationship.set("Type", IMAGE_REL_TYPE)
+                relationship.set("Target", relationship_target)
+                relationships_root.append(relationship)
+                blips[0].set(f"{{{R_NS}}}embed", relationship_id)
+                added_parts[package_name] = signature_png
+                scale_signature_drawing(drawing, REPORT_SIGNATURE_DISPLAY_SCALE)
+
+                max_drawing_id += 1
+                for element in drawing.iter():
+                    local_name = etree.QName(element).localname
+                    if local_name in ("docPr", "cNvPr") and element.get("id") is not None:
+                        element.set("id", str(max_drawing_id))
+                        element.set("name", f"Report preparer signature {index}")
+                for anchor in drawing.iter(f"{{{WP_NS}}}anchor"):
+                    anchor_id, next_anchor_number = unique_hex_id(
+                        used_anchor_ids,
+                        next_anchor_number,
+                    )
+                    edit_id, next_edit_number = unique_hex_id(
+                        used_edit_ids,
+                        next_edit_number,
+                    )
+                    anchor.set(f"{{{WP14_NS}}}anchorId", anchor_id)
+                    anchor.set(f"{{{WP14_NS}}}editId", edit_id)
+                signatures_inserted += 1
+
+        scale_signature_cell_width(signature_cell, REPORT_SIGNATURE_DISPLAY_SCALE)
+        table.append(row)
+
+    # لا تترك علاقات التوقيعات الثابتة فعّالة بعد حذف صفوفها. تبقى وسائطها
+    # اليتيمة داخل الحزمة فقط إذا كانت جزءاً من القالب؛ وهي غير قابلة للعرض.
+    used_after = _relationship_ids_used_in_document(root)
+    for relationship in list(relationships_root):
+        relationship_id = relationship.get("Id") or ""
+        if relationship_id in old_relationship_ids and relationship_id not in used_after:
+            relationships_root.remove(relationship)
+
+    # تأكيد أن صف الرأس بقي أول عنصر صف داخل الجدول.
+    if table.findall(w("tr"))[0] is not header_row:
+        raise ValueError("Report preparer header row order changed unexpectedly")
+
+    updated_document = serialize_word_xml(root)
+    updated_relationships = _relationship_xml(relationships_root)
+    updated_content_types = (
+        _ensure_png_content_type(content_types_xml)
+        if signatures_inserted
+        else content_types_xml
+    )
     return (
-        normalize_bookmark_name("تاريخمعاين") in names
-        and "معاين" in para_text
-        and "بتاريخ" in para_text
+        updated_document,
+        updated_relationships,
+        updated_content_types,
+        added_parts,
+        {
+            "tableFound": 1,
+            "rowsRemoved": max(0, len(rows) - 1),
+            "preparersInserted": len(preparers),
+            "signaturesInserted": signatures_inserted,
+        },
     )
 
 
@@ -416,134 +884,266 @@ def set_text_preserve_space(node: etree._Element, text: str) -> None:
         node.set(f"{{{XML_NS}}}space", "preserve")
 
 
-def replace_text_range(
+def normalize_placeholder_name(value: str) -> str:
+    cleaned = re.sub(
+        r"[\u200e\u200f\u202a-\u202e]",
+        "",
+        sanitize_xml_text(value or ""),
+    )
+    cleaned = cleaned.strip()
+    if cleaned.startswith("«") and cleaned.endswith("»"):
+        cleaned = cleaned[1:-1]
+    elif cleaned.startswith("<<") and cleaned.endswith(">>"):
+        cleaned = cleaned[2:-2]
+    cleaned = cleaned.replace("*", "_")
+    return re.sub(r"\s+", "_", cleaned)
+
+
+def placeholder_field_key(name: str) -> str | None:
+    normalized = normalize_placeholder_name(name)
+    for placeholder, field in PLACEHOLDER_FIELDS.items():
+        if normalize_placeholder_name(placeholder) == normalized:
+            return field
+    return None
+
+
+def placeholder_value(name: str, text_values: dict[str, str]) -> tuple[bool, str]:
+    field = placeholder_field_key(name)
+    if field is None:
+        return False, ""
+    return True, sanitize_xml_text(str(text_values.get(field, "")), strip=False)
+
+
+def paragraph_has_nested_story(para: etree._Element) -> bool:
+    return any(candidate is not para for candidate in para.iter(w("p")))
+
+
+def element_field_char_types(element: etree._Element) -> list[str]:
+    return [
+        str(node.get(w("fldCharType")) or "")
+        for node in element.iter(w("fldChar"))
+    ]
+
+
+def field_result_elements(
+    elements: list[etree._Element],
+) -> list[etree._Element]:
+    separate_idx: int | None = None
+    end_idx: int | None = None
+    depth = 0
+    for idx, element in enumerate(elements):
+        for field_type in element_field_char_types(element):
+            if field_type == "begin":
+                depth += 1
+            elif field_type == "separate" and depth == 1 and separate_idx is None:
+                separate_idx = idx
+            elif field_type == "end":
+                depth = max(0, depth - 1)
+                if depth == 0:
+                    end_idx = idx
+                    break
+        if end_idx is not None:
+            break
+    if separate_idx is None or end_idx is None or end_idx <= separate_idx:
+        return []
+    return elements[separate_idx + 1 : end_idx]
+
+
+def find_complex_field_end(
+    children: list[etree._Element],
+    start_idx: int,
+) -> int | None:
+    depth = 0
+    saw_begin = False
+    for idx in range(start_idx, len(children)):
+        for field_type in element_field_char_types(children[idx]):
+            if field_type == "begin":
+                depth += 1
+                saw_begin = True
+            elif field_type == "end" and saw_begin:
+                depth -= 1
+                if depth == 0:
+                    return idx
+    return None
+
+
+def visible_variable_name(match: re.Match[str]) -> str:
+    return sanitize_xml_text(
+        match.group("guillemet") or match.group("ascii") or "",
+        strip=False,
+    )
+
+
+def visible_variable_inner_span(match: re.Match[str]) -> tuple[int, int]:
+    group_name = "guillemet" if match.group("guillemet") is not None else "ascii"
+    return match.start(group_name), match.end(group_name)
+
+
+def text_node_run(node: etree._Element) -> etree._Element | None:
+    return find_ancestor(node, w("r"))
+
+
+def variable_style_score(text: str) -> int:
+    """قيّم محتوى اسم المتغير نفسه، مع تجاهل الأقواس والفراغات والشرطات السفلية."""
+    return len(re.sub(r"[\W_]+", "", text, flags=re.UNICODE))
+
+
+def select_visible_variable_text_node(
+    nodes: list[tuple[etree._Element, int, int]],
+    match: re.Match[str],
+) -> etree._Element | None:
+    """
+    اختر run اسم المتغير لا run علامة الفتح.
+
+    في القوالب التي توزّع «، الاسم، » على runs مختلفة يكون run الاسم هو صاحب
+    الخط والحجم المقصودين. نختار أعلى عدد من حروف الاسم، ثم نفضّل run ذا rPr.
+    """
+    inner_start, inner_end = visible_variable_inner_span(match)
+    candidates: list[tuple[int, int, int, int, etree._Element]] = []
+    for idx, (node, node_start, node_end) in enumerate(nodes):
+        overlap_start = max(inner_start, node_start)
+        overlap_end = min(inner_end, node_end)
+        if overlap_end <= overlap_start:
+            continue
+        text = node.text or ""
+        segment = text[
+            overlap_start - node_start : overlap_end - node_start
+        ]
+        run = text_node_run(node)
+        has_rpr = int(run is not None and run.find(w("rPr")) is not None)
+        candidates.append(
+            (
+                variable_style_score(segment),
+                has_rpr,
+                len(segment),
+                -idx,
+                node,
+            )
+        )
+    if candidates:
+        return max(candidates, key=lambda item: item[:4])[4]
+
+    for node, node_start, node_end in nodes:
+        if node_end > match.start() and node_start < match.end():
+            return node
+    return None
+
+
+def replace_text_range_in_selected_node(
     nodes: list[tuple[etree._Element, int, int]],
     start: int,
     end: int,
     replacement: str,
+    target_node: etree._Element,
 ) -> bool:
+    """احذف كامل العلامة من كل runs وضع القيمة داخل run الاسم المختار فقط."""
     if start < 0 or end < start or not nodes:
         return False
     safe = sanitize_xml_text(replacement, strip=False)
+    touched = False
     inserted = False
 
     for node, node_start, node_end in nodes:
-        text = node.text or ""
-        if start == end and node_start <= start <= node_end:
-            local = start - node_start
-            set_text_preserve_space(node, text[:local] + safe + text[local:])
-            return True
         if node_end <= start or node_start >= end:
             continue
-
-        overlap_start = max(start, node_start)
-        overlap_end = min(end, node_end)
-        prefix = text[: max(0, overlap_start - node_start)] if node_start <= start <= node_end else ""
-        suffix = text[max(0, overlap_end - node_start) :] if node_start <= end <= node_end else ""
-
-        if not inserted:
-            set_text_preserve_space(node, prefix + safe + suffix)
+        text = node.text or ""
+        prefix = text[: start - node_start] if node_start <= start < node_end else ""
+        suffix = text[end - node_start :] if node_start < end <= node_end else ""
+        value = safe if node is target_node else ""
+        if node is target_node:
             inserted = True
-        else:
-            set_text_preserve_space(node, suffix)
+        set_text_preserve_space(node, prefix + value + suffix)
+        touched = True
 
-    return inserted
-
-
-def find_after_token(full_text: str, tokens: list[str], start: int) -> tuple[int, str] | None:
-    candidates: list[tuple[int, str]] = []
-    for token in tokens:
-        if token == "":
-            candidates.append((len(full_text), token))
-            continue
-        idx = full_text.find(token, start)
-        if idx >= 0:
-            candidates.append((idx, token))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda item: item[0])
+    return touched and inserted
 
 
-def apply_contextual_rule_to_paragraph(
-    para: etree._Element,
-    rule: dict[str, Any],
+def replace_visible_variables(
+    root: etree._Element,
     text_values: dict[str, str],
-) -> bool:
-    field = str(rule.get("field") or "")
-    value = sanitize_xml_text(str(text_values.get(field, "")))
-    if not field or not value:
-        return False
+) -> tuple[int, int]:
+    """
+    استبدل حصرياً المتغيرات المرئية «name» أو <<name>>، حتى عند انقسامها عبر runs.
 
-    nodes, full_text = text_nodes_with_offsets(para)
-    if not full_text:
-        return False
-    required_texts = [sanitize_xml_text(str(item), strip=False) for item in rule.get("contains", [])]
-    if any(required and required not in full_text for required in required_texts):
-        return False
-    blocked_texts = [sanitize_xml_text(str(item), strip=False) for item in rule.get("not_contains", [])]
-    if any(blocked and blocked in full_text for blocked in blocked_texts):
-        return False
-
-    for before in rule.get("before", []):
-        before = sanitize_xml_text(str(before), strip=False)
-        before_idx = full_text.find(before)
-        if before_idx < 0:
-            continue
-        value_start = before_idx + len(before)
-        after_match = find_after_token(full_text, [str(item) for item in rule.get("after", [])], value_start)
-        if after_match is None:
-            continue
-        value_end, _after = after_match
-        if value_end < value_start:
-            continue
-
-        current = full_text[value_start:value_end]
-        replacement = f" {value} "
-        if value in current:
-            if rule.get("normalize_existing") and current != replacement:
-                return replace_text_range(nodes, value_start, value_end, replacement)
-            return False
-        if current.strip() and not rule.get("overwrite"):
-            continue
-        return replace_text_range(nodes, value_start, value_end, replacement)
-
-    return False
-
-
-def apply_contextual_text_fallbacks(root: etree._Element, text_values: dict[str, str]) -> int:
+    لا تُقرأ تعليمات حقول Word لتحديد القيمة.
+    """
+    found = 0
     filled = 0
-    clean_values = {key: sanitize_xml_text(str(value)) for key, value in text_values.items() if value}
     for para in root.iter(w("p")):
-        for rule in CONTEXTUAL_TEXT_RULES:
-            if apply_contextual_rule_to_paragraph(para, rule, clean_values):
-                filled += 1
-    return filled
-
-
-def normalize_numeric_date_suffixes(root: etree._Element) -> None:
-    """Remove the Arabic Gregorian suffix after dates already rendered as DD/MM/YYYY."""
-    pattern = re.compile(r"(\d{2}/\d{2}/\d{4})\s*م\.?")
-    for para in root.iter(w("p")):
+        if paragraph_has_nested_story(para):
+            continue
         nodes, full_text = text_nodes_with_offsets(para)
-        matches = list(pattern.finditer(full_text))
+        matches = list(VISIBLE_VARIABLE_RE.finditer(full_text))
+        found += len(matches)
         for match in reversed(matches):
-            replace_text_range(nodes, match.start(), match.end(), match.group(1))
+            known, value = placeholder_value(
+                visible_variable_name(match),
+                text_values,
+            )
+            if not known:
+                continue
+            target_node = select_visible_variable_text_node(nodes, match)
+            if target_node is None:
+                continue
+            if replace_text_range_in_selected_node(
+                nodes,
+                match.start(),
+                match.end(),
+                value,
+                target_node,
+            ):
+                if value.strip():
+                    filled += 1
+                nodes, full_text = text_nodes_with_offsets(para)
+    return found, filled
 
 
-def find_bookmark_pairs(root: etree._Element) -> list[tuple[str, str, etree._Element, etree._Element]]:
-    ends: dict[str, etree._Element] = {}
-    for el in root.iter(w("bookmarkEnd")):
-        bid = el.get(w("id"))
-        if bid:
-            ends[bid] = el
+def flatten_mail_merge_fields(root: etree._Element) -> int:
+    """
+    سطّح كل MERGEFIELD بعد استبدال النص المرئي.
 
-    pairs: list[tuple[str, str, etree._Element, etree._Element]] = []
-    for start in root.iter(w("bookmarkStart")):
-        bid = start.get(w("id"))
-        name = start.get(w("name")) or ""
-        if bid and bid in ends:
-            pairs.append((name, bid, start, ends[bid]))
-    return pairs
+    نحتفظ بعناصر النتيجة الظاهرة كما هي ونحذف begin/instrText/separate/end؛
+    اسم MERGEFIELD لا يشارك مطلقاً في اختيار قيمة المتغير.
+    """
+    flattened = 0
+    for para in list(root.iter(w("p"))):
+        if paragraph_has_nested_story(para):
+            continue
+        idx = 0
+        while True:
+            children = list(para)
+            if idx >= len(children):
+                break
+            if "begin" not in element_field_char_types(children[idx]):
+                idx += 1
+                continue
+            end_idx = find_complex_field_end(children, idx)
+            if end_idx is None:
+                idx += 1
+                continue
+            sequence = children[idx : end_idx + 1]
+            instruction = "".join(
+                node.text or ""
+                for element in sequence
+                for node in element.iter(w("instrText"))
+            )
+            if re.search(r"\bMERGEFIELD\b", instruction, re.IGNORECASE) is None:
+                idx = end_idx + 1
+                continue
+
+            result_ids = {id(element) for element in field_result_elements(sequence)}
+            kept = 0
+            for element in sequence:
+                if element.getparent() is not para:
+                    continue
+                if id(element) in result_ids:
+                    kept += 1
+                    continue
+                para.remove(element)
+            flattened += 1
+            idx += kept
+        cleanup_empty_runs(para)
+    return flattened
 
 
 def find_ancestor(el: etree._Element | None, tag: str) -> etree._Element | None:
@@ -554,592 +1154,58 @@ def find_ancestor(el: etree._Element | None, tag: str) -> etree._Element | None:
     return None
 
 
-def _rpr_from_run(run: etree._Element | None) -> etree._Element | None:
-    if run is None or run.tag != w("r"):
-        return None
-    for child in run:
-        if child.tag == w("rPr"):
-            return deepcopy(child)
-    return None
-
-
-def copy_rpr_near(start: etree._Element) -> etree._Element | None:
-    """Prefer the nearest surrounding run style so inline bookmarks (عنوانغ / عنواناصل)
-    match the sentence they sit in instead of a distant first-run or cover style.
-    """
-    para = find_ancestor(start, w("p"))
-    run = start.getparent()
-    while run is not None and run is not para:
-        if run.tag == w("r"):
-            own = _rpr_from_run(run)
-            if own is not None:
-                return own
-            break
-        run = run.getparent()
-    if para is None:
-        return None
-
-    # Nearest previous / next sibling run with rPr (typical body sentence context)
-    node: etree._Element | None = start
-    while node is not None and node is not para:
-        prev = node.getprevious()
-        while prev is not None:
-            if prev.tag == w("r"):
-                found = _rpr_from_run(prev)
-                if found is not None:
-                    return found
-            prev = prev.getprevious()
-        node = node.getparent()
-
-    node = start
-    while node is not None and node is not para:
-        nxt = node.getnext()
-        while nxt is not None:
-            if nxt.tag == w("r"):
-                found = _rpr_from_run(nxt)
-                if found is not None:
-                    return found
-            nxt = nxt.getnext()
-        node = node.getparent()
-
-    ppr = para.find(w("pPr"))
-    if ppr is not None:
-        rpr = ppr.find(w("rPr"))
-        if rpr is not None:
-            return deepcopy(rpr)
-    for run_el in para.findall(w("r")):
-        found = _rpr_from_run(run_el)
-        if found is not None:
-            return found
-    return None
-
-
-def remove_between(start: etree._Element, end: etree._Element) -> None:
-    node = start.getnext()
-    while node is not None and node is not end:
-        nxt = node.getnext()
-        parent = node.getparent()
-        if parent is not None:
-            parent.remove(node)
-        node = nxt
-
-
-def direct_child_under(parent: etree._Element, el: etree._Element) -> etree._Element | None:
-    node = el
-    while node.getparent() is not None and node.getparent() is not parent:
-        node = node.getparent()
-    return node if node.getparent() is parent else None
-
-
-def remove_after_until(node: etree._Element, boundary: etree._Element) -> None:
-    current: etree._Element | None = node
-    while current is not None and current is not boundary:
-        nxt = current.getnext()
-        while nxt is not None:
-            doomed = nxt
-            nxt = nxt.getnext()
-            parent = doomed.getparent()
-            if parent is not None:
-                parent.remove(doomed)
-        current = current.getparent()
-
-
-def remove_before_until(node: etree._Element, boundary: etree._Element) -> None:
-    current: etree._Element | None = node
-    while current is not None and current is not boundary:
-        prev = current.getprevious()
-        while prev is not None:
-            doomed = prev
-            prev = prev.getprevious()
-            parent = doomed.getparent()
-            if parent is not None:
-                parent.remove(doomed)
-        current = current.getparent()
-
-
-def remove_exclusive_siblings(first: etree._Element, last: etree._Element) -> bool:
-    node = first.getnext()
-    doomed_nodes: list[etree._Element] = []
-    while node is not None:
-        if node is last:
-            for doomed in doomed_nodes:
-                parent = doomed.getparent()
-                if parent is not None:
-                    parent.remove(doomed)
-            return True
-        doomed_nodes.append(node)
-        node = node.getnext()
-    return False
-
-
-def remove_between_within_boundary(
-    start: etree._Element,
-    end: etree._Element,
-    boundary: etree._Element,
-) -> bool:
-    if start.getparent() is end.getparent():
-        remove_between(start, end)
-        return True
-
-    start_child = direct_child_under(boundary, start)
-    end_child = direct_child_under(boundary, end)
-    if start_child is None or end_child is None:
-        return False
-
-    if start_child is end_child:
-        return remove_between_within_boundary(start, end, start_child)
-
-    if not remove_exclusive_siblings(start_child, end_child):
-        return False
-
-    remove_after_until(start, start_child)
-    remove_before_until(end, end_child)
-    return True
-
-
-def remove_between_across_paragraphs(
-    start: etree._Element,
-    end: etree._Element,
-    start_para: etree._Element,
-    end_para: etree._Element,
-) -> bool:
-    if start_para.getparent() is None or start_para.getparent() is not end_para.getparent():
-        return False
-    if not remove_exclusive_siblings(start_para, end_para):
-        return False
-    remove_after_until(start, start_para)
-    remove_before_until(end, end_para)
-    return True
-
-
-def make_text_run(text: str, rpr: etree._Element | None) -> etree._Element:
-    run = etree.Element(w("r"))
-    if rpr is not None:
-        run.append(rpr)
-    t = etree.SubElement(run, w("t"))
-    t.text = sanitize_xml_text(text)
-    t.set(f"{{{XML_NS}}}space", "preserve")
-    return run
-
-
-def remove_w_children(parent: etree._Element, tag: str) -> None:
-    for child in list(parent.findall(w(tag))):
-        parent.remove(child)
-
-
-def set_rpr_value(rpr: etree._Element, tag: str, attrs: dict[str, str]) -> None:
-    remove_w_children(rpr, tag)
-    node = etree.SubElement(rpr, w(tag))
-    for key, value in attrs.items():
-        node.set(w(key), value)
-
-
-def set_rpr_flag(rpr: etree._Element, tag: str) -> None:
-    remove_w_children(rpr, tag)
-    etree.SubElement(rpr, w(tag))
-
-
-def clear_rpr_flags(rpr: etree._Element, *tags: str) -> None:
-    for tag in tags:
-        remove_w_children(rpr, tag)
-
-
-def resolve_section_right_margin_twips(para: etree._Element) -> int:
-    """أقرب ‎sectPr‎ بعد الفقرة، ثم آخر ‎sectPr‎ في المستند، وإلا هامش افتراضي."""
-    default_twips = emu_to_twips(DEFAULT_PAGE_MARGIN_EMU)
-    body = find_ancestor(para, w("body"))
-    if body is None:
-        root = para.getroottree().getroot() if para.getroottree() is not None else None
-        body = root.find(f".//{w('body')}") if root is not None else None
-    if body is None:
-        return default_twips
-
-    children = list(body)
-    para_idx = None
-    for idx, child in enumerate(children):
-        if child is para:
-            para_idx = idx
-            break
-        contained = False
-        for el in child.iter():
-            if el is para:
-                contained = True
-                break
-        if contained:
-            para_idx = idx
-            break
-
-    def margin_from_sect(sect: etree._Element | None) -> int | None:
-        if sect is None:
-            return None
-        pg_mar = sect.find(w("pgMar"))
-        if pg_mar is None:
-            return None
-        raw = pg_mar.get(w("right"))
-        try:
-            return int(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    if para_idx is not None:
-        for child in children[para_idx:]:
-            sect = child if child.tag == w("sectPr") else child.find(w("sectPr"))
-            if sect is None:
-                sect = child.find(f".//{w('sectPr')}")
-            margin = margin_from_sect(sect)
-            if margin is not None:
-                return margin
-
-    for child in reversed(children):
-        sect = child if child.tag == w("sectPr") else child.find(f".//{w('sectPr')}")
-        margin = margin_from_sect(sect)
-        if margin is not None:
-            return margin
-    return default_twips
-
-
-def set_paragraph_cover_alignment(para: etree._Element) -> None:
-    """محاذاة الغلاف إلى اليمين بصرياً مع هامش واضح من الحافة (~40px).
-
-    Word مع فقرات عربية/RTL يعكس معنى jc: ‎jc=right‎ يظهر يساراً و‎jc=left‎ يظهر يميناً.
-    لذلك نضع ‎w:bidi‎ مع ‎jc=left‎ لنحصل على الجانب الأيمن الفعلي للصفحة.
-    """
-    ppr = para.find(w("pPr"))
-    if ppr is None:
-        ppr = etree.Element(w("pPr"))
-        para.insert(0, ppr)
-    remove_w_children(ppr, "jc")
-    remove_w_children(ppr, "ind")
-    remove_w_children(ppr, "bidi")
-
-    # داخل مربع نص الغلاف: هامش موجب صريح من إطار المربع.
-    # مع bidi/عربي: ‎w:start‎ = بداية اتجاه القراءة = اليمين البصري.
-    if find_ancestor(para, w("txbxContent")) is not None:
-        right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS)
-        left_indent_twips = 0
-        use_logical_start = True
-    else:
-        section_right_twips = resolve_section_right_margin_twips(para)
-        # سالب عادةً: يسحب المحاذاة حتى هامش الغلاف من حافة الصفحة الفعلية.
-        right_indent_twips = int(COVER_EDGE_MARGIN_TWIPS) - int(section_right_twips)
-        left_indent_twips = 0
-        use_logical_start = False
-
-    bidi = etree.Element(w("bidi"))
-    ind = etree.Element(w("ind"))
-    ind.set(w("right"), str(right_indent_twips))
-    ind.set(w("left"), str(left_indent_twips))
-    if use_logical_start and right_indent_twips > 0:
-        ind.set(w("start"), str(right_indent_twips))
-    jc = etree.Element(w("jc"))
-    # left + bidi = يمين بصري في Word
-    jc.set(w("val"), "left")
-
-    rpr = ppr.find(w("rPr"))
-    insert_nodes = [bidi, ind, jc]
-    if rpr is not None:
-        insert_at = list(ppr).index(rpr)
-        for offset, node in enumerate(insert_nodes):
-            ppr.insert(insert_at + offset, node)
-    else:
-        for node in insert_nodes:
-            ppr.append(node)
-
-
-def set_paragraph_cover_font(para: etree._Element, font_size_half_points: int | None = None) -> None:
-    ppr = para.find(w("pPr"))
-    if ppr is None:
-        ppr = etree.Element(w("pPr"))
-        para.insert(0, ppr)
-    rpr = ppr.find(w("rPr"))
-    if rpr is None:
-        rpr = etree.SubElement(ppr, w("rPr"))
-    set_rpr_value(
-        rpr,
-        "rFonts",
-        {
-            "ascii": COVER_BOOKMARK_FONT_FAMILY,
-            "hAnsi": COVER_BOOKMARK_FONT_FAMILY,
-            "eastAsia": COVER_BOOKMARK_FONT_FAMILY,
-            "cs": COVER_BOOKMARK_FONT_FAMILY,
-            "hint": "cs",
-        },
-    )
-    set_rpr_value(rpr, "lang", {"val": "ar-SA", "bidi": "ar-SA"})
-    if font_size_half_points is not None:
-        set_rpr_value(rpr, "sz", {"val": str(font_size_half_points)})
-        set_rpr_value(rpr, "szCs", {"val": str(font_size_half_points)})
-    set_rpr_flag(rpr, "b")
-    set_rpr_flag(rpr, "bCs")
-
-
-def cover_bookmark_font_size(bookmark_name: str) -> int | None:
-    """Word stores font size in half-points (24pt => 48, 16pt => 32).
-
-    غلاف التقرير فقط:
-    - «عنوان» و«غلاف»: 24pt bold أعلى يمين.
-    - «عميلغلاف»: 16pt bold أسفل العنوان يمين.
-    «عنوانغ» و«عنواناصل» ترث تنسيق الفقرة المحيطة دون فرض تنسيق الغلاف.
-    """
-    norm = normalize_bookmark_name(bookmark_name)
-    if norm in {
-        normalize_bookmark_name("عنوان"),
-        normalize_bookmark_name("غلاف"),
-    }:
-        return COVER_TITLE_FONT_SIZE_HALF_POINTS
-    if norm in {normalize_bookmark_name(name) for name in ("عميلغلاف",)}:
-        return COVER_CLIENT_FONT_SIZE_HALF_POINTS
-    return None
-
-
-def apply_cover_bookmark_style(bookmark_name: str, start: etree._Element, rpr: etree._Element | None) -> etree._Element | None:
-    size = cover_bookmark_font_size(bookmark_name)
-    if size is None:
-        # عناوين داخل النص (عنوانغ / عنواناصل …): أبقِ rPr المجاور كما هو ليتناسق مع الفقرة
-        return rpr
-    para = find_ancestor(start, w("p"))
-    if para is not None:
-        set_paragraph_cover_alignment(para)
-        set_paragraph_cover_font(para, size)
-    # الفقرة الخارجية التي تحمل مربع النص العائم — محاذاتها تحرك الصندوق نفسه يميناً
-    outer_para = find_cover_outer_paragraph(start)
-    if outer_para is not None and outer_para is not para:
-        set_paragraph_cover_alignment(outer_para)
-    styled = deepcopy(rpr) if rpr is not None else etree.Element(w("rPr"))
-    set_rpr_value(
-        styled,
-        "rFonts",
-        {
-            "ascii": COVER_BOOKMARK_FONT_FAMILY,
-            "hAnsi": COVER_BOOKMARK_FONT_FAMILY,
-            "eastAsia": COVER_BOOKMARK_FONT_FAMILY,
-            "cs": COVER_BOOKMARK_FONT_FAMILY,
-            "hint": "cs",
-        },
-    )
-    set_rpr_value(styled, "lang", {"val": "ar-SA", "bidi": "ar-SA"})
-    set_rpr_value(styled, "sz", {"val": str(size)})
-    set_rpr_value(styled, "szCs", {"val": str(size)})
-    set_rpr_flag(styled, "b")
-    set_rpr_flag(styled, "bCs")
-    set_rpr_flag(styled, "rtl")
-    return styled
-
-
-def find_cover_outer_paragraph(start: etree._Element) -> etree._Element | None:
-    """فقرة المستند التي تضم الرسم/مربع النص (وليست الفقرة داخل txbxContent)."""
-    container = find_ancestor(start, w("drawing"))
-    if container is None:
-        container = find_ancestor(start, w("pict"))
-    if container is None:
-        return None
-    return find_ancestor(container, w("p"))
-
-
-def resolve_document_page_width_emu(root: etree._Element) -> int:
-    for sect in root.iter(w("sectPr")):
-        pg_sz = sect.find(w("pgSz"))
-        if pg_sz is None:
-            continue
-        raw = pg_sz.get(w("w"))
-        try:
-            twips = int(raw) if raw is not None else 0
-        except (TypeError, ValueError):
-            twips = 0
-        if twips > 0:
-            return twips_to_emu(twips)
-    return DEFAULT_PAGE_WIDTH_EMU
-
-
-def _resolve_drawing_width_emu(parent: etree._Element) -> int:
-    extent = parent.find(f"{{{WP_NS}}}extent")
-    if extent is not None:
-        try:
-            cx = int(extent.get("cx") or "0")
-            if cx > 0:
-                return cx
-        except (TypeError, ValueError):
-            pass
-    for ext in parent.iter(f"{{{A_NS}}}ext"):
-        try:
-            cx = int(ext.get("cx") or "0")
-            if cx > 0:
-                return cx
-        except (TypeError, ValueError):
-            continue
-    return 0
-
-
-def _set_wp_position_h_page_right(parent: etree._Element, page_width_emu: int) -> None:
-    """يثبّت الشكل على يمين الصفحة مع هامش صريح — لا نستخدم align=right وحده لأنه يلتصق بالحافة."""
-    for old in list(parent.findall(f"{{{WP_NS}}}positionH")):
-        parent.remove(old)
-
-    position_h = etree.Element(f"{{{WP_NS}}}positionH")
-    position_h.set("relativeFrom", "page")
-    cx = _resolve_drawing_width_emu(parent)
-    # إن كان الصندوق أعرض من الصفحة تقريباً، قلّص العرض الفعّال حتى يبقى هامش يمين.
-    max_cx = max(1, page_width_emu - COVER_EDGE_MARGIN_EMU)
-    if cx <= 0:
-        cx = max_cx
-    elif cx > max_cx:
-        cx = max_cx
-        extent = parent.find(f"{{{WP_NS}}}extent")
-        if extent is not None:
-            extent.set("cx", str(cx))
-    offset = etree.SubElement(position_h, f"{{{WP_NS}}}posOffset")
-    offset.text = str(max(0, page_width_emu - cx - COVER_EDGE_MARGIN_EMU))
-
-    simple_pos = parent.find(f"{{{WP_NS}}}simplePos")
-    if simple_pos is not None:
-        simple_pos.addnext(position_h)
-    else:
-        parent.insert(0, position_h)
-
-    # مسافة لفّ من اليمين كشبكة أمان إضافية في Word
-    if parent.tag == f"{{{WP_NS}}}anchor" or str(parent.tag).endswith("}anchor"):
-        parent.set("distR", str(COVER_EDGE_MARGIN_EMU))
-
-
-def ensure_cover_textbox_internal_margin(container: etree._Element) -> None:
-    """حشوة داخلية لمربع النص حتى لا يلامس النص إطار الصندوق/حافة الصفحة."""
-    inset = str(COVER_EDGE_MARGIN_EMU)
-    # DrawingML / Word 2010 shapes
-    for body_pr in list(container.iter(f"{{{A_NS}}}bodyPr")) + list(container.iter(f"{{{WPS_NS}}}bodyPr")):
-        body_pr.set("rIns", inset)
-        body_pr.set("lIns", str(max(PIXEL_EMU * 8, COVER_EDGE_MARGIN_EMU // 4)))
-        body_pr.set("tIns", str(PIXEL_EMU * 6))
-        body_pr.set("bIns", str(PIXEL_EMU * 6))
-    # VML textbox
-    inset_pt = f"{COVER_EDGE_MARGIN_PT}pt"
-    for el in container.iter():
-        tag = el.tag if isinstance(el.tag, str) else ""
-        if tag.endswith("}textbox") or tag == "textbox" or tag.endswith("}TextBox"):
-            el.set("inset", f"{COVER_EDGE_MARGIN_PT * 0.35:.2f}pt,{COVER_EDGE_MARGIN_PT * 0.25:.2f}pt,{inset_pt},{COVER_EDGE_MARGIN_PT * 0.25:.2f}pt")
-
-
-def reposition_wp_drawing_to_page_right(drawing: etree._Element, page_width_emu: int) -> None:
-    anchor = drawing.find(f"{{{WP_NS}}}anchor")
-    if anchor is not None:
-        if anchor.get("simplePos") in ("1", "true", "True"):
-            anchor.set("simplePos", "0")
-        _set_wp_position_h_page_right(anchor, page_width_emu)
-        ensure_cover_textbox_internal_margin(drawing)
-        return
-
-    inline = drawing.find(f"{{{WP_NS}}}inline")
-    if inline is None:
-        return
-    # حوّل inline إلى anchor عائم بمحاذاة يمين الصفحة حتى لا يبقى الصندوق يساراً مع تدفق النص.
-    anchor = etree.Element(f"{{{WP_NS}}}anchor")
-    for key, value in inline.attrib.items():
-        anchor.set(key, value)
-    anchor.set("simplePos", "0")
-    anchor.set("relativeHeight", anchor.get("relativeHeight") or "251658240")
-    anchor.set("behindDoc", anchor.get("behindDoc") or "0")
-    anchor.set("locked", anchor.get("locked") or "0")
-    anchor.set("layoutInCell", anchor.get("layoutInCell") or "1")
-    anchor.set("allowOverlap", anchor.get("allowOverlap") or "1")
-    anchor.set("distT", anchor.get("distT") or "0")
-    anchor.set("distB", anchor.get("distB") or "0")
-    anchor.set("distL", anchor.get("distL") or "0")
-    anchor.set("distR", str(COVER_EDGE_MARGIN_EMU))
-
-    simple = etree.SubElement(anchor, f"{{{WP_NS}}}simplePos")
-    simple.set("x", "0")
-    simple.set("y", "0")
-    for child in list(inline):
-        anchor.append(child)
-    # إن لم يوجد positionV أبقِ الشكل في موضعه الرأسي تقريباً عبر align top relative to paragraph
-    if anchor.find(f"{{{WP_NS}}}positionV") is None:
-        position_v = etree.Element(f"{{{WP_NS}}}positionV")
-        position_v.set("relativeFrom", "paragraph")
-        align_v = etree.SubElement(position_v, f"{{{WP_NS}}}align")
-        align_v.text = "top"
-        extent_el = anchor.find(f"{{{WP_NS}}}extent")
-        if extent_el is not None:
-            extent_el.addprevious(position_v)
-        else:
-            anchor.append(position_v)
-    if anchor.find(f"{{{WP_NS}}}wrapNone") is None and anchor.find(f"{{{WP_NS}}}wrapSquare") is None:
-        wrap = etree.Element(f"{{{WP_NS}}}wrapNone")
-        extent_el = anchor.find(f"{{{WP_NS}}}extent")
-        if extent_el is not None:
-            extent_el.addnext(wrap)
-        else:
-            anchor.append(wrap)
-
-    _set_wp_position_h_page_right(anchor, page_width_emu)
-    ensure_cover_textbox_internal_margin(anchor)
-    parent = inline.getparent()
-    if parent is not None:
-        parent.replace(inline, anchor)
-
-
-def reposition_vml_shape_to_page_right(pict: etree._Element) -> None:
-    margin_css = f"{COVER_EDGE_MARGIN_PT}pt"
-    for el in pict.iter():
-        tag = el.tag if isinstance(el.tag, str) else ""
-        if not tag.endswith("}shape") and tag != "shape":
-            continue
-        style = el.get("style") or ""
-        # لا تستخدم right وحده (يلتصق بالحافة) — أضف margin-right صريحاً
-        style = re.sub(
-            r"mso-position-horizontal\s*:\s*[^;]+",
-            "mso-position-horizontal:right",
-            style,
-            flags=re.I,
-        )
-        if re.search(r"mso-position-horizontal\s*:", style, flags=re.I) is None:
-            style = (style.rstrip(";") + ";mso-position-horizontal:right").lstrip(";")
-        style = re.sub(
-            r"mso-position-horizontal-relative\s*:\s*[^;]+",
-            "mso-position-horizontal-relative:page",
-            style,
-            flags=re.I,
-        )
-        if re.search(r"mso-position-horizontal-relative\s*:", style, flags=re.I) is None:
-            style = (style.rstrip(";") + ";mso-position-horizontal-relative:page").lstrip(";")
-        style = re.sub(r"margin-left\s*:\s*[^;]+;?", "", style, flags=re.I)
-        style = re.sub(r"margin-right\s*:\s*[^;]+;?", "", style, flags=re.I)
-        style = (style.rstrip(";") + f";margin-right:{margin_css}").lstrip(";")
-        style = re.sub(r";{2,}", ";", style).strip(" ;")
-        el.set("style", style)
-    ensure_cover_textbox_internal_margin(pict)
-
-
-def force_cover_shapes_to_page_right(root: etree._Element) -> None:
-    """ينقل مربعات نص الغلاف (عنوان/عميل) إلى يمين الصفحة مع هامش واضح من الحافة."""
-    wanted = {normalize_bookmark_name(name) for name in COVER_SHAPE_BOOKMARK_NAMES}
-    page_width_emu = resolve_document_page_width_emu(root)
-    seen: set[int] = set()
-
-    for name, _bid, start, _end in find_bookmark_pairs(root):
-        if normalize_bookmark_name(name) not in wanted:
-            continue
-        drawing = find_ancestor(start, w("drawing"))
-        pict = None if drawing is not None else find_ancestor(start, w("pict"))
-        target = drawing if drawing is not None else pict
-        if target is None:
-            # فقرة عادية بدون مربع نص — طبّق الهامش على الفقرة مباشرة
-            para = find_ancestor(start, w("p"))
-            if para is not None:
-                set_paragraph_cover_alignment(para)
-            continue
-        target_id = id(target)
-        if target_id in seen:
-            continue
-        seen.add(target_id)
-        if drawing is not None:
-            reposition_wp_drawing_to_page_right(drawing, page_width_emu)
-        elif pict is not None:
-            reposition_vml_shape_to_page_right(pict)
-        outer_para = find_cover_outer_paragraph(start)
-        if outer_para is not None:
-            set_paragraph_cover_alignment(outer_para)
-        inner_para = find_ancestor(start, w("p"))
-        if inner_para is not None:
-            set_paragraph_cover_alignment(inner_para)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def run_has_meaningful_content(run: etree._Element) -> bool:
@@ -1168,49 +1234,8 @@ def cleanup_empty_runs(para: etree._Element) -> None:
                     parent.remove(run)
 
 
-def insert_text_before_bookmark_end(
-    end: etree._Element, text: str, rpr: etree._Element | None
-) -> None:
-    safe = sanitize_xml_text(text)
-    if end.getparent() is not None and end.getparent().tag == w("r"):
-        run = end.getparent()
-        if rpr is not None:
-            existing = run.find(w("rPr"))
-            if existing is not None:
-                run.remove(existing)
-            run.insert(0, deepcopy(rpr))
-        t = etree.Element(w("t"))
-        t.text = safe
-        t.set(f"{{{XML_NS}}}space", "preserve")
-        end.addprevious(t)
-        return
-    end.addprevious(make_text_run(safe, rpr))
 
 
-def replace_text_bookmark(start: etree._Element, end: etree._Element, text: str, bookmark_name: str = "") -> bool:
-    safe = sanitize_xml_text(text)
-    if not safe:
-        return False
-
-    rpr = apply_cover_bookmark_style(bookmark_name, start, copy_rpr_near(start))
-    start_para = find_ancestor(start, w("p"))
-    end_para = find_ancestor(end, w("p"))
-
-    removed = False
-    if start_para is not None and start_para is end_para:
-        removed = remove_between_within_boundary(start, end, start_para)
-    elif start_para is not None and end_para is not None:
-        removed = remove_between_across_paragraphs(start, end, start_para, end_para)
-
-    if not removed and start.getparent() is end.getparent():
-        remove_between(start, end)
-
-    insert_text_before_bookmark_end(end, safe, rpr)
-    if start_para is not None:
-        cleanup_empty_runs(start_para)
-    if end_para is not None and end_para is not start_para:
-        cleanup_empty_runs(end_para)
-    return True
 
 
 def validate_part_xml(xml_bytes: bytes, part_name: str) -> None:
@@ -1246,13 +1271,23 @@ def validate_part_xml(xml_bytes: bytes, part_name: str) -> None:
             raise ValueError(f"Invalid paragraph property order in {part_name}: w:bidi must precede w:jc")
 
 
-def collect_bookmark_names(xml_bytes: bytes) -> list[str]:
+
+
+def collect_template_placeholder_names(xml_bytes: bytes) -> list[str]:
+    """أسماء المتغيرات المرئية فقط؛ لا تُقرأ تعليمات حقول Word."""
     root = etree.fromstring(xml_bytes)
     names: list[str] = []
-    for _name, _bid, _s, _e in find_bookmark_pairs(root):
-        if _name and _name not in names:
-            names.append(_name)
+    for para in root.iter(w("p")):
+        if paragraph_has_nested_story(para):
+            continue
+        visible = "".join(node.text or "" for node in para.iter(w("t")))
+        for match in VISIBLE_VARIABLE_RE.finditer(visible):
+            name = visible_variable_name(match)
+            if name and name not in names:
+                names.append(name)
     return names
+
+
 
 
 def repair_text_nodes(root: etree._Element) -> None:
@@ -1264,119 +1299,140 @@ def repair_text_nodes(root: etree._Element) -> None:
             instr_node.text = sanitize_xml_text(instr_node.text, strip=False)
 
 
-def apply_text_bookmarks(
+def _rfonts_attr_keys(rfonts: etree._Element) -> list[tuple[str, str]]:
+    """Return (attr_key, local_name) for font-related attributes on w:rFonts."""
+    keys: list[tuple[str, str]] = []
+    for key in rfonts.attrib:
+        local = etree.QName(key).localname
+        if local in ("ascii", "hAnsi", "eastAsia", "cs", "asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+            keys.append((key, local))
+    return keys
+
+
+def _paragraph_own_text(para: etree._Element) -> str:
+    """نص الفقرة نفسها فقط، دون فقرات متداخلة داخل رسومات/مربعات نص."""
+    parts: list[str] = []
+    for node in para.iter(w("t")):
+        owning = node.getparent()
+        while owning is not None and owning.tag != w("p"):
+            owning = owning.getparent()
+        if owning is para:
+            parts.append(node.text or "")
+    return "".join(parts)
+
+
+def _paragraph_is_cover_footer(para: etree._Element) -> bool:
+    text = _paragraph_own_text(para)
+    return any(marker in text for marker in REPORT_COVER_FOOTER_MARKERS)
+
+
+def _rewrite_rfonts_element(rfonts: etree._Element, font_name: str) -> bool:
+    """Replace Cocon* font names with the target font. Leave other fonts untouched."""
+    changed = False
+    for key, local in list(_rfonts_attr_keys(rfonts)):
+        value = rfonts.get(key) or ""
+        if value in REPORT_COCON_FONT_NAMES:
+            if local.endswith("Theme"):
+                del rfonts.attrib[key]
+                # ضع الخط الصريح بدل إشارة الثيم إن لزم.
+                explicit = local.replace("Theme", "") if local.endswith("Theme") else local
+                if explicit in ("ascii", "hAnsi", "eastAsia", "cs"):
+                    rfonts.set(f"{{{W_NS}}}{explicit}", font_name)
+                changed = True
+            elif value != font_name:
+                rfonts.set(key, font_name)
+                changed = True
+    return changed
+
+
+def apply_report_fonts_to_part(xml_bytes: bytes) -> bytes:
+    """
+    اجعل خط التقرير Tajawal بدل Cocon، مع الإبقاء على CoconNextArabic-Light
+    فقط في فقرات أسفل الغلاف (الرقم المرجعي + تاريخ التقرير).
+    """
+    root = etree.fromstring(xml_bytes)
+    # أولاً: كل إشارات Cocon → Tajawal (بما فيها sdtPr / sdtEndPr وغيرها).
+    for rfonts in root.iter(w("rFonts")):
+        _rewrite_rfonts_element(rfonts, REPORT_BODY_FONT)
+    # ثانياً: ثبّت Cocon على فقرات أسفل الغلاف فقط.
+    for para in root.iter(w("p")):
+        if not _paragraph_is_cover_footer(para):
+            continue
+        for rpr in para.iter(w("rPr")):
+            parent = rpr.getparent()
+            if parent is None or parent.tag not in (w("pPr"), w("r")):
+                continue
+            owning_para = parent
+            while owning_para is not None and owning_para.tag != w("p"):
+                owning_para = owning_para.getparent()
+            if owning_para is not para:
+                continue
+            rfonts = rpr.find(w("rFonts"))
+            if rfonts is None:
+                rfonts = etree.SubElement(rpr, w("rFonts"))
+            for key, local in list(_rfonts_attr_keys(rfonts)):
+                if local.endswith("Theme"):
+                    del rfonts.attrib[key]
+            rfonts.set(f"{{{W_NS}}}cs", REPORT_COVER_FOOTER_FONT)
+            rfonts.set(f"{{{W_NS}}}ascii", REPORT_COVER_FOOTER_FONT)
+            rfonts.set(f"{{{W_NS}}}hAnsi", REPORT_COVER_FOOTER_FONT)
+    return serialize_word_xml(root)
+
+
+def ensure_tajawal_in_font_table(xml_bytes: bytes) -> bytes:
+    """أضف Tajawal إلى جدول الخطوط إن لم يكن موجوداً."""
+    root = etree.fromstring(xml_bytes)
+    for font in root.iter(w("font")):
+        name = font.get(f"{{{W_NS}}}name") or font.get("name") or ""
+        if name == REPORT_BODY_FONT:
+            return xml_bytes
+    font_el = etree.SubElement(root, w("font"))
+    font_el.set(f"{{{W_NS}}}name", REPORT_BODY_FONT)
+    charset = etree.SubElement(font_el, w("charset"))
+    charset.set(f"{{{W_NS}}}val", "00")
+    family = etree.SubElement(font_el, w("family"))
+    family.set(f"{{{W_NS}}}val", "swiss")
+    pitch = etree.SubElement(font_el, w("pitch"))
+    pitch.set(f"{{{W_NS}}}val", "variable")
+    return serialize_word_xml(root)
+
+
+def apply_tajawal_to_styles(xml_bytes: bytes) -> bytes:
+    """حوّل إشارات Cocon في الأنماط إلى Tajawal."""
+    root = etree.fromstring(xml_bytes)
+    for rfonts in root.iter(w("rFonts")):
+        _rewrite_rfonts_element(rfonts, REPORT_BODY_FONT)
+    return serialize_word_xml(root)
+
+
+def apply_visible_variable_values(
     xml_bytes: bytes,
-    name_to_text: dict[str, str],
     text_values: dict[str, str] | None = None,
-) -> tuple[bytes, int]:
+) -> tuple[bytes, int, int]:
     root = etree.fromstring(xml_bytes)
     repair_text_nodes(root)
-    filled = 0
-    for name, _bid, start, end in find_bookmark_pairs(root):
-        if is_image_bookmark(name):
-            continue
-        if should_skip_text_bookmark_fill(name, start):
-            continue
-        norm = normalize_bookmark_name(name)
-        value = None
-        for key, val in name_to_text.items():
-            if normalize_bookmark_name(key) == norm and val and str(val).strip():
-                value = str(val).strip()
-                break
-        if not value:
-            continue
-        if replace_text_bookmark(start, end, value, name):
-            filled += 1
-
-    if text_values:
-        filled += apply_contextual_text_fallbacks(root, text_values)
-    ensure_cover_title_above_client(root)
-    force_cover_shapes_to_page_right(root)
-    normalize_numeric_date_suffixes(root)
+    clean_text_values = text_values or {}
+    found, filled = replace_visible_variables(root, clean_text_values)
+    flatten_mail_merge_fields(root)
 
     out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
-    return out, filled
+    return out, found, filled
 
 
-def _cover_bookmark_paragraph(root: etree._Element, bookmark_names: set[str]) -> etree._Element | None:
-    wanted = {normalize_bookmark_name(name) for name in bookmark_names}
-    for name, _bid, start, _end in find_bookmark_pairs(root):
-        if normalize_bookmark_name(name) not in wanted:
-            continue
-        para = find_ancestor(start, w("p"))
-        if para is not None:
-            return para
-    return None
 
 
-def ensure_cover_title_above_client(root: etree._Element) -> None:
-    """إن وُجد عنوان الغلاف واسم العميل كفقرتين شقيقتين والعميل أعلى، بدّل ترتيبهما."""
-    title_para = _cover_bookmark_paragraph(root, {"عنوان", "غلاف"})
-    client_para = _cover_bookmark_paragraph(root, {"عميلغلاف"})
-    if title_para is None or client_para is None:
-        return
-    if title_para is client_para:
-        return
-    parent = title_para.getparent()
-    if parent is None or parent is not client_para.getparent():
-        return
-    children = list(parent)
-    try:
-        title_idx = children.index(title_para)
-        client_idx = children.index(client_para)
-    except ValueError:
-        return
-    if client_idx < title_idx:
-        parent.remove(title_para)
-        parent.insert(client_idx, title_para)
 
 
-def paragraph_has_drawing(p: etree._Element) -> bool:
-    return p.find(f".//{w('drawing')}") is not None or p.find(f".//{w('pict')}") is not None
 
 
-def paragraph_is_placeholder_image(p: etree._Element) -> bool:
-    if not paragraph_has_drawing(p):
-        return False
-    texts = "".join(t.text or "" for t in p.iter(w("t")))
-    return not texts.strip()
 
 
-def next_rid(rels_root: etree._Element) -> str:
-    raw = etree.tostring(rels_root, encoding="unicode")
-    ids = [int(m.group(1)) for m in re.finditer(r'Id="rId(\d+)"', raw)]
-    return f"rId{(max(ids) if ids else 0) + 1}"
 
 
-def next_image_path(media_paths: set[str]) -> str:
-    nums = []
-    for n in media_paths:
-        m = re.search(r"image(\d+)", n, re.I)
-        if m:
-            nums.append(int(m.group(1)))
-    return f"word/media/image{(max(nums) if nums else 0) + 1}.jpeg"
 
 
-def ensure_jpeg(data: bytes, *, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
-    """يضمن JPEG صالحاً للتضمين مع الحفاظ على الحدة (subsampling=0 للنصوص/الأرقام)."""
-    try:
-        img = Image.open(io.BytesIO(data))
-        # تجنّب إعادة الترميز إن كانت JPEG جاهزة — يقلل فقدان الجودة عبر الأجيال
-        if img.format == "JPEG" and img.mode in ("RGB", "L"):
-            return data
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        out = io.BytesIO()
-        img.save(
-            out,
-            format="JPEG",
-            quality=max(80, min(98, int(quality))),
-            optimize=True,
-            subsampling=0,
-        )
-        return out.getvalue()
-    except Exception:
-        return data
+
+
 
 
 def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
@@ -1389,7 +1445,7 @@ def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALIT
     img.save(
         out,
         format="JPEG",
-        quality=max(80, min(98, int(quality))),
+        quality=max(60, min(100, int(quality))),
         optimize=False,
         progressive=False,
         subsampling=0,  # 4:4:4 — أوضح للنصوص والجداول
@@ -1405,237 +1461,89 @@ def _save_docx_safe_png(img: Image.Image) -> bytes:
     return out.getvalue()
 
 
-def ensure_content_type(ct_xml: str, media_path: str) -> str:
-    part = f"/{media_path}"
-    if f'PartName="{part}"' in ct_xml:
-        return ct_xml
-    if 'Extension="jpeg"' not in ct_xml and 'Extension="jpg"' not in ct_xml:
-        ct_xml = ct_xml.replace(
-            "</Types>",
-            '<Default Extension="jpeg" ContentType="image/jpeg"/></Types>',
-        )
-    return ct_xml.replace(
-        "</Types>",
-        f'<Override PartName="{part}" ContentType="image/jpeg"/></Types>',
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def strip_mail_merge_settings(xml_bytes: bytes) -> bytes:
+    """أزل اتصال Mail Merge القديم فقط، دون لمس إعدادات تحديث الفهرس أو الحقول."""
+    root = etree.fromstring(xml_bytes)
+    for mail_merge in list(root.iter(w("mailMerge"))):
+        parent = mail_merge.getparent()
+        if parent is not None:
+            parent.remove(mail_merge)
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
     )
 
 
-def make_image_run(rid: str, cx: int, cy: int, doc_pr_id: int) -> etree._Element:
-    run = etree.Element(w("r"))
-    drawing = etree.SubElement(run, w("drawing"))
-    inline = etree.SubElement(drawing, f"{{{WP_NS}}}inline", distT="0", distB="0", distL="0", distR="0")
-    etree.SubElement(inline, f"{{{WP_NS}}}extent", cx=str(cx), cy=str(cy))
-    etree.SubElement(inline, f"{{{WP_NS}}}docPr", id=str(doc_pr_id), name="Picture")
-    graphic = etree.SubElement(inline, f"{{{A_NS}}}graphic")
-    gd = etree.SubElement(
-        graphic,
-        f"{{{A_NS}}}graphicData",
-        uri="http://schemas.openxmlformats.org/drawingml/2006/picture",
-    )
-    pic = etree.SubElement(gd, f"{{{PIC_NS}}}pic")
-    nv = etree.SubElement(pic, f"{{{PIC_NS}}}nvPicPr")
-    etree.SubElement(nv, f"{{{PIC_NS}}}cNvPr", id=str(doc_pr_id), name=f"Picture {doc_pr_id}")
-    etree.SubElement(nv, f"{{{PIC_NS}}}cNvPicPr")
-    etree.SubElement(nv, f"{{{PIC_NS}}}nvPr")
-    bf = etree.SubElement(pic, f"{{{PIC_NS}}}blipFill")
-    blip = etree.SubElement(bf, f"{{{A_NS}}}blip")
-    blip.set(f"{{{R_NS}}}embed", rid)
-    stretch = etree.SubElement(bf, f"{{{A_NS}}}stretch")
-    etree.SubElement(stretch, f"{{{A_NS}}}fillRect")
-    sp = etree.SubElement(pic, f"{{{PIC_NS}}}spPr")
-    xf = etree.SubElement(sp, f"{{{A_NS}}}xfrm")
-    etree.SubElement(xf, f"{{{A_NS}}}off", x="0", y="0")
-    etree.SubElement(xf, f"{{{A_NS}}}ext", cx=str(cx), cy=str(cy))
-    pg = etree.SubElement(sp, f"{{{A_NS}}}prstGeom", prst="rect")
-    etree.SubElement(pg, f"{{{A_NS}}}avLst")
-    return run
-
-
-def make_image_paragraph(rid: str, cx: int, cy: int, doc_pr_id: int) -> etree._Element:
-    p = etree.Element(w("p"))
-    ppr = etree.SubElement(p, w("pPr"))
-    etree.SubElement(ppr, w("bidi"))
-    set_w_attrs(etree.SubElement(ppr, w("jc")), {"val": "center"})
-    p.append(make_image_run(rid, cx, cy, doc_pr_id))
-    return p
-
-
-def make_image_cell(rid: str, cx: int, cy: int, doc_pr_id: int) -> etree._Element:
-    tc = etree.Element(w("tc"))
-    tcpr = etree.SubElement(tc, w("tcPr"))
-    set_w_attrs(etree.SubElement(tcpr, w("tcW")), {"w": "3000", "type": "dxa"})
-    p = etree.SubElement(tc, w("p"))
-    ppr = etree.SubElement(p, w("pPr"))
-    etree.SubElement(ppr, w("bidi"))
-    set_w_attrs(etree.SubElement(ppr, w("jc")), {"val": "center"})
-    p.append(make_image_run(rid, cx, cy, doc_pr_id))
-    return tc
-
-
-def make_empty_cell() -> etree._Element:
-    tc = etree.Element(w("tc"))
-    tcpr = etree.SubElement(tc, w("tcPr"))
-    set_w_attrs(etree.SubElement(tcpr, w("tcW")), {"w": "3000", "type": "dxa"})
-    etree.SubElement(tc, w("p"))
-    return tc
-
-
-def build_asset_table(imgs: list[bytes], add_image) -> etree._Element:
-    tbl = etree.Element(w("tbl"))
-    tblpr = etree.SubElement(tbl, w("tblPr"))
-    set_w_attrs(etree.SubElement(tblpr, w("tblW")), {"w": "5000", "type": "pct"})
-    set_w_attrs(etree.SubElement(tblpr, w("tblCellSpacing")), {"w": str(ASSET_IMAGE_GAP_DXA), "type": "dxa"})
-    grid = etree.SubElement(tbl, w("tblGrid"))
-    for _ in range(3):
-        set_w_attrs(etree.SubElement(grid, w("gridCol")), {"w": "3000"})
-    for i in range(0, len(imgs), 3):
-        chunk = imgs[i : i + 3]
-        tr = etree.SubElement(tbl, w("tr"))
-        cells = [make_image_cell(*add_image(img)) for img in chunk]
-        while len(cells) < 3:
-            cells.append(make_empty_cell())
-        for c in cells:
-            tr.append(c)
-    return tbl
-
-
-class ImageRegistry:
-    def __init__(self, rels_xml: str, ct_xml: str, media_paths: set[str]):
-        empty = b'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>'
-        self.rels_root = etree.fromstring(rels_xml.encode("utf-8") if rels_xml.strip() else empty)
-        self.ct_xml = ct_xml
-        self.media_paths = set(media_paths)
-        self.new_media: dict[str, bytes] = {}
-        self.doc_pr_id = 1000
-
-    def reserve_existing_drawing_ids(self, root: etree._Element) -> None:
-        ids: list[int] = []
-        for el in root.iter():
-            local = etree.QName(el).localname
-            if local not in ("docPr", "cNvPr"):
-                continue
-            raw = el.get("id")
-            if raw and raw.isdigit():
-                ids.append(int(raw))
-        self.doc_pr_id = max([self.doc_pr_id - 1, *ids]) + 1
-
-    def add(self, img_bytes: bytes) -> tuple[str, int, int, int]:
-        rid = next_rid(self.rels_root)
-        media_path = next_image_path(self.media_paths)
-        self.media_paths.add(media_path)
-        jpeg = ensure_jpeg(img_bytes)
-        self.new_media[media_path] = jpeg
-        rel = etree.SubElement(self.rels_root, f"{{{REL_NS}}}Relationship")
-        rel.set("Id", rid)
-        rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
-        rel.set("Target", media_path.replace("word/", ""))
-        self.ct_xml = ensure_content_type(self.ct_xml, media_path)
-        doc_id = self.doc_pr_id
-        self.doc_pr_id += 2
-        return rid, 1900000, 1420000, doc_id
-
-    def add_valuation(self, img_bytes: bytes) -> tuple[str, int, int, int]:
-        rid, _, _, doc_id = self.add(img_bytes)
-        cx, cy = scaled_image_size_for_width_only(
-            img_bytes,
-            int(8.27 * EMU_PER_INCH * VALUATION_IMAGE_PAGE_WIDTH_RATIO),
+def strip_mail_merge_relationships(xml_bytes: bytes) -> bytes:
+    root = etree.fromstring(xml_bytes)
+    for rel in list(root):
+        rel_type = (rel.get("Type") or "").lower()
+        target = (rel.get("Target") or "").lower()
+        target_mode = (rel.get("TargetMode") or "").lower()
+        is_merge_relation = (
+            rel_type.endswith("/mailmergesource")
+            or rel_type.endswith("/recipientdata")
+            or "recipientdata" in target
+            or (target_mode == "external" and ("xlsx" in target or "projects" in target))
         )
-        return rid, cx, cy, doc_id
+        if is_merge_relation:
+            root.remove(rel)
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
+    )
 
 
-def apply_image_bookmarks(
-    doc_xml: bytes,
-    asset_images: list[bytes],
-    valuation_images: list[bytes],
-    registry: ImageRegistry,
-) -> tuple[bytes, dict[str, int]]:
-    root = etree.fromstring(doc_xml)
-    registry.reserve_existing_drawing_ids(root)
-    body = root.find(".//" + w("body"))
-    stats = {"asset": 0, "valuation": 0}
-    if body is None:
-        return doc_xml, stats
-
-    pairs = find_bookmark_pairs(root)
-    images_by_field = {"asset": asset_images, "valuation": valuation_images}
-
-    ops: list[tuple[etree._Element, etree._Element, etree._Element, dict[str, Any], list[bytes]]] = []
-
-    for bm_key, cfg in IMAGE_BOOKMARKS.items():
-        imgs = images_by_field.get(cfg["field"], [])
-        if not imgs:
-            continue
-
-        target = None
-        for name, _bid, s, e in pairs:
-            if normalize_bookmark_name(name) == normalize_bookmark_name(bm_key):
-                target = (s, e)
-                break
-        if not target:
-            continue
-
-        start, end = target
-        para = find_ancestor(start, w("p"))
-        if para is None:
-            continue
-        ops.append((para, start, end, cfg, imgs))
-
-    for para, start, end, cfg, imgs in ops:
-        replace_start_para = para
-        replace_end_para = para
-
-        if cfg.get("remove_placeholder"):
-            children = list(body)
-            try:
-                idx = children.index(para)
-                i = idx - 1
-                while i >= 0 and children[i].tag == w("p") and paragraph_is_placeholder_image(children[i]):
-                    replace_start_para = children[i]
-                    i -= 1
-            except ValueError:
-                pass
-
-        children = list(body)
-        try:
-            start_idx = children.index(replace_start_para)
-            end_idx = children.index(replace_end_para)
-        except ValueError:
-            continue
-
-        for i in range(end_idx, start_idx - 1, -1):
-            body.remove(children[i])
-
-        insert_idx = start_idx
-
-        if cfg.get("layout") == "grid3":
-
-            def add_img(img: bytes):
-                rid, cx, cy, doc_id = registry.add(img)
-                stats["asset"] += 1
-                return rid, cx, cy, doc_id
-
-            body.insert(insert_idx, build_asset_table(imgs, add_img))
-        else:
-            for offset, img in enumerate(imgs):
-                rid, cx, cy, doc_id = registry.add_valuation(img)
-                body.insert(insert_idx + offset, make_image_paragraph(rid, cx, cy, doc_id))
-                stats["valuation"] += 1
-
-    out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
-    return out, stats
+def strip_recipient_content_type(xml_bytes: bytes) -> bytes:
+    root = etree.fromstring(xml_bytes)
+    for child in list(root):
+        part_name = (child.get("PartName") or "").lower()
+        if part_name == "/word/recipientdata.xml":
+            root.remove(child)
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
+    )
 
 
-def write_docx_zip(zin: zipfile.ZipFile, modified: dict[str, bytes]) -> bytes:
+def write_docx_zip(
+    zin: zipfile.ZipFile,
+    modified: dict[str, bytes],
+    removed: set[str] | None = None,
+) -> bytes:
     out_buf = io.BytesIO()
+    removed_names = removed or set()
     names = zin.namelist()
     ordered: list[str] = []
-    if "mimetype" in names:
+    if "mimetype" in names and "mimetype" not in removed_names:
         ordered.append("mimetype")
     for name in names:
-        if name != "mimetype":
+        if name != "mimetype" and name not in removed_names:
             ordered.append(name)
     for path in modified:
-        if path not in ordered:
+        if path not in ordered and path not in removed_names:
             ordered.append(path)
 
     with zipfile.ZipFile(out_buf, "w") as zout:
@@ -2288,12 +2196,6 @@ def make_section_break_paragraph_from_sect_pr(sect_pr, *, next_page: bool = True
     return break_p
 
 
-def find_body_bookmark_index(children: list[Any], bookmark_names: tuple[str, ...] | list[str]):
-    for name in bookmark_names:
-        for idx, child in enumerate(children):
-            if block_contains_bookmark(child, name):
-                return idx, name
-    return None, None
 
 
 def document_valuation_image_layout_emu(
@@ -2550,7 +2452,7 @@ def make_docx_image_table_element(
                 img_bytes = None
             img_index += 1
 
-    # python-docx leaves the table attached to the document body; detach for bookmark splice.
+    # python-docx leaves the table attached to the document body; detach before insertion.
     return detach_docx_body_element(table._tbl), inserted
 
 
@@ -2611,12 +2513,55 @@ def make_docx_valuation_image_element(
         return detach_docx_body_element(p._element), 0
 
 
-def block_contains_bookmark(block, bookmark_name: str) -> bool:
-    norm = normalize_bookmark_name(bookmark_name)
-    for bm in block.iter(docx_qn("w:bookmarkStart")):
-        if normalize_bookmark_name(bm.get(docx_qn("w:name")) or "") == norm:
-            return True
-    return False
+
+
+def block_text(block) -> str:
+    return sanitize_xml_text(
+        "".join(node.text or "" for node in block.iter(docx_qn("w:t"))),
+    )
+
+
+def find_body_heading_index(
+    children: list[Any],
+    headings: tuple[str, ...] | list[str],
+) -> tuple[int | None, str | None]:
+    """ابحث من النهاية وفي فقرات body المباشرة فقط كي لا نلتقط عنوان الفهرس."""
+    wanted = {
+        normalize_heading_text(heading): heading
+        for heading in headings
+    }
+    for idx in range(len(children) - 1, -1, -1):
+        child = children[idx]
+        if etree.QName(child).localname != "p":
+            continue
+        normalized = normalize_heading_text(block_text(child))
+        for key, heading in wanted.items():
+            if normalized == key or normalized.startswith(key):
+                return idx, heading
+    return None, None
+
+
+def block_is_empty_insertion_spacer(block) -> bool:
+    if etree.QName(block).localname != "p":
+        return False
+    if block_text(block):
+        return False
+    protected_tags = (
+        docx_qn("w:br"),
+        docx_qn("w:sectPr"),
+        docx_qn("w:drawing"),
+        docx_qn("w:pict"),
+    )
+    return not any(any(True for _ in block.iter(tag)) for tag in protected_tags)
+
+
+def remove_empty_spacers_after(body, heading_idx: int) -> int:
+    insert_at = heading_idx + 1
+    while True:
+        children = list(body)
+        if insert_at >= len(children) or not block_is_empty_insertion_spacer(children[insert_at]):
+            return insert_at
+        body.remove(children[insert_at])
 
 
 def block_is_placeholder_image(block) -> bool:
@@ -2694,11 +2639,10 @@ def insert_image_grid_pages(
     return inserted, insert_at
 
 
-def replace_image_bookmark_with_docx_elements(
+def insert_images_after_section_heading(
     doc,
-    bookmark_name: str,
+    field: str,
     images: list[ImageSource],
-    remove_placeholder: bool,
     layout: str = "asset_grid",
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
@@ -2706,28 +2650,22 @@ def replace_image_bookmark_with_docx_elements(
 ) -> int:
     body = doc.element.body
     children = list(body)
-    target_idx = None
-    for idx, child in enumerate(children):
-        if block_contains_bookmark(child, bookmark_name):
-            target_idx = idx
-            break
     if not images:
-        log(f"image bookmark {bookmark_name!r}: no images to insert")
+        log(f"image section {field!r}: no images to insert")
         return 0
+    target_idx, found_heading = find_body_heading_index(
+        children,
+        IMAGE_SECTION_HEADINGS.get(field, ()),
+    )
     if target_idx is None:
-        log(f"image bookmark {bookmark_name!r}: not found in document body")
+        log(
+            f"image section heading for {field!r} "
+            "was not found in document body"
+        )
         return 0
-
-    start_idx = target_idx
-    if remove_placeholder:
-        while start_idx > 0 and block_is_placeholder_image(children[start_idx - 1]):
-            start_idx -= 1
-
-    for idx in range(target_idx, start_idx - 1, -1):
-        body.remove(children[idx])
-
-    insert_at = start_idx
+    log(f"image section heading found for {field!r}: {found_heading!r}")
     section_metrics = first_section_metrics_at_or_after(children, target_idx)
+    insert_at = remove_empty_spacers_after(body, target_idx)
     inserted, _ = insert_image_grid_pages(
         doc,
         body,
@@ -2742,80 +2680,37 @@ def replace_image_bookmark_with_docx_elements(
     return inserted
 
 
-def insert_client_images_docx(
+def insert_client_images_after_section_heading(
     doc,
     images: list[ImageSource],
     images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
     images_per_page: int = CLIENT_DOCS_IMAGES_PER_PAGE,
 ) -> int:
     """
-    إدراج مستندات العميل:
-    - يبحث عن الإشارة المرجعية بعدة أسماء شائعة
-    - إن وُجدت داخل قسم عرضي يُغلق ويُفتح قسم A4 طولي
-    - إن لم تُوجد تُضاف في نهاية المستند كقسم طولي جديد (مثل القالب الأساسي)
+    إدراج مستندات العميل بعد عنوان مرفق 3 فقط.
+
+    لا تُستخدم أي علامات مرجعية ولا يُنشأ مرفق بديل عند غياب العنوان.
     """
     if not images:
-        log("image bookmark 'مستنداتعميل': no images to insert")
+        log("client image section: no images to insert")
         return 0
 
     body = doc.element.body
     children = list(body)
-    target_idx, found_name = find_body_bookmark_index(children, CLIENT_IMAGE_BOOKMARK_ALIASES)
-
+    target_idx, found_name = find_body_heading_index(
+        children,
+        IMAGE_SECTION_HEADINGS["client"],
+    )
     if target_idx is None:
         log(
-            "image bookmark 'مستنداتعميل': not found in document body; "
-            "appending portrait A4 client section at end"
+            "client image section heading was not found in document body"
         )
-        final_sect = body_final_sect_pr(body)
-        insert_at = len(list(body)) - (1 if final_sect is not None else 0)
-        if final_sect is not None:
-            body.insert(insert_at, make_section_break_paragraph_from_sect_pr(final_sect, next_page=True))
-            insert_at += 1
-            apply_portrait_a4_to_sect_pr(final_sect)
-        else:
-            # مستند بلا sectPr نهائي — أضف واحداً طولياً
-            final_sect = make_docx_element("w:sectPr")
-            apply_portrait_a4_to_sect_pr(final_sect)
-            body.append(final_sect)
+        return 0
 
-        section_metrics = portrait_a4_metrics()
-        title_elem = make_docx_title_element(doc, CLIENT_DOCS_SECTION_TITLE)
-        body.insert(insert_at, title_elem)
-        insert_at += 1
-        inserted, _ = insert_image_grid_pages(
-            doc,
-            body,
-            insert_at,
-            images,
-            "client_grid",
-            images_per_row,
-            images_per_page,
-            section_metrics,
-        )
-        return inserted
-
-    log(f"client image bookmark found: {found_name!r}")
-    start_idx = target_idx
-    while start_idx > 0 and block_is_placeholder_image(children[start_idx - 1]):
-        start_idx -= 1
-    for idx in range(target_idx, start_idx - 1, -1):
-        body.remove(children[idx])
-
-    insert_at = start_idx
+    log(f"client image section heading found: {found_name!r}")
     raw_metrics = first_section_metrics_at_or_after(children, target_idx)
     section_metrics = ensure_portrait_metrics(raw_metrics)
-
-    if is_landscape_metrics(raw_metrics):
-        final_sect = body_final_sect_pr(body)
-        if final_sect is not None:
-            # أغلق القسم العرضي السابق ثم اجعل بقية المستند (مرفق العميل) طولياً
-            body.insert(insert_at, make_section_break_paragraph_from_sect_pr(final_sect, next_page=True))
-            insert_at += 1
-            apply_portrait_a4_to_sect_pr(final_sect)
-            section_metrics = portrait_a4_metrics()
-            log("client docs section forced to portrait A4 (was landscape)")
-
+    insert_at = remove_empty_spacers_after(body, target_idx)
     inserted, _ = insert_image_grid_pages(
         doc,
         body,
@@ -2829,7 +2724,7 @@ def insert_client_images_docx(
     return inserted
 
 
-def apply_image_bookmarks_docx_api(
+def apply_image_sections_docx_api(
     docx_bytes: bytes,
     asset_images: list[ImageSource],
     valuation_images: list[ImageSource],
@@ -2847,18 +2742,17 @@ def apply_image_bookmarks_docx_api(
     stats = {"asset": 0, "valuation": 0, "client": 0}
     # الأهم أولاً: حسابات القيمة + مستندات العميل قبل مئات صور الأصول،
     # حتى لا تفشل إضافتها بعد تضخّم المستند/تعارض معرّفات الرسم.
-    stats["valuation"] = replace_image_bookmark_with_docx_elements(
+    stats["valuation"] = insert_images_after_section_heading(
         doc,
-        "صورحسابات",
+        "valuation",
         valuation_images,
-        True,
         "valuation_pages",
     )
     valuation_images.clear()
     gc.collect()
     log(f"valuation images inserted: {stats['valuation']}")
 
-    stats["client"] = insert_client_images_docx(
+    stats["client"] = insert_client_images_after_section_heading(
         doc,
         client_images or [],
         client_images_per_row,
@@ -2869,11 +2763,10 @@ def apply_image_bookmarks_docx_api(
     gc.collect()
     log(f"client images inserted: {stats['client']}")
 
-    stats["asset"] = replace_image_bookmark_with_docx_elements(
+    stats["asset"] = insert_images_after_section_heading(
         doc,
-        "صوراصول",
+        "asset",
         asset_images,
-        True,
         "asset_grid",
         images_per_row,
         images_per_page,
@@ -2923,6 +2816,10 @@ def apply_image_bookmarks_docx_api(
 
 
 def merge_package(payload: dict[str, Any]) -> bytes | None:
+    global ASSET_IMAGE_JPEG_QUALITY
+    global VALUATION_IMAGE_JPEG_QUALITY
+    global DOCUMENT_IMAGE_JPEG_QUALITY
+
     output_path = str(payload.get("outputPath") or "").strip() or None
     template_path = str(payload.get("templatePath") or "").strip()
     template_b64 = payload.get("templateBase64") or ""
@@ -2936,11 +2833,21 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         raise ValueError("templatePath or templateBase64 missing")
 
     text_values = payload.get("textValues") or {}
-    name_to_text = build_name_to_text(text_values, payload.get("textByBookmarkName") or {})
+    report_preparers_present, report_preparers = collect_report_preparers(payload)
     asset_images = collect_image_sources(payload, "assetImagePaths", "assetImagesBase64")
     valuation_images = collect_image_sources(payload, "valuationImagePaths", "valuationImagesBase64")
     client_images = collect_image_sources(payload, "clientImagePaths", "clientImagesBase64")
     image_layout = payload.get("imageLayout") if isinstance(payload.get("imageLayout"), dict) else {}
+    try:
+        image_quality = max(60, min(100, int(image_layout.get("imageQuality", 90))))
+    except (TypeError, ValueError):
+        image_quality = 90
+    ASSET_IMAGE_JPEG_QUALITY = adaptive_asset_quality(
+        len(asset_images),
+        image_quality,
+    )
+    VALUATION_IMAGE_JPEG_QUALITY = image_quality
+    DOCUMENT_IMAGE_JPEG_QUALITY = image_quality
     try:
         images_per_row = max(1, min(6, int(image_layout.get("imagesPerRow", IMAGES_PER_ROW))))
     except (TypeError, ValueError):
@@ -2976,9 +2883,18 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
     in_buf = io.BytesIO(template_bytes)
     del template_bytes
     modified: dict[str, bytes] = {}
-    total_text = 0
-    all_bookmarks: list[str] = []
+    removed_parts: set[str] = set()
+    variable_names_found: list[str] = []
+    variables_occurrences_found = 0
+    variables_filled = 0
+    header_wraps_normalized = 0
     img_stats = {"asset": 0, "valuation": 0, "client": 0}
+    preparer_stats = {
+        "tableFound": 0,
+        "rowsRemoved": 0,
+        "preparersInserted": 0,
+        "signaturesInserted": 0,
+    }
 
     with zipfile.ZipFile(in_buf, "r") as zin:
         names = zin.namelist()
@@ -2986,21 +2902,110 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         for fname in names:
             if MERGE_PARTS_RE.match(fname):
                 raw = zin.read(fname)
-                for bm in collect_bookmark_names(raw):
-                    if bm not in all_bookmarks:
-                        all_bookmarks.append(bm)
-                updated, n = apply_text_bookmarks(raw, name_to_text, text_values)
+                for variable_name in collect_template_placeholder_names(raw):
+                    if variable_name not in variable_names_found:
+                        variable_names_found.append(variable_name)
+                # طبّق الخطوط قبل استبدال المتغيرات حتى تبقى علامات
+                # «الرقم_المرجعي» / تاريخ التقرير ظاهرة لتمييز أسفل الغلاف.
+                updated = apply_report_fonts_to_part(raw)
+                updated, found, filled = apply_visible_variable_values(
+                    updated,
+                    text_values,
+                )
+                if fname.lower().startswith("word/header"):
+                    updated, changed_wraps = normalize_header_floating_wraps(updated)
+                    header_wraps_normalized += changed_wraps
                 validate_part_xml(updated, fname)
                 modified[fname] = updated
-                total_text += n
+                variables_occurrences_found += found
+                variables_filled += filled
 
-        result = write_docx_zip(zin, modified)
+        if "word/fontTable.xml" in names:
+            modified["word/fontTable.xml"] = ensure_tajawal_in_font_table(
+                zin.read("word/fontTable.xml")
+            )
+        if "word/styles.xml" in names:
+            modified["word/styles.xml"] = apply_tajawal_to_styles(
+                zin.read("word/styles.xml")
+            )
+        if "word/numbering.xml" in names:
+            modified["word/numbering.xml"] = apply_tajawal_to_styles(
+                zin.read("word/numbering.xml")
+            )
+
+        if report_preparers_present:
+            if "word/document.xml" not in names:
+                raise ValueError("Invalid docx package: word/document.xml is missing")
+            if "[Content_Types].xml" not in names:
+                raise ValueError("Invalid docx package: [Content_Types].xml is missing")
+            empty_document_relationships = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<Relationships xmlns="{PACKAGE_REL_NS}"/>'
+            ).encode("utf-8")
+            (
+                updated_document,
+                updated_document_relationships,
+                updated_content_types,
+                signature_parts,
+                preparer_stats,
+            ) = inject_report_preparers(
+                modified.get("word/document.xml", zin.read("word/document.xml")),
+                modified.get(
+                    "word/_rels/document.xml.rels",
+                    (
+                        zin.read("word/_rels/document.xml.rels")
+                        if "word/_rels/document.xml.rels" in names
+                        else empty_document_relationships
+                    ),
+                ),
+                modified.get(
+                    "[Content_Types].xml",
+                    zin.read("[Content_Types].xml"),
+                ),
+                report_preparers,
+                set(names) | set(modified),
+            )
+            validate_part_xml(updated_document, "word/document.xml")
+            etree.fromstring(updated_document_relationships)
+            etree.fromstring(updated_content_types)
+            modified["word/document.xml"] = updated_document
+            modified["word/_rels/document.xml.rels"] = (
+                updated_document_relationships
+            )
+            modified["[Content_Types].xml"] = updated_content_types
+            modified.update(signature_parts)
+
+        should_clean_mail_merge = variables_occurrences_found > 0
+        if should_clean_mail_merge and "word/settings.xml" in names:
+            modified["word/settings.xml"] = strip_mail_merge_settings(
+                zin.read("word/settings.xml")
+            )
+        if should_clean_mail_merge and "word/_rels/settings.xml.rels" in names:
+            modified["word/_rels/settings.xml.rels"] = strip_mail_merge_relationships(
+                zin.read("word/_rels/settings.xml.rels")
+            )
+        if should_clean_mail_merge and "[Content_Types].xml" in names:
+            modified["[Content_Types].xml"] = strip_recipient_content_type(
+                modified.get(
+                    "[Content_Types].xml",
+                    zin.read("[Content_Types].xml"),
+                )
+            )
+        if should_clean_mail_merge:
+            removed_parts.update(
+                {
+                    "word/recipientData.xml",
+                    "word/_rels/recipientData.xml.rels",
+                }
+            )
+
+        result = write_docx_zip(zin, modified, removed_parts)
 
     del in_buf
     gc.collect()
 
     if asset_images or valuation_images or client_images:
-        result, img_stats = apply_image_bookmarks_docx_api(
+        result, img_stats = apply_image_sections_docx_api(
             result,
             asset_images,
             valuation_images,
@@ -3013,6 +3018,8 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         )
     else:
         if output_path:
+            if report_preparers_present:
+                validate_docx_package(result)
             with open(output_path, "wb") as fh:
                 fh.write(result)
             result = None
@@ -3022,11 +3029,23 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
     log(
         json.dumps(
             {
-                "textFilled": total_text,
+                "variablesFound": variable_names_found,
+                "variablesOccurrencesFound": variables_occurrences_found,
+                "variablesFilled": variables_filled,
+                "headerWrapsNormalized": header_wraps_normalized,
+                "reportPreparerTableFound": preparer_stats.get("tableFound", 0),
+                "reportPreparerRowsRemoved": preparer_stats.get("rowsRemoved", 0),
+                "reportPreparersInserted": preparer_stats.get(
+                    "preparersInserted",
+                    0,
+                ),
+                "reportSignaturesInserted": preparer_stats.get(
+                    "signaturesInserted",
+                    0,
+                ),
                 "assetImagesInserted": img_stats.get("asset", 0),
                 "valuationImagesInserted": img_stats.get("valuation", 0),
                 "clientImagesInserted": img_stats.get("client", 0),
-                "bookmarksFound": all_bookmarks,
             },
             ensure_ascii=False,
         )

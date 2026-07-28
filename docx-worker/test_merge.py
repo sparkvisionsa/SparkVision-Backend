@@ -1,255 +1,41 @@
 #!/usr/bin/env python3
-"""Smoke test: minimal docx with inline + spanning bookmarks."""
+"""Regression tests for visible-variable Word merging and section-based images."""
+
 import base64
 import io
 import json
+import os
 import re
 import zipfile
+
 from lxml import etree
+
+import merge_docx as worker
 from merge_docx import (
     ASSET_IMAGE_GAP_DXA,
     ASSET_IMAGE_MAX_SQUARE_PX,
-    COVER_EDGE_MARGIN_EMU,
-    COVER_EDGE_MARGIN_TWIPS,
     EMU_PER_INCH,
     IMAGE_CONTENT_WIDTH_RATIO,
-    IMAGE_HORIZONTAL_MARGIN_DXA,
-    IMAGE_PAGE_TITLE,
     IMAGES_PER_PAGE,
     IMAGES_PER_ROW,
-    stretch_to_fill_canvas_jpeg_bytes,
+    PLACEHOLDER_FIELDS,
+    apply_visible_variable_values,
+    collect_template_placeholder_names,
     merge_package,
+    stretch_to_fill_canvas_jpeg_bytes,
     validate_part_xml,
 )
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+WP14_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
-
-
-def make_solid_jpeg(width: int, height: int, color: tuple[int, int, int] = (20, 120, 200)) -> bytes:
-    from PIL import Image
-
-    img = Image.new("RGB", (width, height), color)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    return buf.getvalue()
-
-
-def test_stretch_fills_uniform_canvas_without_crop_or_pad() -> None:
-    """تمطيط لملء الخلية: بدون فراغات بيضاء وبدون قصّ — الزوايا من محتوى الصورة."""
-    from PIL import Image
-
-    wide = make_solid_jpeg(800, 200, (10, 200, 40))
-    cell = int(2.0 * EMU_PER_INCH)
-    out = stretch_to_fill_canvas_jpeg_bytes(wide, cell, cell, max_side_px=400)
-    canvas = Image.open(io.BytesIO(out)).convert("RGB")
-    assert canvas.size == (400, 400), "canvas must match uniform cell"
-    # لا حشوة بيضاء — كل البكسلات من الصورة الممطوطة (أخضر)
-    for xy in ((2, 2), (200, 200), (397, 397), (2, 397), (397, 2)):
-        pixel = canvas.getpixel(xy)
-        assert pixel[1] > 150 and pixel[0] < 80, f"expected stretched green at {xy}, got {pixel}"
-
-    tall = make_solid_jpeg(200, 800, (220, 30, 30))
-    out2 = stretch_to_fill_canvas_jpeg_bytes(tall, cell, cell, max_side_px=400)
-    canvas2 = Image.open(io.BytesIO(out2)).convert("RGB")
-    for xy in ((2, 2), (200, 200), (397, 397)):
-        pixel = canvas2.getpixel(xy)
-        assert pixel[0] > 180 and pixel[1] < 80, f"expected stretched red at {xy}, got {pixel}"
-    assert ASSET_IMAGE_MAX_SQUARE_PX >= 1600
-
-
-def mojibake(text: str) -> str:
-    return text.encode("utf-8").decode("cp1252")
-
-DOCUMENT_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}">
-  <w:body>
-    <w:p>
-      <w:r><w:t>العميل: </w:t></w:r>
-      <w:r>
-        <w:bookmarkStart w:id="0" w:name="عميل"/>
-        <w:bookmarkEnd w:id="0"/>
-      </w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:bookmarkStart w:id="16" w:name="عميلغلاف"/></w:r>
-      <w:r><w:t>old cover client</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="16"/></w:r>
-    </w:p>
-    <w:p>
-      <w:r>
-        <w:rPr>
-          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
-        </w:rPr>
-        <w:t>تم إعداد التقرير بعنوان </w:t>
-      </w:r>
-      <w:bookmarkStart w:id="17" w:name="عنوانغ"/>
-      <w:bookmarkEnd w:id="17"/>
-      <w:r>
-        <w:rPr>
-          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
-        </w:rPr>
-        <w:t> وفق المعايير المعتمدة.</w:t>
-      </w:r>
-    </w:p>
-    <w:p>
-      <w:r>
-        <w:rPr>
-          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
-        </w:rPr>
-        <w:t>العنوان الأصلي: </w:t>
-      </w:r>
-      <w:bookmarkStart w:id="18" w:name="عنواناصل"/>
-      <w:r>
-        <w:rPr>
-          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
-        </w:rPr>
-        <w:t>old original title</w:t>
-      </w:r>
-      <w:bookmarkEnd w:id="18"/>
-      <w:r>
-        <w:rPr>
-          <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
-          <w:sz w:val="22"/>
-          <w:szCs w:val="22"/>
-        </w:rPr>
-        <w:t>.</w:t>
-      </w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:bookmarkStart w:id="1" w:name="تاريخاصدار"/></w:r>
-      <w:r><w:t>placeholder</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="1"/></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:bookmarkStart w:id="8" w:name="تاريخاتفاقتاريخاصدار"/></w:r>
-      <w:r><w:t>old agreement date</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="8"/></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:bookmarkStart w:id="9" w:name="تاريخ_التقييم"/></w:r>
-      <w:r><w:t>old valuation date</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="9"/></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:bookmarkStart w:id="10" w:name="تاريخالمعاينة"/></w:r>
-      <w:r><w:t>old inspection date</w:t></w:r>
-      <w:r><w:bookmarkEnd w:id="10"/></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:t>على أساس  في تاريخ التقييم </w:t></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:t>تاريخ التقييم   م.</w:t></w:r>
-    </w:p>
-    <w:p>
-      <w:r><w:t>تمت المعاينة في مدينة </w:t></w:r>
-      <w:bookmarkStart w:id="12" w:name="موقع"/>
-      <w:bookmarkEnd w:id="12"/>
-      <w:r><w:t>، بتاريخ  </w:t></w:r>
-      <w:bookmarkStart w:id="13" w:name="تاريختقييمت"/>
-      <w:bookmarkEnd w:id="13"/>
-      <w:r><w:t> </w:t></w:r>
-      <w:bookmarkStart w:id="14" w:name="تاريخمعاين"/>
-      <w:bookmarkEnd w:id="14"/>
-      <w:r><w:t> م.</w:t></w:r>
-    </w:p>
-    <w:p>
-      <w:bookmarkStart w:id="2" w:name="قيمةنهائية"/>
-      <w:r><w:t>old value</w:t></w:r>
-      <w:bookmarkEnd w:id="2"/>
-    </w:p>
-    <w:p>
-      <w:bookmarkStart w:id="11" w:name="قيمة"/>
-      <w:r><w:t>old short value</w:t></w:r>
-      <w:bookmarkEnd w:id="11"/>
-    </w:p>
-    <w:p>
-      <w:hyperlink r:id="rId1">
-        <w:r><w:bookmarkStart w:id="3" w:name="موقع"/></w:r>
-        <w:r><w:t>old hyperlink text</w:t></w:r>
-        <w:r><w:bookmarkEnd w:id="3"/></w:r>
-      </w:hyperlink>
-    </w:p>
-    <w:p>
-      <w:r>
-        <w:drawing>
-          <w:txbxContent>
-            <w:p>
-              <w:r><w:bookmarkStart w:id="5" w:name="الغرض"/></w:r>
-              <w:r><w:t>old textbox purpose</w:t></w:r>
-              <w:r><w:bookmarkEnd w:id="5"/></w:r>
-            </w:p>
-          </w:txbxContent>
-        </w:drawing>
-      </w:r>
-    </w:p>
-    <w:p>
-      <w:r>
-        <w:drawing>
-          <wp:anchor xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" simplePos="0" relativeHeight="251658240" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
-            <wp:simplePos x="0" y="0"/>
-            <wp:positionH relativeFrom="page"><wp:align>left</wp:align></wp:positionH>
-            <wp:positionV relativeFrom="page"><wp:align>center</wp:align></wp:positionV>
-            <wp:extent cx="3000000" cy="900000"/>
-            <wp:wrapNone/>
-            <wp:docPr id="77" name="CoverTitleBox"/>
-            <a:graphic>
-              <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
-                <w:txbxContent>
-                  <w:p>
-                    <w:bookmarkStart w:id="7" w:name="عنوان"/>
-                    <w:bookmarkEnd w:id="7"/>
-                  </w:p>
-                </w:txbxContent>
-              </a:graphicData>
-            </a:graphic>
-          </wp:anchor>
-        </w:drawing>
-      </w:r>
-    </w:p>
-    <w:p><w:r><w:drawing/></w:r></w:p>
-    <w:p>
-      <w:bookmarkStart w:id="4" w:name="صوراصول"/>
-      <w:bookmarkEnd w:id="4"/>
-    </w:p>
-    <w:p>
-      <w:bookmarkStart w:id="6" w:name="صورحسابات"/>
-      <w:bookmarkEnd w:id="6"/>
-    </w:p>
-    <w:p>
-      <w:pPr>
-        <w:sectPr>
-          <w:pgSz w:w="11906" w:h="16838"/>
-          <w:pgMar w:top="1440" w:right="2127" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
-        </w:sectPr>
-      </w:pPr>
-    </w:p>
-    <w:p>
-      <w:r><w:t>بعد الأخذ في الاعتبار جميع البيانات ذات الصلة والمبادئ المنصوص عليها، فإننا نرى أن رأي قيمة التصفية ( </w:t></w:r>
-      <w:r><w:t>ر.س. ) </w:t></w:r>
-      <w:bookmarkStart w:id="15" w:name="قيمةاحرف"/>
-      <w:r><w:t>old words</w:t></w:r>
-      <w:bookmarkEnd w:id="15"/>
-      <w:r><w:t> لا غير</w:t></w:r>
-    </w:p>
-    <w:sectPr/>
-  </w:body>
-</w:document>"""
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -258,297 +44,956 @@ CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
 </Types>"""
 
-RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+PACKAGE_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>"""
 
-DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.test" TargetMode="External"/>
-</Relationships>"""
+EMPTY_DOCUMENT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
 
 
-def make_template() -> bytes:
+def make_solid_jpeg(
+    width: int,
+    height: int,
+    color: tuple[int, int, int] = (20, 120, 200),
+) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), color)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+def make_minimal_docx(document_xml: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr(zipfile.ZipInfo("mimetype"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", compress_type=zipfile.ZIP_STORED)
+        z.writestr(
+            zipfile.ZipInfo("mimetype"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            compress_type=zipfile.ZIP_STORED,
+        )
         z.writestr("[Content_Types].xml", CONTENT_TYPES)
-        z.writestr("_rels/.rels", RELS)
-        z.writestr("word/document.xml", DOCUMENT_XML)
-        z.writestr("word/_rels/document.xml.rels", DOC_RELS)
+        z.writestr("_rels/.rels", PACKAGE_RELS)
+        z.writestr("word/document.xml", document_xml)
+        z.writestr("word/_rels/document.xml.rels", EMPTY_DOCUMENT_RELS)
     return buf.getvalue()
+
+
+def merge_with_captured_stats(payload: dict) -> tuple[bytes, dict]:
+    messages: list[str] = []
+    original_log = worker.log
+    worker.log = messages.append
+    try:
+        output = merge_package(payload)
+    finally:
+        worker.log = original_log
+    assert output is not None
+    json_messages = [
+        json.loads(message)
+        for message in messages
+        if message.startswith("{") and message.endswith("}")
+    ]
+    assert json_messages, f"merge stats were not logged: {messages}"
+    return output, json_messages[-1]
+
+
+def visible_text(root: etree._Element) -> str:
+    w = lambda tag: f"{{{W_NS}}}{tag}"
+    return "\n".join(
+        "".join(node.text or "" for node in para.iter(w("t")))
+        for para in root.iter(w("p"))
+    )
+
+
+def runs_with_text(root: etree._Element, expected: str) -> list[etree._Element]:
+    w = lambda tag: f"{{{W_NS}}}{tag}"
+    return [
+        run
+        for run in root.iter(w("r"))
+        if "".join(node.text or "" for node in run.iter(w("t"))) == expected
+    ]
+
+
+def canonical_xml(xml_bytes: bytes) -> bytes:
+    return etree.tostring(etree.fromstring(xml_bytes), method="c14n")
+
+
+def element_c14n(element: etree._Element | None) -> bytes | None:
+    if element is None:
+        return None
+    return etree.tostring(element, method="c14n", exclusive=True)
+
+
+def make_transparent_signature_png(
+    width: int = 260,
+    height: int = 100,
+    color: tuple[int, int, int, int] = (25, 85, 200, 255),
+) -> bytes:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(image)
+    draw.line(
+        [(10, height - 18), (width // 3, 15), (width // 2, height - 30), (width - 8, 25)],
+        fill=color,
+        width=max(2, height // 18),
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def toc_paragraphs(xml_bytes: bytes) -> list[bytes]:
+    root = etree.fromstring(xml_bytes)
+    w = lambda tag: f"{{{W_NS}}}{tag}"
+    paragraphs: list[bytes] = []
+    for para in root.iter(w("p")):
+        instructions = "".join(
+            node.text or "" for node in para.iter(w("instrText"))
+        )
+        if not re.search(r"\b(?:TOC|PAGEREF)\b", instructions, re.I):
+            continue
+        paragraphs.append(etree.tostring(para, method="c14n"))
+    return paragraphs
+
+
+def variable_source_rpr(
+    root: etree._Element,
+    variable_name: str,
+) -> etree._Element | None:
+    w = lambda tag: f"{{{W_NS}}}{tag}"
+    for para in root.iter(w("p")):
+        if worker.paragraph_has_nested_story(para):
+            continue
+        nodes, full_text = worker.text_nodes_with_offsets(para)
+        for match in worker.VISIBLE_VARIABLE_RE.finditer(full_text):
+            if worker.visible_variable_name(match) != variable_name:
+                continue
+            target_node = worker.select_visible_variable_text_node(nodes, match)
+            target_run = worker.text_node_run(target_node) if target_node is not None else None
+            return target_run.find(w("rPr")) if target_run is not None else None
+    return None
+
+
+def with_report_body_font(element: etree._Element | None) -> bytes | None:
+    """Canonical XML after rewriting Cocon fonts to Tajawal (as merge does)."""
+    if element is None:
+        return None
+    clone = etree.fromstring(etree.tostring(element))
+    for rfonts in clone.iter(f"{{{W_NS}}}rFonts"):
+        worker._rewrite_rfonts_element(rfonts, worker.REPORT_BODY_FONT)
+    return etree.tostring(clone, method="c14n")
+
+
+def test_stretch_fills_uniform_canvas_without_crop_or_pad() -> None:
+    from PIL import Image
+
+    wide = make_solid_jpeg(800, 200, (10, 200, 40))
+    cell = int(2.0 * EMU_PER_INCH)
+    out = stretch_to_fill_canvas_jpeg_bytes(wide, cell, cell, max_side_px=400)
+    canvas = Image.open(io.BytesIO(out)).convert("RGB")
+    assert canvas.size == (400, 400)
+    for xy in ((2, 2), (200, 200), (397, 397), (2, 397), (397, 2)):
+        pixel = canvas.getpixel(xy)
+        assert pixel[1] > 150 and pixel[0] < 80
+    assert ASSET_IMAGE_MAX_SQUARE_PX >= 600
+
+
+def test_visible_syntaxes_split_runs_and_rpr() -> None:
+    xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}">
+  <w:body>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText> MERGEFIELD العميل </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r>
+        <w:rPr><w:rFonts w:cs="DelimiterFont"/><w:sz w:val="16"/></w:rPr>
+        <w:t>«</w:t>
+      </w:r>
+      <w:r>
+        <w:rPr><w:rFonts w:cs="TitleVariableFont"/><w:sz w:val="56"/></w:rPr>
+        <w:t>عنوان_التقرير</w:t>
+      </w:r>
+      <w:r>
+        <w:rPr><w:rFonts w:cs="DelimiterFont"/><w:sz w:val="16"/></w:rPr>
+        <w:t>»</w:t>
+      </w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:rPr><w:rFonts w:cs="DelimiterFont"/></w:rPr><w:t>&lt;&lt;</w:t></w:r>
+      <w:r><w:rPr><w:rFonts w:cs="ShortNameFont"/><w:sz w:val="20"/></w:rPr><w:t>ال</w:t></w:r>
+      <w:r><w:rPr><w:rFonts w:cs="ClientVariableFont"/><w:sz w:val="32"/></w:rPr><w:t>عميل</w:t></w:r>
+      <w:r><w:rPr><w:rFonts w:cs="DelimiterFont"/></w:rPr><w:t>&gt;&gt;</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>&lt;&lt;اسلوب_التقييم&gt;&gt;</w:t></w:r></w:p>
+    <w:p><w:r><w:t>«الأصل*المعنية*الأصل*محل*التقييم»</w:t></w:r></w:p>
+    <w:p><w:r><w:t>«أساس*القيمة*المستخدم»</w:t></w:r></w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText> MERGEFIELD عنوان_التقرير </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>نص ثابت بلا متغير مرئي</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:bookmarkStart w:id="7" w:name="العميل"/>
+      <w:r><w:t>قيمة الإشارة القديمة يجب أن تبقى</w:t></w:r>
+      <w:bookmarkEnd w:id="7"/>
+    </w:p>
+  </w:body>
+</w:document>""".encode("utf-8")
+
+    assert collect_template_placeholder_names(xml) == [
+        "عنوان_التقرير",
+        "العميل",
+        "اسلوب_التقييم",
+        "الأصل*المعنية*الأصل*محل*التقييم",
+        "أساس*القيمة*المستخدم",
+    ]
+    output, found, filled = apply_visible_variable_values(
+        xml,
+        {
+            "reportTitle": "TITLE-VALUE",
+            "clientName": "CLIENT-VALUE",
+            "valuationMethod": "METHOD-VALUE",
+            "assetSubjectDescription": "ASSET-SUBJECT-VALUE",
+            "valuationBasisDefinition": "BASIS-DEFINITION-VALUE",
+        },
+    )
+    assert found == 5
+    assert filled == 5
+    root = etree.fromstring(output)
+    text = visible_text(root)
+    assert "TITLE-VALUE" in text
+    assert "CLIENT-VALUE" in text
+    assert "METHOD-VALUE" in text
+    assert "ASSET-SUBJECT-VALUE" in text
+    assert "BASIS-DEFINITION-VALUE" in text
+    assert "نص ثابت بلا متغير مرئي" in text
+    assert "قيمة الإشارة القديمة يجب أن تبقى" in text
+    assert "«" not in text and "»" not in text
+    assert "<<" not in text and ">>" not in text
+    assert "MERGEFIELD" not in "".join(
+        node.text or ""
+        for node in root.iter(f"{{{W_NS}}}instrText")
+    )
+
+    title_run = runs_with_text(root, "TITLE-VALUE")[0]
+    title_rpr = title_run.find(f"{{{W_NS}}}rPr")
+    assert title_rpr is not None
+    assert title_rpr.find(f"{{{W_NS}}}rFonts").get(f"{{{W_NS}}}cs") == "TitleVariableFont"
+    assert title_rpr.find(f"{{{W_NS}}}sz").get(f"{{{W_NS}}}val") == "56"
+
+    client_run = runs_with_text(root, "CLIENT-VALUE")[0]
+    client_rpr = client_run.find(f"{{{W_NS}}}rPr")
+    assert client_rpr is not None
+    assert client_rpr.find(f"{{{W_NS}}}rFonts").get(f"{{{W_NS}}}cs") == "ClientVariableFont"
+    assert client_rpr.find(f"{{{W_NS}}}sz").get(f"{{{W_NS}}}val") == "32"
+
+    bookmark_only = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}"><w:body><w:p>
+  <w:bookmarkStart w:id="1" w:name="العميل"/>
+  <w:r><w:t>OLD-BOOKMARK-TEXT</w:t></w:r>
+  <w:bookmarkEnd w:id="1"/>
+</w:p></w:body></w:document>""".encode("utf-8")
+    compatibility_output, compatibility_found, compatibility_filled = apply_visible_variable_values(
+        bookmark_only,
+        {"clientName": "MUST-NOT-BE-USED-EITHER"},
+    )
+    assert compatibility_found == 0
+    assert compatibility_filled == 0
+    assert b"OLD-BOOKMARK-TEXT" in compatibility_output
+    assert b"MUST-NOT-BE-USED" not in compatibility_output
+
+
+def actual_template_values() -> dict[str, str]:
+    return {
+        "reportTitle": "تقرير اختبار المتغيرات المرئية",
+        "reportReference": "REF-2026-77",
+        "clientName": "شركة العميل التجريبية",
+        "clientActivity": "تجارة المعدات",
+        "clientRepresentativeName": "ممثل تجريبي",
+        "clientRepresentativeRole": "المدير العام",
+        "intendedUsers": "العميل ومركز الإسناد",
+        "valuationPurpose": "البيع",
+        "valuationBasis": "قيمة التصفية",
+        "valuationBasisDefinition": "تعريف أساس القيمة التجريبي",
+        "valuePremiseDefinition": "تعريف فرضية القيمة التجريبي",
+        "agreementDate": "01/07/2026",
+        "inspectionDate": "02/07/2026",
+        "valuationDate": "03/07/2026",
+        "reportIssueDate": "04/07/2026",
+        "assetSingularPlural": "أصل/أصول",
+        "assetSubjectDescription": "آلات ومعدات وأجهزة متنوعة",
+        "inspectionLocation": "الرياض",
+        "inspectionMapUrl": "https://maps.example.test/site",
+        "finalValueOpinion": (
+            "(284,190 ر.س)"
+            "مائتان وأربعة وسبعون ألفا ومائة وتسعون ريالا سعوديا لا غير"
+        ),
+    }
+
+
+def test_actual_template_variables_mail_merge_cleanup_and_images() -> None:
+    template_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "assets", "تقرير تقييم.docx")
+    )
+    assert os.path.isfile(template_path)
+    with zipfile.ZipFile(template_path, "r") as template_zip:
+        template_document_xml = template_zip.read("word/document.xml")
+        template_settings_xml = template_zip.read("word/settings.xml")
+        template_preserved_parts = {}
+        template_names: list[str] = []
+        for part_name in template_zip.namelist():
+            if re.match(
+                r"^word/(document|header\d+|footer\d+)\.xml$",
+                part_name,
+                re.I,
+            ):
+                for name in collect_template_placeholder_names(
+                    template_zip.read(part_name)
+                ):
+                    if name not in template_names:
+                        template_names.append(name)
+    assert len(template_names) == 20
+    assert set(template_names) <= set(PLACEHOLDER_FIELDS)
+
+    values = actual_template_values()
+    image_b64 = base64.b64encode(PNG_1X1).decode("ascii")
+    output, stats = merge_with_captured_stats(
+        {
+            "templatePath": template_path,
+            "textValues": values,
+            "textByBookmarkName": {
+                "العميل": "قيمة bookmark يجب تجاهلها",
+            },
+            "reportPreparers": [
+                {
+                    "userId": "integrated-manager",
+                    "name": "مدير دمج الصور والمعدّين",
+                    "jobTitle": "مقيم آلات ومعدات",
+                    "membershipNo": "4210077777",
+                    "reportRole": "المراجعة والاعتماد",
+                    "signatureImageDataUrl": f"data:image/png;base64,{image_b64}",
+                }
+            ],
+            "assetImagesBase64": [image_b64] * 9,
+            "valuationImagesBase64": [image_b64] * 5,
+            "clientImagesBase64": [image_b64] * 5,
+            "imageLayout": {
+                "imagesPerRow": 2,
+                "imagesPerPage": 4,
+                "clientImagesPerRow": 2,
+                "clientImagesPerPage": 4,
+                "imageQuality": 95,
+            },
+        }
+    )
+    assert set(stats["variablesFound"]) == set(template_names)
+    assert stats["variablesOccurrencesFound"] == 63
+    assert stats["variablesFilled"] == 63
+    assert stats["assetImagesInserted"] == 9
+    assert stats["valuationImagesInserted"] == 5
+    assert stats["clientImagesInserted"] == 5
+    assert stats["reportPreparerTableFound"] == 1
+    assert stats["reportPreparerRowsRemoved"] == 3
+    assert stats["reportPreparersInserted"] == 1
+    assert stats["reportSignaturesInserted"] == 1
+    assert stats["headerWrapsNormalized"] > 0
+    assert "fontRunsNormalized" not in stats
+    assert "legacyFontReferencesNormalized" not in stats
+    assert "bookmarksFound" not in stats
+    assert "textFilled" not in stats
+
+    with zipfile.ZipFile(io.BytesIO(output), "r") as z:
+        names = set(z.namelist())
+        doc_xml = z.read("word/document.xml")
+        settings_xml = z.read("word/settings.xml")
+        settings_rels = (
+            z.read("word/_rels/settings.xml.rels")
+            if "word/_rels/settings.xml.rels" in names
+            else b""
+        )
+        content_types = z.read("[Content_Types].xml")
+        xml_parts = {
+            name: z.read(name)
+            for name in names
+            if name.lower().endswith(".xml")
+        }
+        output_preserved_parts = {
+            part_name: canonical_xml(z.read(part_name))
+            for part_name in template_preserved_parts
+        }
+
+    validate_part_xml(doc_xml, "word/document.xml")
+    root = etree.fromstring(doc_xml)
+    w = lambda tag: f"{{{W_NS}}}{tag}"
+    body = root.find(".//" + w("body"))
+    assert body is not None
+    text = visible_text(root)
+    for variable_name in template_names:
+        assert f"«{variable_name}»" not in text
+        assert f"<<{variable_name}>>" not in text
+    for expected in values.values():
+        assert expected in text, f"merged value missing: {expected}"
+    assert "قيمة bookmark يجب تجاهلها" not in text
+    assert "مدير دمج الصور والمعدّين" in text
+    assert "MERGEFIELD" not in "".join(
+        node.text or "" for node in root.iter(w("instrText"))
+    )
+    integrated_preparer_table = worker.find_report_preparer_table(root)
+    assert integrated_preparer_table is not None
+    assert len(integrated_preparer_table.findall(w("tr"))) == 2
+    assert len(list(integrated_preparer_table.iter(w("drawing")))) == 1
+
+    settings_root = etree.fromstring(settings_xml)
+    assert settings_root.find(".//" + w("mailMerge")) is None
+    update_fields = settings_root.find(".//" + w("updateFields"))
+    template_settings_root = etree.fromstring(template_settings_xml)
+    template_update_fields = template_settings_root.find(
+        ".//" + w("updateFields")
+    )
+    assert template_update_fields is None
+    assert update_fields is None, "لا يجوز تشغيل تحديث الفهرس تلقائياً عند فتح التقرير"
+    assert b"Projects.xlsx" not in settings_rels
+    assert b"recipientData" not in settings_rels
+    assert "word/recipientData.xml" not in names
+    assert b"/word/recipientData.xml" not in content_types
+
+    title_runs = runs_with_text(root, values["reportTitle"])
+    assert title_runs
+    template_root = etree.fromstring(template_document_xml)
+    template_title_rpr = variable_source_rpr(template_root, "عنوان_التقرير")
+    assert template_title_rpr is not None
+    expected_title_rpr = with_report_body_font(template_title_rpr)
+    assert any(
+        (
+            (rpr := run.find(w("rPr"))) is not None
+            and etree.tostring(rpr, method="c14n") == expected_title_rpr
+        )
+        for run in title_runs
+    ), "يجب أن يحتفظ النص المدمج بتنسيق المتغير مع تحويل خط الجسم إلى Tajawal"
+
+    final_value_rpr = variable_source_rpr(
+        template_root,
+        "رأي_القيمة_رقما_وكتابتا",
+    )
+    assert final_value_rpr is not None
+    expected_final_rpr = with_report_body_font(final_value_rpr)
+    final_value_runs = runs_with_text(root, values["finalValueOpinion"])
+    assert final_value_runs
+    assert any(
+        (
+            (rpr := run.find(w("rPr"))) is not None
+            and etree.tostring(rpr, method="c14n") == expected_final_rpr
+        )
+        for run in final_value_runs
+    ), "تغيّر تنسيق رأي القيمة بشكل غير متوقع عند الدمج"
+
+    assert output_preserved_parts == template_preserved_parts
+    # body font = Tajawal؛ أسفل الغلاف يبقى Cocon
+    body_fonts = {
+        (rf.get(f"{{{W_NS}}}cs") or rf.get("cs") or "")
+        for rf in root.iter(w("rFonts"))
+    }
+    assert "Tajawal" in body_fonts
+    cover_footer_fonts: set[str] = set()
+    for para in root.iter(w("p")):
+        if not worker._paragraph_is_cover_footer(para):
+            continue
+        for rf in para.findall(f"./{w('pPr')}/{w('rPr')}/{w('rFonts')}"):
+            cover_footer_fonts.add(rf.get(f"{{{W_NS}}}cs") or rf.get("cs") or "")
+        for rf in para.findall(f"./{w('r')}/{w('rPr')}/{w('rFonts')}"):
+            cover_footer_fonts.add(rf.get(f"{{{W_NS}}}cs") or rf.get("cs") or "")
+    assert worker.REPORT_COVER_FOOTER_FONT in cover_footer_fonts
+    font_table = etree.fromstring(xml_parts["word/fontTable.xml"])
+    assert any(
+        (font.get(f"{{{W_NS}}}name") or font.get("name")) == "Tajawal"
+        for font in font_table.iter(w("font"))
+    )
+    assert toc_paragraphs(doc_xml) == toc_paragraphs(
+        worker.apply_report_fonts_to_part(template_document_xml)
+    ), (
+        "تغيرت بنية أو محاذاة فقرات الفهرس أثناء الدمج"
+    )
+
+    forbidden_wrap_names = {
+        "wrapTight",
+        "wrapSquare",
+        "wrapThrough",
+        "wrapTopAndBottom",
+    }
+    for part_name, xml_bytes in xml_parts.items():
+        if not re.match(r"^word/header\d+\.xml$", part_name, re.I):
+            continue
+        part_root = etree.fromstring(xml_bytes)
+        for anchor in part_root.iter(f"{{{WP_NS}}}anchor"):
+            assert not any(
+                etree.QName(child).localname in forbidden_wrap_names
+                for child in anchor
+            ), f"بقي التفاف ضاغط داخل {part_name}"
+
+    blocks = list(body)
+
+    def block_text(block: etree._Element) -> str:
+        return "".join(node.text or "" for node in block.iter(w("t"))).strip()
+
+    def last_heading_index(prefix: str) -> int:
+        matches = [
+            idx
+            for idx, block in enumerate(blocks)
+            if block.tag == w("p") and block_text(block).startswith(prefix)
+        ]
+        assert matches, f"attachment heading missing: {prefix}"
+        return matches[-1]
+
+    annex1 = last_heading_index("مرفق 1:")
+    annex2 = last_heading_index("مرفق 2:")
+    annex3 = last_heading_index("مرفق 3:")
+    annex4 = last_heading_index("مرفق 4:")
+    assert annex1 < annex2 < annex3 < annex4
+
+    valuation_drawings = sum(
+        sum(1 for _ in block.iter(w("drawing")))
+        for block in blocks[annex1 + 1 : annex2]
+    )
+    assert valuation_drawings == 5
+    asset_tables = [
+        block for block in blocks[annex2 + 1 : annex3] if block.tag == w("tbl")
+    ]
+    client_tables = [
+        block for block in blocks[annex3 + 1 : annex4] if block.tag == w("tbl")
+    ]
+    assert len(asset_tables) == 3
+    assert len(client_tables) == 2
+    assert sum(
+        1 for block in blocks if block_text(block).startswith("مرفق 3:")
+    ) == 1
+    assert IMAGES_PER_ROW == 4 and IMAGES_PER_PAGE == 20
+    assert ASSET_IMAGE_GAP_DXA == 45
+
+    page_width_twips = 11906
+    expected_width = int(page_width_twips * 635 * IMAGE_CONTENT_WIDTH_RATIO)
+    inserted_widths = [
+        int(node.get("cx") or "0")
+        for block in blocks[annex1 + 1 : annex2]
+        for node in block.iter(f"{{{WP_NS}}}extent")
+    ]
+    assert inserted_widths
+    assert max(abs(width - expected_width) for width in inserted_widths) <= 1
+
+
+def test_actual_template_dynamic_report_preparers_without_annex_images() -> None:
+    template_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "assets", "تقرير تقييم.docx")
+    )
+    signature_one = make_transparent_signature_png(280, 105)
+    signature_two = make_transparent_signature_png(
+        155,
+        130,
+        (80, 40, 170, 255),
+    )
+    signature_one_b64 = base64.b64encode(signature_one).decode("ascii")
+    signature_two_b64 = base64.b64encode(signature_two).decode("ascii")
+    preparers = [
+        {
+            "userId": "manager-1",
+            "reportDisplayName": "مدير الشركة الديناميكي",
+            "jobTitle": "مقيم أساسي زميل آلات ومعدات",
+            "membershipNo": "4210099991",
+            # الدور الافتراضي الأول يجب أن يُستكمل داخل العامل.
+            "signatureImageDataUrl": f"data:image/png;base64,{signature_one_b64}",
+            "phone": "050-SECRET-MUST-NOT-APPEAR",
+        },
+        {
+            "id": "preparer-2",
+            "name": "معد التقرير الديناميكي",
+            # توافق اسم الحقل القديم من إعدادات الشركة.
+            "roleLabel": "مقيم منتسب آلات ومعدات",
+            "membershipNumber": "4210099992",
+            "signatureBase64": signature_two_b64,
+        },
+        {
+            "userId": "inspector-3",
+            "displayName": "معاين التقرير الديناميكي",
+            "jobTitle": "مقيم معاين",
+            "membershipNo": "",
+        },
+    ]
+
+    with zipfile.ZipFile(template_path, "r") as template_zip:
+        template_document_xml = template_zip.read("word/document.xml")
+        template_root = etree.fromstring(template_document_xml)
+        template_table = worker.find_report_preparer_table(template_root)
+        assert template_table is not None
+        template_rows = template_table.findall(f"{{{W_NS}}}tr")
+        assert len(template_rows) == 4
+        prototype = template_rows[1]
+        preserved_parts = {}
+
+    output, stats = merge_with_captured_stats(
+        {
+            "templatePath": template_path,
+            "textValues": actual_template_values(),
+            "reportPreparers": preparers,
+            # لا توجد أي صور ملاحق: يجب تنفيذ حقن المعدّين رغم ذلك.
+        }
+    )
+    assert stats["reportPreparerTableFound"] == 1
+    assert stats["reportPreparerRowsRemoved"] == 3
+    assert stats["reportPreparersInserted"] == 3
+    assert stats["reportSignaturesInserted"] == 2
+    assert stats["assetImagesInserted"] == 0
+    assert stats["valuationImagesInserted"] == 0
+    assert stats["clientImagesInserted"] == 0
+
+    worker.validate_docx_package(output)
+    with zipfile.ZipFile(io.BytesIO(output), "r") as output_zip:
+        names = set(output_zip.namelist())
+        document_xml = output_zip.read("word/document.xml")
+        document_root = etree.fromstring(document_xml)
+        table = worker.find_report_preparer_table(document_root)
+        assert table is not None
+        rows = table.findall(f"{{{W_NS}}}tr")
+        assert len(rows) == 4
+
+        # خصائص الجدول وصف الرأس تبقى كما في القالب، مع توسيع عمود التوقيع فقط.
+        w = lambda tag: f"{{{W_NS}}}{tag}"
+        assert element_c14n(table.find(w("tblPr"))) == element_c14n(
+            template_table.find(w("tblPr"))
+        )
+        output_grid_cols = table.find(w("tblGrid")).findall(w("gridCol"))
+        template_grid_cols = template_table.find(w("tblGrid")).findall(w("gridCol"))
+        assert len(output_grid_cols) == len(template_grid_cols) == 3
+        assert element_c14n(output_grid_cols[0]) == element_c14n(template_grid_cols[0])
+        assert element_c14n(output_grid_cols[1]) == element_c14n(template_grid_cols[1])
+        template_sig_col_w = int(
+            template_grid_cols[2].get(f"{{{W_NS}}}w")
+            or template_grid_cols[2].get("w")
+            or "0"
+        )
+        output_sig_col_w = int(
+            output_grid_cols[2].get(f"{{{W_NS}}}w")
+            or output_grid_cols[2].get("w")
+            or "0"
+        )
+        assert output_sig_col_w == max(
+            1, int(round(template_sig_col_w * worker.REPORT_SIGNATURE_DISPLAY_SCALE))
+        )
+        # صف الرأس: الخلايا غير التوقيع كما هي (بعد تحويل Cocon→Tajawal)، وخلية التوقيع موسّعة.
+        header_cells = rows[0].findall(w("tc"))
+        template_header_cells = template_rows[0].findall(w("tc"))
+        assert len(header_cells) == len(template_header_cells) == 3
+        assert with_report_body_font(header_cells[0]) == with_report_body_font(
+            template_header_cells[0]
+        )
+        assert with_report_body_font(header_cells[1]) == with_report_body_font(
+            template_header_cells[1]
+        )
+        assert table.find(f"./{w('tblPr')}/{w('bidiVisual')}") is not None
+        output_section_paragraph = table.getnext()
+        template_section_paragraph = template_table.getnext()
+        assert output_section_paragraph is not None
+        assert template_section_paragraph is not None
+        assert element_c14n(
+            output_section_paragraph.find(f"./{w('pPr')}/{w('sectPr')}")
+        ) == element_c14n(
+            template_section_paragraph.find(f"./{w('pPr')}/{w('sectPr')}")
+        )
+
+        prototype_cells = prototype.findall(w("tc"))
+        for row in rows[1:]:
+            assert element_c14n(row.find(w("trPr"))) == element_c14n(
+                prototype.find(w("trPr"))
+            )
+            cells = row.findall(w("tc"))
+            assert len(cells) == 3
+            for cell_index, (cell, prototype_cell) in enumerate(
+                zip(cells, prototype_cells)
+            ):
+                if cell_index == 2:
+                    # عمود التوقيع موسّع؛ بقية خصائص الخلية تبقى من القالب.
+                    output_tc_w = cell.find(f"./{w('tcPr')}/{w('tcW')}")
+                    prototype_tc_w = prototype_cell.find(f"./{w('tcPr')}/{w('tcW')}")
+                    assert output_tc_w is not None and prototype_tc_w is not None
+                    prototype_w = int(
+                        prototype_tc_w.get(f"{{{W_NS}}}w")
+                        or prototype_tc_w.get("w")
+                        or "0"
+                    )
+                    output_w = int(
+                        output_tc_w.get(f"{{{W_NS}}}w") or output_tc_w.get("w") or "0"
+                    )
+                    assert output_w == max(
+                        1,
+                        int(round(prototype_w * worker.REPORT_SIGNATURE_DISPLAY_SCALE)),
+                    )
+                else:
+                    assert element_c14n(cell.find(w("tcPr"))) == element_c14n(
+                        prototype_cell.find(w("tcPr"))
+                    )
+                paragraphs = cell.findall(w("p"))
+                prototype_paragraphs = prototype_cell.findall(w("p"))
+                assert len(paragraphs) == len(prototype_paragraphs)
+                for paragraph, prototype_paragraph in zip(
+                    paragraphs,
+                    prototype_paragraphs,
+                ):
+                    assert with_report_body_font(
+                        paragraph.find(w("pPr"))
+                    ) == with_report_body_font(
+                        prototype_paragraph.find(w("pPr"))
+                    )
+                    run_properties = [
+                        with_report_body_font(run.find(w("rPr")))
+                        for run in paragraph.findall(w("r"))
+                    ]
+                    prototype_run_properties = [
+                        with_report_body_font(run.find(w("rPr")))
+                        for run in prototype_paragraph.findall(w("r"))
+                    ]
+                    assert run_properties == prototype_run_properties
+
+        expected_rows = [
+            (
+                [
+                    "مدير الشركة الديناميكي",
+                    "مقيم أساسي زميل آلات ومعدات",
+                    "عضوية رقم: 4210099991",
+                    "",
+                ],
+                "الإدارة التنفيذية وتعميد ومراجعة المخرجات النهائية",
+                1,
+            ),
+            (
+                [
+                    "معد التقرير الديناميكي",
+                    "مقيم منتسب آلات ومعدات",
+                    "عضوية رقم: 4210099992",
+                    "",
+                ],
+                "إعداد التقرير",
+                1,
+            ),
+            (
+                [
+                    "معاين التقرير الديناميكي",
+                    "مقيم معاين",
+                    "",
+                    "",
+                ],
+                "المعاينة",
+                0,
+            ),
+        ]
+        dynamic_relationship_ids: list[str] = []
+        prototype_extent = prototype.find(f".//{{{WP_NS}}}extent")
+        assert prototype_extent is not None
+        expected_cx = str(
+            max(1, int(round(int(prototype_extent.get("cx") or "0") * worker.REPORT_SIGNATURE_DISPLAY_SCALE)))
+        )
+        expected_cy = str(
+            max(1, int(round(int(prototype_extent.get("cy") or "0") * worker.REPORT_SIGNATURE_DISPLAY_SCALE)))
+        )
+        for row, (identity_lines, report_role, drawing_count) in zip(
+            rows[1:],
+            expected_rows,
+        ):
+            cells = row.findall(w("tc"))
+            assert [
+                "".join(node.text or "" for node in paragraph.iter(w("t")))
+                for paragraph in cells[0].findall(w("p"))
+            ] == identity_lines
+            assert "".join(
+                node.text or "" for node in cells[1].iter(w("t"))
+            ) == report_role
+            drawings = list(cells[2].iter(w("drawing")))
+            assert len(drawings) == drawing_count
+            if drawings:
+                anchor = drawings[0].find(f".//{{{WP_NS}}}anchor")
+                assert anchor is not None
+                assert anchor.get("layoutInCell") == "1"
+                assert anchor.find(f"./{{{WP_NS}}}wrapNone") is not None
+                extent = anchor.find(f"./{{{WP_NS}}}extent")
+                assert extent is not None
+                assert (extent.get("cx"), extent.get("cy")) == (
+                    expected_cx,
+                    expected_cy,
+                )
+                blip = drawings[0].find(f".//{{{A_NS}}}blip")
+                assert blip is not None
+                dynamic_relationship_ids.append(blip.get(f"{{{R_NS}}}embed") or "")
+
+        assert len(dynamic_relationship_ids) == len(set(dynamic_relationship_ids)) == 2
+        document_drawing_ids = [
+            element.get("id")
+            for element in document_root.iter()
+            if etree.QName(element).localname == "docPr" and element.get("id")
+        ]
+        assert len(document_drawing_ids) == len(set(document_drawing_ids))
+        anchor_ids = [
+            anchor.get(f"{{{WP14_NS}}}anchorId")
+            for anchor in document_root.iter(f"{{{WP_NS}}}anchor")
+            if anchor.get(f"{{{WP14_NS}}}anchorId")
+        ]
+        edit_ids = [
+            anchor.get(f"{{{WP14_NS}}}editId")
+            for anchor in document_root.iter(f"{{{WP_NS}}}anchor")
+            if anchor.get(f"{{{WP14_NS}}}editId")
+        ]
+        assert len(anchor_ids) == len(set(anchor_ids))
+        assert len(edit_ids) == len(set(edit_ids))
+        relationships_root = etree.fromstring(
+            output_zip.read("word/_rels/document.xml.rels")
+        )
+        relationships = {
+            node.get("Id"): node
+            for node in relationships_root
+            if etree.QName(node).localname == "Relationship"
+        }
+        assert not {"rId11", "rId12", "rId13"} & set(relationships)
+        from PIL import Image
+
+        for relationship_id in dynamic_relationship_ids:
+            relationship = relationships.get(relationship_id)
+            assert relationship is not None
+            assert relationship.get("Type", "").endswith("/image")
+            target = relationship.get("Target") or ""
+            package_name = f"word/{target}"
+            assert package_name in names
+            signature = Image.open(io.BytesIO(output_zip.read(package_name)))
+            assert signature.format == "PNG"
+            assert signature.mode == "RGBA"
+            assert signature.size == worker.REPORT_SIGNATURE_CANVAS_SIZE
+
+        output_preserved_parts = {
+            name: canonical_xml(output_zip.read(name))
+            for name in preserved_parts
+        }
+
+    text = visible_text(document_root)
+    for static_value in (
+        "فالح مفلح الشهراني",
+        "فيصل عايض الرويلي",
+        "ناصر عبد الله البصيص",
+    ):
+        assert static_value not in text
+    assert "050-SECRET-MUST-NOT-APPEAR" not in text
+    assert output_preserved_parts == preserved_parts
+    assert toc_paragraphs(document_xml) == toc_paragraphs(
+        worker.apply_report_fonts_to_part(template_document_xml)
+    )
+
+    # وجود المفتاح مع قائمة فارغة يحذف كل الصفوف الثابتة ولا يعيدها.
+    empty_output, empty_stats = merge_with_captured_stats(
+        {
+            "templatePath": template_path,
+            "textValues": actual_template_values(),
+            "reportPreparers": [],
+        }
+    )
+    assert empty_stats["reportPreparerRowsRemoved"] == 3
+    assert empty_stats["reportPreparersInserted"] == 0
+    with zipfile.ZipFile(io.BytesIO(empty_output), "r") as empty_zip:
+        empty_root = etree.fromstring(empty_zip.read("word/document.xml"))
+        empty_table = worker.find_report_preparer_table(empty_root)
+        assert empty_table is not None
+        assert len(empty_table.findall(f"{{{W_NS}}}tr")) == 1
+        empty_text = visible_text(empty_root)
+        assert "فالح مفلح الشهراني" not in empty_text
+
+    # عدد أكبر من الصفوف يُنشأ ديناميكياً من نفس prototype بلا صور ملاحق.
+    many_preparers = [
+        {
+            "userId": f"user-{index}",
+            "name": f"معد ديناميكي {index}",
+            "jobTitle": "مقيم آلات ومعدات",
+            "membershipNo": f"4210088{index:03d}",
+            "reportRole": f"دور المعد رقم {index}",
+        }
+        for index in range(1, 8)
+    ]
+    many_output, many_stats = merge_with_captured_stats(
+        {
+            "templatePath": template_path,
+            "textValues": actual_template_values(),
+            "reportPreparers": many_preparers,
+        }
+    )
+    assert many_stats["reportPreparersInserted"] == 7
+    assert many_stats["reportSignaturesInserted"] == 0
+    with zipfile.ZipFile(io.BytesIO(many_output), "r") as many_zip:
+        many_root = etree.fromstring(many_zip.read("word/document.xml"))
+        many_table = worker.find_report_preparer_table(many_root)
+        assert many_table is not None
+        assert len(many_table.findall(f"{{{W_NS}}}tr")) == 8
+        assert "معد ديناميكي 7" in visible_text(many_root)
+
+
+def test_legacy_bookmarks_do_not_drive_text_or_images() -> None:
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}">
+  <w:body>
+    <w:p>
+      <w:bookmarkStart w:id="1" w:name="العميل"/>
+      <w:r><w:t>OLD-CLIENT-BOOKMARK</w:t></w:r>
+      <w:bookmarkEnd w:id="1"/>
+    </w:p>
+    <w:p><w:bookmarkStart w:id="2" w:name="صورحسابات"/><w:bookmarkEnd w:id="2"/></w:p>
+    <w:p><w:bookmarkStart w:id="3" w:name="صوراصول"/><w:bookmarkEnd w:id="3"/></w:p>
+    <w:p><w:bookmarkStart w:id="4" w:name="مستنداتعميل"/><w:bookmarkEnd w:id="4"/></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+    template = make_minimal_docx(document_xml)
+    image_b64 = base64.b64encode(PNG_1X1).decode("ascii")
+    output, stats = merge_with_captured_stats(
+        {
+            "templateBase64": base64.b64encode(template).decode("ascii"),
+            "textValues": {"clientName": "NEW-CLIENT-MUST-NOT-APPEAR"},
+            "textByBookmarkName": {"العميل": "BOOKMARK-MUST-NOT-APPEAR"},
+            "assetImagesBase64": [image_b64],
+            "valuationImagesBase64": [image_b64],
+            "clientImagesBase64": [image_b64],
+        }
+    )
+    assert stats["variablesFound"] == []
+    assert stats["variablesOccurrencesFound"] == 0
+    assert stats["variablesFilled"] == 0
+    assert stats["assetImagesInserted"] == 0
+    assert stats["valuationImagesInserted"] == 0
+    assert stats["clientImagesInserted"] == 0
+    assert "bookmarksFound" not in stats
+
+    with zipfile.ZipFile(io.BytesIO(output), "r") as z:
+        root = etree.fromstring(z.read("word/document.xml"))
+        media = [name for name in z.namelist() if name.startswith("word/media/")]
+    text = visible_text(root)
+    assert "OLD-CLIENT-BOOKMARK" in text
+    assert "NEW-CLIENT-MUST-NOT-APPEAR" not in text
+    assert "BOOKMARK-MUST-NOT-APPEAR" not in text
+    assert not media
+    assert not list(root.iter(f"{{{W_NS}}}drawing"))
 
 
 def main() -> None:
     test_stretch_fills_uniform_canvas_without_crop_or_pad()
-    print("OK: stretch_to_fill fills uniform cell without crop/pad")
-    image_b64 = base64.b64encode(PNG_1X1).decode("ascii")
-    valuation_basis = "القيمة السوقية"
-    valuation_date = "14/06/2026"
-    inspection_date = "04/06/2026"
-    payload = {
-        "templateBase64": base64.b64encode(make_template()).decode("ascii"),
-        "textValues": {
-            "clientName": "شركة الاختبار",
-            "agreementDate": "27/06/2026",
-            "reportIssueDate": "08/06/2026",
-            "valuationDate": valuation_date,
-            "inspectionDate": inspection_date,
-            "valuationBasis": valuation_basis,
-            "finalValue": "١٢٣ ر.س",
-            "finalValueAmount": "١٢٠٬٠٠٠",
-            "finalValueWords": "مائة وعشرون ألف ريال سعودي",
-            "inspectionLocation": "الرياض",
-            "valuationPurpose": "غرض اختبار داخل مربع نص",
-            "reportTitle": mojibake("تقرير اختبار مباشر"),
-        },
-        "textByBookmarkName": {},
-        "assetImagesBase64": [image_b64 for _ in range(12)],
-        "valuationImagesBase64": [image_b64 for _ in range(4)],
-        "imageLayout": {"imagesPerRow": 2, "imagesPerPage": 8},
-    }
-    out = merge_package(payload)
-    with zipfile.ZipFile(io.BytesIO(out), "r") as z:
-        doc = z.read("word/document.xml")
-        rels = z.read("word/_rels/document.xml.rels").decode("utf-8")
-        content_types = z.read("[Content_Types].xml").decode("utf-8")
-        names = set(z.namelist())
-    validate_part_xml(doc, "word/document.xml")
-    text = doc.decode("utf-8")
-    assert "شركة الاختبار" in text, "client bookmark not filled"
-    assert "08/06/2026" in text, "date bookmark not filled"
-    assert "27/06/2026" in text, "compound agreement/date bookmark not filled"
-    assert valuation_date in text, "valuation date alias bookmark not filled"
-    assert inspection_date in text, "inspection date alias bookmark not filled"
-    assert not re.search(r"\d{2}/\d{2}/\d{4}\s*م\.?", text), "numeric dates should not keep the Arabic Gregorian suffix"
-    assert "١٢٣ ر.س" in text, "paragraph-level bookmark not filled"
-    assert "الرياض" in text, "hyperlink-contained bookmark not filled"
-    assert "غرض اختبار داخل مربع نص" in text, "textbox bookmark not filled"
-    assert "تقرير اختبار مباشر" in text, "textbox paragraph-level bookmark not filled"
-    assert "placeholder" not in text, "spanning placeholder was not removed"
-    assert "old agreement date" not in text, "compound date placeholder was not removed"
-    assert "old valuation date" not in text, "valuation date placeholder was not removed"
-    assert "old inspection date" not in text, "inspection date placeholder was not removed"
-    assert "old value" not in text, "paragraph-level placeholder was not removed"
-    assert "old short value" not in text, "short final value placeholder was not removed"
-    assert "old hyperlink text" not in text, "hyperlink placeholder was not removed"
-    assert "old words" not in text, "final value words placeholder was not removed"
-    assert "old cover client" not in text, "cover client placeholder was not removed"
-    assert "مائة وعشرون ألف ريال سعودي" in text, "final value words bookmark not filled"
-    assert "١٢٠٬٠٠٠" in text, "final value amount not inserted before currency in opinion paragraph"
-    assert "رأي قيمة التصفية" in text, "value opinion paragraph missing"
-    media_names = [name for name in names if name.startswith("word/media/")]
-    assert len(media_names) >= 1, "image media part was not written"
-    assert "relationships/image" in rels, "image relationship missing"
-    assert "image/jpeg" in content_types, "image content type missing"
-    assert "<w:r" in text and text.count("<w:r") >= 2
-    root = etree.fromstring(doc)
-    w = lambda tag: f"{{{W_NS}}}{tag}"
-    a = lambda tag: f"{{{A_NS}}}{tag}"
-    plain_text = "\n".join("".join(t.text or "" for t in p.iter(w("t"))) for p in root.iter(w("p")))
-    def matching_runs(expected_text: str):
-        return [
-            run
-            for run in root.iter(w("r"))
-            if "".join(t.text or "" for t in run.iter(w("t"))) == expected_text
-        ]
-
-    def has_tajawal_run(expected_text: str) -> bool:
-        for run in matching_runs(expected_text):
-            rpr = run.find(w("rPr"))
-            fonts = rpr.find(w("rFonts")) if rpr is not None else None
-            if fonts is not None and fonts.get(f"{{{W_NS}}}cs") == "Tajawal":
-                return True
-        return False
-
-    assert has_tajawal_run("تقرير اختبار مباشر"), "cover title should use Tajawal"
-    assert has_tajawal_run("شركة الاختبار"), "cover client should use Tajawal"
-    title_runs = matching_runs("تقرير اختبار مباشر")
-    assert len(title_runs) >= 1, "report title should fill cover bookmark"
-    # «عنوان» على الغلاف فقط يفرض Tajawal 24pt bold يمين؛ «عنوانغ» يرث تنسيق الفقرة
-    cover_title_runs = [
-        run
-        for run in title_runs
-        if run.find(w("rPr")) is not None
-        and run.find(w("rPr")).find(w("rFonts")) is not None
-        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
-        and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "48"
-    ]
-    assert len(cover_title_runs) >= 1, "cover عنوان should use Tajawal 24pt"
-    for title_run in cover_title_runs:
-        rpr = title_run.find(w("rPr"))
-        assert rpr is not None and rpr.find(w("b")) is not None, "cover title should be bold"
-        title_para = title_run
-        while title_para is not None and title_para.tag != w("p"):
-            title_para = title_para.getparent()
-        assert title_para is not None, "cover title paragraph missing"
-        title_ppr = title_para.find(w("pPr"))
-        title_jc = title_ppr.find(w("jc")) if title_ppr is not None else None
-        # Word RTL: jc=left ⇒ يمين بصري على الغلاف
-        assert title_jc is not None and title_jc.get(f"{{{W_NS}}}val") == "left", (
-            "cover title must use jc=left under bidi for visual right alignment"
-        )
-        assert title_ppr.find(w("bidi")) is not None, "cover title must set w:bidi for Arabic RTL"
-        title_ind = title_ppr.find(w("ind")) if title_ppr is not None else None
-        assert title_ind is not None, "cover title must set right edge indent"
-        # عنوان داخل مربع نص: هامش ~40px من إطار المربع (فيزيائي + start للعربي)
-        assert title_ind.get(f"{{{W_NS}}}right") == str(COVER_EDGE_MARGIN_TWIPS), (
-            "cover title textbox must keep ~40px from box edge"
-        )
-        assert title_ind.get(f"{{{W_NS}}}start") == str(COVER_EDGE_MARGIN_TWIPS), (
-            "cover title must set logical start indent for RTL margin"
-        )
-        title_para_rpr = title_ppr.find(w("rPr")) if title_ppr is not None else None
-        title_para_fonts = title_para_rpr.find(w("rFonts")) if title_para_rpr is not None else None
-        assert title_para_fonts is not None and title_para_fonts.get(f"{{{W_NS}}}cs") == "Tajawal", "cover paragraph must enforce Tajawal"
-        title_para_sz = title_para_rpr.find(w("sz")) if title_para_rpr is not None else None
-        assert title_para_sz is not None and title_para_sz.get(f"{{{W_NS}}}val") == "48", "cover paragraph should be 24pt"
-        assert title_para_rpr.find(w("b")) is not None, "cover paragraph style should be bold"
-    # مربع نص الغلاف العائم يجب أن يُنقل من يسار الصفحة إلى اليمين (مع هامش ~40px)
-    cover_anchors = [
-        node
-        for node in root.iter(f"{{{WP_NS}}}anchor")
-        if any((el.text or "") == "تقرير اختبار مباشر" for el in node.iter(w("t")))
-    ]
-    assert cover_anchors, "cover title floating anchor missing after merge"
-    for anchor in cover_anchors:
-        position_h = anchor.find(f"{{{WP_NS}}}positionH")
-        assert position_h is not None and position_h.get("relativeFrom") == "page"
-        pos_offset = position_h.find(f"{{{WP_NS}}}posOffset")
-        assert pos_offset is not None, "cover title box must use posOffset with page-edge margin"
-        page_width_emu = int(11906 * 635)
-        extent = anchor.find(f"{{{WP_NS}}}extent")
-        cx = int(extent.get("cx") or "0") if extent is not None else 0
-        max_cx = page_width_emu - int(COVER_EDGE_MARGIN_EMU)
-        if cx <= 0 or cx > max_cx:
-            cx = max_cx
-        expected = page_width_emu - cx - int(COVER_EDGE_MARGIN_EMU)
-        assert int(pos_offset.text or "0") == expected, "cover title box must keep ~40px from page edge"
-        assert int(anchor.get("distR") or "0") >= int(COVER_EDGE_MARGIN_EMU), (
-            "cover title anchor must keep distR page margin"
-        )
-    # عنوانغ / عنواناصل داخل التقرير: يرثان ~11pt ونوع خط الفقرة المحيطة
-    inline_body_runs = [
-        run
-        for run in title_runs
-        if run.find(w("rPr")) is not None
-        and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "22"
-        and run.find(w("rPr")).find(w("rFonts")) is not None
-        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Arial"
-    ]
-    assert len(inline_body_runs) >= 1, "عنوانغ should inherit surrounding 11pt Arial body style"
-    for body_run in inline_body_runs:
-        body_para = body_run
-        while body_para is not None and body_para.tag != w("p"):
-            body_para = body_para.getparent()
-        body_ppr = body_para.find(w("pPr")) if body_para is not None else None
-        body_jc = body_ppr.find(w("jc")) if body_ppr is not None else None
-        assert body_jc is None or body_jc.get(f"{{{W_NS}}}val") != "center", (
-            "inline title bookmarks must not force cover centering"
-        )
-    forced_cover_style_count = sum(
-        1
-        for run in title_runs
-        if run.find(w("rPr")) is not None
-        and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "48"
-        and run.find(w("rPr")).find(w("rFonts")) is not None
-        and run.find(w("rPr")).find(w("rFonts")).get(f"{{{W_NS}}}cs") == "Tajawal"
-    )
-    assert forced_cover_style_count == len(cover_title_runs), (
-        "عنوانغ/عنواناصل must not receive forced cover 24pt Tajawal styling"
-    )
-    client_runs = matching_runs("شركة الاختبار")
-    assert any(
-        run.find(w("rPr")) is not None
-        and run.find(w("rPr")).find(w("sz")) is not None
-        and run.find(w("rPr")).find(w("sz")).get(f"{{{W_NS}}}val") == "32"
-        and run.find(w("rPr")).find(w("b")) is not None
-        for run in client_runs
-    ), "cover client should be 16pt bold"
-    for client_run in client_runs:
-        client_para = client_run
-        while client_para is not None and client_para.tag != w("p"):
-            client_para = client_para.getparent()
-        if client_para is None:
-            continue
-        client_ppr = client_para.find(w("pPr"))
-        if client_ppr is None:
-            continue
-        client_jc = client_ppr.find(w("jc"))
-        if client_jc is not None:
-            assert client_jc.get(f"{{{W_NS}}}val") == "left", (
-                "cover client must use jc=left under bidi for visual right alignment"
-            )
-            assert client_ppr.find(w("bidi")) is not None, "cover client must set w:bidi for Arabic RTL"
-            client_ind = client_ppr.find(w("ind"))
-            # section right 2127 − → indent = COVER_EDGE_MARGIN_TWIPS − 2127
-            expected_client_right = str(int(COVER_EDGE_MARGIN_TWIPS) - 2127)
-            assert client_ind is not None and client_ind.get(f"{{{W_NS}}}right") == expected_client_right
-            break
-    else:
-        raise AssertionError("cover client paragraph alignment missing")
-    assert f"على أساس {valuation_basis} في تاريخ التقييم" in plain_text, "contextual valuation basis was not filled"
-    assert any(
-        valuation_date in line and line.strip().startswith("تاريخ التقييم")
-        for line in plain_text.splitlines()
-    ), "contextual valuation date line was not filled"
-    assert f"بتاريخ {inspection_date}" in plain_text, "inspection date label fallback was not filled"
-    assert f"{valuation_date} {inspection_date}" not in plain_text, "adjacent date bookmarks should not duplicate dates"
-    for ppr in root.iter(w("pPr")):
-        tags = [child.tag for child in ppr]
-        assert not (
-            w("jc") in tags and w("bidi") in tags and tags.index(w("jc")) < tags.index(w("bidi"))
-        ), "invalid Word paragraph property order"
-    wp = lambda tag: f"{{{WP_NS}}}{tag}"
-    pic = lambda tag: f"{{{PIC_NS}}}{tag}"
-    doc_pr_ids = [el.get("id") for el in root.iter(wp("docPr")) if el.get("id")]
-    assert len(doc_pr_ids) == len(set(doc_pr_ids)), "duplicate wp:docPr ids"
-    blips = list(root.iter(a("blip")))
-    assert len(blips) == 16, "unexpected number of inserted image blips"
-    extents = [
-        (int(node.get("cx") or "0"), int(node.get("cy") or "0"))
-        for node in root.iter(wp("extent"))
-    ]
-    valuation_width = max(cx for cx, _cy in extents)
-    page_width_twips = 11906
-    expected_valuation_width = int(page_width_twips * 635 * IMAGE_CONTENT_WIDTH_RATIO)
-    assert abs(valuation_width - expected_valuation_width) <= 1, "valuation image should use 95% of physical page width"
-    valuation_indents = []
-    for para in root.iter(w("p")):
-        if any(int(node.get("cx") or "0") == valuation_width for node in para.iter(wp("extent"))):
-            ppr = para.find(w("pPr"))
-            ind = ppr.find(w("ind")) if ppr is not None else None
-            if ind is not None:
-                valuation_indents.append(ind)
-    assert valuation_indents, "valuation image paragraph should have RTL indentation"
-    physical_side_emu = (page_width_twips * 635 - expected_valuation_width) // 2
-    expected_right_indent = str(round((physical_side_emu - 2127 * 635) / 635))
-    expected_left_indent = str(round((physical_side_emu - 1440 * 635) / 635))
-    assert all(ind.get(f"{{{W_NS}}}right") == expected_right_indent for ind in valuation_indents), "valuation image should override the section right margin"
-    assert all(ind.get(f"{{{W_NS}}}left") == expected_left_indent for ind in valuation_indents), "valuation image should override the section left margin"
-    titles = [node.text for node in root.iter(w("t")) if node.text == IMAGE_PAGE_TITLE]
-    assert not titles, "asset pages should not insert a duplicate annex title"
-    tables = list(root.iter(w("tbl")))
-    assert len(tables) == 2, "two images per row should automatically use eight images per page"
-    assert IMAGES_PER_ROW == 4 and IMAGES_PER_PAGE == 20, "Word image layout defaults changed unexpectedly"
-    assert ASSET_IMAGE_GAP_DXA == 45, "asset image gap should be 3px"
-    for table in tables:
-        spacing = table.find(w("tblPr")).find(w("tblCellSpacing"))
-        assert spacing is not None, "asset image table should define cell spacing"
-        assert spacing.get(f"{{{W_NS}}}w") == str(ASSET_IMAGE_GAP_DXA), "asset image gap should be 3px"
-        table_width = table.find(w("tblPr")).find(w("tblW"))
-        assert table_width is not None
-        assert abs(int(table_width.get(f"{{{W_NS}}}w") or "0") - round(page_width_twips * IMAGE_CONTENT_WIDTH_RATIO)) <= 2, "asset table should use 95% of physical page width"
-        table_indent = table.find(w("tblPr")).find(w("tblInd"))
-        assert table_indent is not None
-        assert table_indent.get(f"{{{W_NS}}}w") == expected_left_indent, "asset table should be centered against the physical page"
-        for row in table.iter(w("tr")):
-            assert len(list(row.iter(w("tc")))) == 2, "custom row setting should produce two cells"
-    print("OK: merge smoke test passed")
+    print("OK: image canvas regression")
+    test_visible_syntaxes_split_runs_and_rpr()
+    print("OK: visible « » and << >> variables, split runs, rPr, no bookmark values")
+    test_actual_template_variables_mail_merge_cleanup_and_images()
+    print("OK: actual template variables, mail-merge cleanup, heading-based images")
+    test_actual_template_dynamic_report_preparers_without_annex_images()
+    print("OK: dynamic report preparers, signatures, preserved Word table formatting")
+    test_legacy_bookmarks_do_not_drive_text_or_images()
+    print("OK: legacy bookmarks do not drive text or image insertion")
 
 
 if __name__ == "__main__":

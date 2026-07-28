@@ -109,6 +109,34 @@ export class MachineValuationController {
     );
   }
 
+  @Post("projects/:id/duplicate")
+  async duplicateProject(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: { locale?: string },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.duplicateProject(id, toMvAccess(context), body?.locale);
+  }
+
+  @Post("projects/:id/clone-report-data")
+  async cloneReportData(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: { sourceProjectId?: string },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const sourceProjectId = body?.sourceProjectId?.trim() ?? "";
+    if (!sourceProjectId) {
+      throw new BadRequestException("sourceProjectId is required");
+    }
+    return this.mvService.cloneReportDataFromProject(id, sourceProjectId, toMvAccess(context));
+  }
+
   /** قائمة ملفات المعاين (اسم، رابط، نوع) — JSON فقط */
   @Get("projects/:id/inspectorFiles")
   async listInspectorFiles(
@@ -891,7 +919,6 @@ export class MachineValuationController {
     @Param("pid") projectId: string,
     @Body()
     body: {
-      templateFileId?: string;
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
       clientImageUrls?: string[];
@@ -899,10 +926,12 @@ export class MachineValuationController {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
-      textByBookmarkName?: Record<string, string>;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;
+        clientImagesPerRow?: number;
+        clientImagesPerPage?: number;
+        imageQuality?: number;
       };
     },
   ) {

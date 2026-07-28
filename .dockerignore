@@ -1,0 +1,9 @@
+.git
+.env
+node_modules
+dist
+*.log
+docx-worker/venv
+docx-worker/.venv
+docx-worker/__pycache__
+docx-worker/*.pyc

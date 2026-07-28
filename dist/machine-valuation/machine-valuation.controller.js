@@ -67,6 +67,20 @@ let MachineValuationController = class MachineValuationController {
         (0, context_1.applyContextCookies)(res, context);
         return this.mvService.createProject(body.name ?? "", toMvAccess(context), body.companyId, body.reportType, body.locations, body.contacts);
     }
+    async duplicateProject(req, res, id, body) {
+        const context = await (0, context_1.resolveRequestContext)(req);
+        (0, context_1.applyContextCookies)(res, context);
+        return this.mvService.duplicateProject(id, toMvAccess(context), body?.locale);
+    }
+    async cloneReportData(req, res, id, body) {
+        const context = await (0, context_1.resolveRequestContext)(req);
+        (0, context_1.applyContextCookies)(res, context);
+        const sourceProjectId = body?.sourceProjectId?.trim() ?? "";
+        if (!sourceProjectId) {
+            throw new common_1.BadRequestException("sourceProjectId is required");
+        }
+        return this.mvService.cloneReportDataFromProject(id, sourceProjectId, toMvAccess(context));
+    }
     async listInspectorFiles(req, res, id) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
@@ -579,6 +593,26 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, Object]),
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "createProject", null);
+__decorate([
+    (0, common_1.Post)("projects/:id/duplicate"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("id")),
+    __param(3, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String, Object]),
+    __metadata("design:returntype", Promise)
+], MachineValuationController.prototype, "duplicateProject", null);
+__decorate([
+    (0, common_1.Post)("projects/:id/clone-report-data"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("id")),
+    __param(3, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String, Object]),
+    __metadata("design:returntype", Promise)
+], MachineValuationController.prototype, "cloneReportData", null);
 __decorate([
     (0, common_1.Get)("projects/:id/inspectorFiles"),
     __param(0, (0, common_1.Req)()),

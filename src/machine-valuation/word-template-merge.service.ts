@@ -6,22 +6,17 @@ import * as path from "path";
 import { spawn } from "child_process";
 import { ObjectId } from "mongodb";
 import sharp from "sharp";
-import { MachineValuationService } from "./machine-valuation.service";
-import type { MvAccessContext } from "./types";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
-import {
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS,
-  loadCompanyWordTemplateBufferFromGridFs,
-  resolveCompanyReportDefaults,
-} from "@/server/auth-tracking/service";
 import { getMongoDb } from "@/server/mongodb";
+import { MachineValuationService } from "./machine-valuation.service";
+import type { MvAccessContext, MvReportTeamMember } from "./types";
 
 type MergeImageLayout = {
   imagesPerRow: number;
   imagesPerPage: number;
   clientImagesPerRow: number;
   clientImagesPerPage: number;
+  imageQuality: number;
 };
 
 /** حمولة الدمج عبر مسارات ملفات على القرص — تتحمّل آلاف الصور بلا Base64 في الذاكرة. */
@@ -29,11 +24,20 @@ type DiskMergeManifest = {
   templatePath: string;
   outputPath: string;
   textValues: Record<string, string>;
-  textByBookmarkName: Record<string, string>;
   assetImagePaths: string[];
   valuationImagePaths: string[];
   clientImagePaths: string[];
+  reportPreparers: DiskReportPreparer[];
   imageLayout: MergeImageLayout;
+};
+
+type DiskReportPreparer = {
+  userId: string;
+  reportDisplayName: string;
+  jobTitle: string;
+  membershipNo: string;
+  reportRole: string;
+  signatureImageDataUrl: string;
 };
 
 type ImageSource =
@@ -67,11 +71,16 @@ function sanitizeImageLayout(value: unknown): MergeImageLayout {
   const clientRaw = Math.trunc(Number(input.clientImagesPerRow));
   const clientImagesPerRow =
     clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
+  const requestedQuality = Math.trunc(Number(input.imageQuality));
+  const imageQuality = Number.isFinite(requestedQuality)
+    ? Math.max(60, Math.min(100, requestedQuality))
+    : 90;
   return {
     imagesPerRow: safeImagesPerRow,
     imagesPerPage: safeImagesPerPage,
     clientImagesPerRow,
     clientImagesPerPage: clientImagesPerRow * clientImagesPerRow,
+    imageQuality,
   };
 }
 
@@ -84,12 +93,15 @@ type OptimizeImageSettings = {
 };
 
 /** صور الأصول — تُخفَّض مع ازدياد العدد لتتحمل آلاف الصور. */
-function adaptiveAssetImageSettings(imageCount: number): OptimizeImageSettings {
-  if (imageCount <= 80) return { maxWidth: 1100, maxHeight: 1100, quality: 82, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 250) return { maxWidth: 900, maxHeight: 900, quality: 78, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 800) return { maxWidth: 780, maxHeight: 780, quality: 74, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 2000) return { maxWidth: 680, maxHeight: 680, quality: 70, chromaSubsampling: "4:2:0" };
-  return { maxWidth: 600, maxHeight: 600, quality: 66, chromaSubsampling: "4:2:0" };
+function adaptiveAssetImageSettings(imageCount: number, quality: number): OptimizeImageSettings {
+  const qualityCeiling =
+    imageCount <= 80 ? 95 : imageCount <= 250 ? 90 : imageCount <= 800 ? 84 : imageCount <= 2000 ? 78 : 72;
+  const effectiveQuality = Math.min(quality, qualityCeiling);
+  if (imageCount <= 80) return { maxWidth: 1100, maxHeight: 1100, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 250) return { maxWidth: 900, maxHeight: 900, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 800) return { maxWidth: 780, maxHeight: 780, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 2000) return { maxWidth: 680, maxHeight: 680, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  return { maxWidth: 600, maxHeight: 600, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
 }
 
 /**
@@ -97,21 +109,21 @@ function adaptiveAssetImageSettings(imageCount: number): OptimizeImageSettings {
  * نستخدم JPEG أساسي (baseline) متوافقاً مع python-docx؛ mozjpeg/optimizeScans
  * كانت تنتج Progressive JPEG فيفشل الإدراج بـ UnrecognizedImageError.
  */
-function valuationPrintImageSettings(): OptimizeImageSettings {
+function valuationPrintImageSettings(quality: number): OptimizeImageSettings {
   return {
     maxWidth: 4800,
     maxHeight: 14000,
-    quality: 95,
+    quality,
     chromaSubsampling: "4:4:4",
   };
 }
 
 /** مستندات العميل — جودة عالية للنصوص مع سقف معقول للذاكرة. */
-function clientDocumentImageSettings(): OptimizeImageSettings {
+function clientDocumentImageSettings(quality: number): OptimizeImageSettings {
   return {
     maxWidth: 3600,
     maxHeight: 10000,
-    quality: 92,
+    quality,
     chromaSubsampling: "4:4:4",
   };
 }
@@ -159,11 +171,15 @@ function findMergeScriptPath(): string {
 type MergeWorkerResult = {
   outputPath: string;
   stats: {
-    textFilled: number;
+    variablesFilled: number;
     assetImagesInserted: number;
     valuationImagesInserted: number;
     clientImagesInserted: number;
-    bookmarksFound: string[];
+    reportPreparerTableFound: number;
+    reportPreparerRowsRemoved: number;
+    reportPreparersInserted: number;
+    reportSignaturesInserted: number;
+    variablesFound: string[];
   };
 };
 
@@ -175,22 +191,30 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
     try {
       const parsed = JSON.parse(trimmed) as Partial<MergeWorkerResult["stats"]>;
       return {
-        textFilled: Number(parsed.textFilled ?? 0),
+        variablesFilled: Number(parsed.variablesFilled ?? 0),
         assetImagesInserted: Number(parsed.assetImagesInserted ?? 0),
         valuationImagesInserted: Number(parsed.valuationImagesInserted ?? 0),
         clientImagesInserted: Number(parsed.clientImagesInserted ?? 0),
-        bookmarksFound: Array.isArray(parsed.bookmarksFound) ? parsed.bookmarksFound.map(String) : [],
+        reportPreparerTableFound: Number(parsed.reportPreparerTableFound ?? 0),
+        reportPreparerRowsRemoved: Number(parsed.reportPreparerRowsRemoved ?? 0),
+        reportPreparersInserted: Number(parsed.reportPreparersInserted ?? 0),
+        reportSignaturesInserted: Number(parsed.reportSignaturesInserted ?? 0),
+        variablesFound: Array.isArray(parsed.variablesFound) ? parsed.variablesFound.map(String) : [],
       };
     } catch {
       /* try next line */
     }
   }
   return {
-    textFilled: 0,
+    variablesFilled: 0,
     assetImagesInserted: 0,
     valuationImagesInserted: 0,
     clientImagesInserted: 0,
-    bookmarksFound: [],
+    reportPreparerTableFound: 0,
+    reportPreparerRowsRemoved: 0,
+    reportPreparersInserted: 0,
+    reportSignaturesInserted: 0,
+    variablesFound: [],
   };
 }
 
@@ -485,52 +509,36 @@ function bufferFromStream(stream: NodeJS.ReadableStream): Promise<Buffer> {
   });
 }
 
-const COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX = "/uploads/company-report-templates/";
+const BUNDLED_WORD_TEMPLATE_FILE_NAME = "تقرير تقييم.docx";
 
-function bundledWordTemplateSearchDirs(): string[] {
+function bundledWordTemplateCandidates(): string[] {
   const cwd = process.cwd();
-  const dirs = [
-    path.resolve(cwd, "assets"),
-    path.resolve(cwd, "public", "files"),
-    path.resolve(cwd, "..", "Spark-Vision", "public", "files"),
-    // من dist/machine-valuation → جذر الـ backend
-    path.resolve(__dirname, "..", "..", "assets"),
-    path.resolve(__dirname, "..", "..", "public", "files"),
-    path.resolve(__dirname, "..", "..", "..", "Spark-Vision", "public", "files"),
+  const candidates = [
+    // المصدر المحلي الوحيد أثناء التطوير.
+    path.resolve(cwd, "..", "Spark-Vision", "public", "files", BUNDLED_WORD_TEMPLATE_FILE_NAME),
+    path.resolve(cwd, "Spark-Vision", "public", "files", BUNDLED_WORD_TEMPLATE_FILE_NAME),
+    path.resolve(
+      __dirname,
+      "..",
+      "..",
+      "..",
+      "Spark-Vision",
+      "public",
+      "files",
+      BUNDLED_WORD_TEMPLATE_FILE_NAME,
+    ),
+    // نسخة النشر التي ينسخها Docker إلى /app/assets.
+    path.resolve(cwd, "assets", BUNDLED_WORD_TEMPLATE_FILE_NAME),
+    path.resolve(__dirname, "..", "..", "assets", BUNDLED_WORD_TEMPLATE_FILE_NAME),
   ];
-  return [...new Set(dirs)];
+  return [...new Set(candidates)];
 }
 
 function findBundledWordTemplateOnDisk(): string | null {
-  for (const dir of bundledWordTemplateSearchDirs()) {
-    for (const fileName of PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES) {
-      const candidate = path.resolve(dir, fileName);
-      if (fs.existsSync(candidate)) return candidate;
-    }
+  for (const candidate of bundledWordTemplateCandidates()) {
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
-}
-
-function resolveBundledWordTemplatePath(uploadUrl?: string | null): string | null {
-  const trimmed = (uploadUrl ?? "").trim();
-  if (trimmed && !PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(trimmed)) return null;
-  return findBundledWordTemplateOnDisk();
-}
-
-function resolveCompanyWordTemplatePath(uploadUrl: string): string | null {
-  const trimmed = uploadUrl.trim();
-  const bundledPath = resolveBundledWordTemplatePath(trimmed);
-  if (bundledPath) return bundledPath;
-  if (!trimmed.startsWith(COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX) || !trimmed.toLowerCase().endsWith(".docx")) {
-    return null;
-  }
-  const relative = trimmed.slice(COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX.length);
-  if (!relative || relative.includes("..") || relative.includes("\\") || path.isAbsolute(relative)) {
-    return null;
-  }
-  const baseDir = path.resolve(process.cwd(), "uploads", "company-report-templates");
-  const fullPath = path.resolve(baseDir, relative);
-  return fullPath.startsWith(baseDir + path.sep) ? fullPath : null;
 }
 
 function formatDateAr(value?: unknown): string {
@@ -566,12 +574,18 @@ function coerceFiniteNumber(value: unknown): number | null {
 function formatFinalValueAmount(value: unknown): string {
   const amount = coerceFiniteNumber(value);
   if (amount == null) return "";
-  return new Intl.NumberFormat("ar-SA", { maximumFractionDigits: 0 }).format(amount);
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0,
+    useGrouping: true,
+  }).format(amount);
 }
 
-function formatFinalValue(value: unknown, _currency?: string | null): string {
-  // القالب يحتوي عادة على «ر.س.» بجانب إشارة «قيمة» — نملأ الرقم فقط لتفادي التكرار
-  return formatFinalValueAmount(value);
+function formatFinalValueOpinion(reportData: Record<string, unknown>): string {
+  const amount = formatFinalValueAmount(reportData.finalValue);
+  const words = String(reportData.finalValueWords || "").trim();
+  if (!amount) return words;
+  const numeric = `(${amount} ر.س)`;
+  return words ? `${numeric}${words}` : numeric;
 }
 
 function sanitizeForXml(text: string): string {
@@ -581,54 +595,132 @@ function sanitizeForXml(text: string): string {
     .trim();
 }
 
-function sanitizeTextRecord(
+const WORD_TEMPLATE_VARIABLE_KEYS = [
+  "reportTitle",
+  "clientName",
+  "reportIssueDate",
+  "reportReference",
+  "valuationMethod",
+  "valuationPurpose",
+  "valuationBasis",
+  "valuationDate",
+  "agreementDate",
+  "inspectionDate",
+  "assetSingularPlural",
+  "clientActivity",
+  "clientRepresentativeName",
+  "clientRepresentativeRole",
+  "intendedUsers",
+  "assetSubjectDescription",
+  "valuationBasisDefinition",
+  "valuePremiseDefinition",
+  "inspectionLocation",
+  "inspectionMapUrl",
+  "finalValueOpinion",
+] as const;
+
+type WordTemplateVariableKey = (typeof WORD_TEMPLATE_VARIABLE_KEYS)[number];
+
+const WORD_TEMPLATE_VARIABLE_KEY_SET = new Set<string>(WORD_TEMPLATE_VARIABLE_KEYS);
+
+function sanitizeVariableOverrides(
   input: unknown,
-  options: { dropEmpty?: boolean } = {},
-): Record<string, string> {
+): Partial<Record<WordTemplateVariableKey, string>> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
-  const out: Record<string, string> = {};
+  const out: Partial<Record<WordTemplateVariableKey, string>> = {};
   for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-    const safeKey = sanitizeForXml(String(key));
-    const safeValue = sanitizeForXml(String(value ?? ""));
-    if (!safeKey || (options.dropEmpty && !safeValue)) continue;
-    out[safeKey] = safeValue;
+    if (!WORD_TEMPLATE_VARIABLE_KEY_SET.has(key)) continue;
+    if (value != null && typeof value !== "string" && typeof value !== "number") continue;
+    out[key as WordTemplateVariableKey] = sanitizeForXml(String(value ?? "")).slice(0, 50_000);
   }
   return out;
 }
 
-function buildTextValues(reportData: Record<string, unknown>, projectName: string): Record<string, string> {
-  const clientIdentity = [
-    reportData.clientLegalType,
-    reportData.clientRepresentativeName,
-    reportData.clientRepresentativeRole,
-    reportData.intendedUsers,
-  ]
-    .filter((v) => typeof v === "string" && v.trim())
-    .join(" — ");
-
-  const raw: Record<string, string> = {
+function buildTextValues(
+  reportData: Record<string, unknown>,
+  projectName: string,
+  displayNumber?: unknown,
+): Record<string, string> {
+  const raw: Record<WordTemplateVariableKey, string> = {
     reportTitle: String(reportData.reportTitle || projectName || "").trim(),
     clientName: String(reportData.clientName || "").trim(),
-    clientIdentity,
-    valuationBasis: String(reportData.valuationBasis || "").trim(),
-    valuationPurpose: String(reportData.valuationPurpose || "").trim(),
-    agreementDate: formatDateAr(reportData.agreementDate),
     reportIssueDate: formatDateAr(reportData.reportIssueDate),
+    reportReference: String(reportData.reportReference || displayNumber || "").trim(),
+    valuationMethod: String(reportData.valuationMethod || "").trim(),
+    valuationPurpose: String(reportData.valuationPurpose || "").trim(),
+    valuationBasis: String(reportData.valuationBasis || "").trim(),
     valuationDate: formatDateAr(reportData.valuationDate),
+    agreementDate: formatDateAr(reportData.agreementDate),
     inspectionDate: formatDateAr(reportData.inspectionDate),
-    valuePremise: String(reportData.valuePremise || "").trim(),
-    finalValue: formatFinalValue(reportData.finalValue, reportData.currencyLabel as string),
-    finalValueAmount: formatFinalValueAmount(reportData.finalValue),
-    finalValueWords: String(reportData.finalValueWords || "").trim(),
+    assetSingularPlural: String(reportData.assetSingularPlural || "أصل/أصول").trim(),
+    clientActivity: String(reportData.clientActivity || "").trim(),
+    clientRepresentativeName: String(reportData.clientRepresentativeName || "").trim(),
+    clientRepresentativeRole: String(reportData.clientRepresentativeRole || "").trim(),
+    intendedUsers: String(reportData.intendedUsers || "").trim(),
+    assetSubjectDescription: String(
+      reportData.assetSubjectDescription || "الات ومعدات واجهزة متنوعه",
+    ).trim(),
+    valuationBasisDefinition: String(reportData.valuationBasisDefinition || "").trim(),
+    valuePremiseDefinition: String(reportData.valuePremiseDefinition || "").trim(),
     inspectionLocation: String(reportData.inspectionLocation || "").trim(),
     inspectionMapUrl: String(reportData.inspectionMapUrl || "").trim(),
+    finalValueOpinion: formatFinalValueOpinion(reportData),
   };
 
   const out: Record<string, string> = {};
-  for (const [key, val] of Object.entries(raw)) {
+  for (const key of WORD_TEMPLATE_VARIABLE_KEYS) {
+    const val = raw[key];
     out[key] = sanitizeForXml(val);
   }
-  return out;
+  return {
+    ...out,
+    ...sanitizeVariableOverrides(reportData.reportTextOverrides),
+  };
+}
+
+const REPORT_MANAGER_ROLE =
+  "الإدارة التنفيذية وتعميد ومراجعة المخرجات النهائية";
+const REPORT_PREPARER_ROLE = "إعداد التقرير";
+const REPORT_INSPECTION_ROLE = "المعاينة";
+
+function cleanReportText(value: unknown, maxLength: number): string {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+/** يمنع نهائياً استخدام رقم تسجيل الدخول/الهاتف كاسم داخل التقرير. */
+function safeReportPersonName(value: unknown): string {
+  const name = cleanReportText(value, 200);
+  if (!name) return "";
+  if (/[0-9\u0660-\u0669\u06f0-\u06f9]/.test(name)) return "";
+  return /[A-Za-z\u00c0-\u024f\u0600-\u06ff]/.test(name) ? name : "";
+}
+
+function asObjectId(value: unknown): ObjectId | null {
+  if (value instanceof ObjectId) return value;
+  const text = cleanReportText(value, 100);
+  return ObjectId.isValid(text) ? new ObjectId(text) : null;
+}
+
+function readStoredReportTeam(value: unknown): MvReportTeamMember[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const rows: MvReportTeamMember[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    const id = cleanReportText(row.id, 100);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    rows.push({
+      id,
+      name: safeReportPersonName(row.name),
+      title: cleanReportText(row.title, 200),
+      membershipNo: cleanReportText(row.membershipNo, 100),
+      role: cleanReportText(row.role, 500),
+    });
+    if (rows.length >= 12) break;
+  }
+  return rows;
 }
 
 @Injectable()
@@ -637,11 +729,115 @@ export class WordTemplateMergeService {
 
   constructor(private readonly mvService: MachineValuationService) {}
 
+  private async resolveReportPreparers(
+    reportData: Record<string, unknown>,
+    projectCompanyId: unknown,
+    ctx: MvAccessContext,
+  ): Promise<DiskReportPreparer[]> {
+    const companyId = asObjectId(projectCompanyId ?? ctx.companyId);
+    if (!companyId) return [];
+
+    try {
+      const db = await getMongoDb();
+      const { companies, users, userCompanyMemberships } = getAuthCollections(db);
+      const [company, memberships] = await Promise.all([
+        companies.findOne({ _id: companyId }),
+        userCompanyMemberships.find({ companyId }).toArray(),
+      ]);
+
+      const eligibleMemberships = memberships.filter(
+        (membership) =>
+          membership.role === "company_admin" ||
+          !Array.isArray(membership.productIds) ||
+          membership.productIds.length === 0 ||
+          membership.productIds.includes("machine-valuation"),
+      );
+      const membershipByUserId = new Map(
+        eligibleMemberships.map((membership) => [
+          membership.userId.toString(),
+          membership,
+        ]),
+      );
+      const managerMembership =
+        eligibleMemberships.find((membership) => membership.role === "company_admin") ??
+        memberships.find((membership) => membership.role === "company_admin");
+      const managerId =
+        managerMembership?.userId.toString() ??
+        company?.adminUserId?.toString() ??
+        "";
+
+      const storedTeam = readStoredReportTeam(reportData.valuationTeam);
+      const storedById = new Map(storedTeam.map((row) => [row.id, row]));
+      const orderedIds: string[] = [];
+      if (managerId) orderedIds.push(managerId);
+      for (const row of storedTeam) {
+        if (row.id === managerId || orderedIds.includes(row.id)) continue;
+        // لا يُسمح بحقن مستخدم أو توقيع من خارج أعضاء الشركة المخولين.
+        if (!membershipByUserId.has(row.id)) continue;
+        orderedIds.push(row.id);
+      }
+
+      const userObjectIds = orderedIds
+        .map(asObjectId)
+        .filter((value): value is ObjectId => value !== null);
+      if (userObjectIds.length === 0) return [];
+      const userRows = await users.find({ _id: { $in: userObjectIds } }).toArray();
+      const userById = new Map(userRows.map((user) => [user._id.toString(), user]));
+
+      const preparers: DiskReportPreparer[] = [];
+      let nonManagerIndex = 0;
+      for (const userId of orderedIds) {
+        const user = userById.get(userId);
+        if (!user) continue;
+        const isManager = userId === managerId;
+        if (!isManager && !membershipByUserId.has(userId)) continue;
+        const stored = storedById.get(userId);
+        const currentDisplayName = safeReportPersonName(user.valuationReportDisplayName);
+        const legacyDisplayName = safeReportPersonName(user.username);
+        const reportRole =
+          cleanReportText(stored?.role, 500) ||
+          (isManager
+            ? REPORT_MANAGER_ROLE
+            : nonManagerIndex === 0
+              ? REPORT_PREPARER_ROLE
+              : REPORT_INSPECTION_ROLE);
+        if (!isManager) nonManagerIndex += 1;
+        const signature =
+          typeof user.valuationReportSignatureDataUrl === "string" &&
+          user.valuationReportSignatureDataUrl.startsWith("data:image/")
+            ? user.valuationReportSignatureDataUrl
+            : "";
+        preparers.push({
+          userId,
+          reportDisplayName:
+            currentDisplayName ||
+            safeReportPersonName(stored?.name) ||
+            legacyDisplayName,
+          jobTitle:
+            cleanReportText(user.valuationReportJobTitle, 200) ||
+            cleanReportText(stored?.title, 200),
+          membershipNo:
+            cleanReportText(user.valuationReportMembershipNo, 100) ||
+            cleanReportText(stored?.membershipNo, 100),
+          reportRole,
+          signatureImageDataUrl: signature,
+        });
+      }
+      return preparers.slice(0, 12);
+    } catch (error) {
+      this.logger.warn(
+        `Could not resolve Word report preparers: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return [];
+    }
+  }
+
   async mergeAndRespond(
     projectId: string,
     ctx: MvAccessContext,
     body: {
-      templateFileId?: string;
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
       clientImageUrls?: string[];
@@ -649,12 +845,12 @@ export class WordTemplateMergeService {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
-      textByBookmarkName?: Record<string, string>;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;
         clientImagesPerRow?: number;
         clientImagesPerPage?: number;
+        imageQuality?: number;
       };
     },
     res: Response,
@@ -662,22 +858,14 @@ export class WordTemplateMergeService {
     const loaded = await this.mvService.getProject(projectId, ctx);
     const project = loaded.project;
     const reportData = (project.reportData ?? {}) as Record<string, unknown>;
-    const templateFileId =
-      body.templateFileId?.trim() || String(reportData.wordReportTemplateFileId || "").trim();
-
-    let templateBuffer: Buffer | null = null;
-    if (templateFileId) {
-      const download = await this.mvService.getProjectFileDownload(projectId, templateFileId, ctx);
-      templateBuffer = await bufferFromStream(download.stream);
-    } else {
-      templateBuffer = await this.loadCompanyWordTemplateBuffer(project, ctx);
-    }
-
-    if (!templateBuffer) {
+    const sourceTemplatePath = findBundledWordTemplateOnDisk();
+    if (!sourceTemplatePath) {
       throw new BadRequestException(
-        "لم يُعثر على قالب Word المضمّن أو المرفوع. تأكد من وجود assets/mv-word-template.docx على السيرفر، أو ارفع قالباً من إعدادات الشركة ثم أعد المحاولة.",
+        "لم يُعثر على قالب Word الأساسي «تقرير تقييم.docx» في Spark-Vision/public/files أو assets على السيرفر.",
       );
     }
+    let templateBuffer: Buffer | null = await fs.promises.readFile(sourceTemplatePath);
+    this.logger.debug(`Using bundled Word template: ${sourceTemplatePath}`);
 
     const assetSources = await this.resolveImageSources({
       projectId,
@@ -707,9 +895,18 @@ export class WordTemplateMergeService {
     });
 
     const imageCount = assetSources.length + valuationSources.length + clientSources.length;
-    const assetSettings = adaptiveAssetImageSettings(assetSources.length || imageCount);
-    const valuationSettings = valuationPrintImageSettings();
-    const clientSettings = clientDocumentImageSettings();
+    const imageLayout = sanitizeImageLayout({
+      imagesPerRow: reportData.wordAssetImagesPerRow,
+      clientImagesPerRow: reportData.clientDocumentsImagesPerRow,
+      imageQuality: reportData.wordImageQuality,
+      ...(body.imageLayout ?? {}),
+    });
+    const assetSettings = adaptiveAssetImageSettings(
+      assetSources.length || imageCount,
+      imageLayout.imageQuality,
+    );
+    const valuationSettings = valuationPrintImageSettings(imageLayout.imageQuality);
+    const clientSettings = clientDocumentImageSettings(imageLayout.imageQuality);
 
     const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `mv-docx-${projectId.slice(-8)}-`));
     const templatePath = path.join(workDir, "template.docx");
@@ -730,7 +927,7 @@ export class WordTemplateMergeService {
         `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, valuation≤${valuationSettings.maxWidth}x${valuationSettings.maxHeight}@q${valuationSettings.quality})`,
       );
 
-      const [assetImagePaths, valuationImagePaths, clientImagePaths] = await Promise.all([
+      const [assetImagePaths, valuationImagePaths, clientImagePaths, reportPreparers] = await Promise.all([
         this.materializeImagesToDisk(assetSources, assetDir, "a", assetSettings, projectId, ctx),
         this.materializeImagesToDisk(
           valuationSources,
@@ -741,29 +938,31 @@ export class WordTemplateMergeService {
           ctx,
         ),
         this.materializeImagesToDisk(clientSources, clientDir, "c", clientSettings, projectId, ctx),
+        this.resolveReportPreparers(reportData, project.companyId, ctx),
       ]);
 
-      const storedTextValues = buildTextValues(reportData, project.name || "");
-      const requestTextValues = sanitizeTextRecord(body.textValues, { dropEmpty: true });
-      const textValues =
-        Object.keys(requestTextValues).length > 0
-          ? { ...storedTextValues, ...requestTextValues }
-          : storedTextValues;
-      const textByBookmarkName = sanitizeTextRecord(body.textByBookmarkName, { dropEmpty: true });
+      const storedTextValues = buildTextValues(
+        reportData,
+        project.name || "",
+        project.displayNumber,
+      );
+      // وجود المفتاح في الطلب — حتى لو كانت قيمته فارغة — يتغلب على القيمة المخزنة.
+      const requestTextValues = sanitizeVariableOverrides(body.textValues);
+      const textValues = { ...storedTextValues, ...requestTextValues };
 
       const manifest: DiskMergeManifest = {
         templatePath,
         outputPath,
         textValues,
-        textByBookmarkName,
         assetImagePaths,
         valuationImagePaths,
         clientImagePaths,
-        imageLayout: sanitizeImageLayout(body.imageLayout),
+        reportPreparers,
+        imageLayout,
       };
 
       this.logger.log(
-        `Merging Word for ${projectId}: ${assetImagePaths.length} asset, ${valuationImagePaths.length} valuation, ${clientImagePaths.length} client images`,
+        `Merging Word for ${projectId}: ${assetImagePaths.length} asset, ${valuationImagePaths.length} valuation, ${clientImagePaths.length} client images, ${reportPreparers.length} report preparers`,
       );
 
       let mergeResult: MergeWorkerResult;
@@ -775,6 +974,37 @@ export class WordTemplateMergeService {
       }
 
       const stats = mergeResult.stats;
+      const imageWarnings: string[] = [];
+      const appendImageWarning = (
+        label: string,
+        requested: number,
+        inserted: number,
+      ) => {
+        if (inserted >= requested) return;
+        imageWarnings.push(
+          `${label}: تم إدراج ${inserted} من أصل ${requested} صورة.`,
+        );
+      };
+      appendImageWarning(
+        "صور الأصول",
+        assetSources.length,
+        stats.assetImagesInserted,
+      );
+      appendImageWarning(
+        "صور حسابات القيمة",
+        valuationSources.length,
+        stats.valuationImagesInserted,
+      );
+      appendImageWarning(
+        "صور ملفات العميل",
+        clientSources.length,
+        stats.clientImagesInserted,
+      );
+      if (imageWarnings.length > 0) {
+        this.logger.warn(
+          `Word merge completed with image warnings for ${projectId}: ${imageWarnings.join(" ")}`,
+        );
+      }
       const safeName = (project.name || "report").replace(/[\\/:*?"<>|]+/g, "-");
       const fileStat = await fs.promises.stat(mergeResult.outputPath);
       res.setHeader(
@@ -787,6 +1017,12 @@ export class WordTemplateMergeService {
       );
       res.setHeader("Content-Length", String(fileStat.size));
       res.setHeader("X-Word-Merge-Stats", encodeURIComponent(JSON.stringify(stats)));
+      if (imageWarnings.length > 0) {
+        res.setHeader(
+          "X-Word-Merge-Warnings",
+          encodeURIComponent(JSON.stringify(imageWarnings)),
+        );
+      }
       await pipeFileToResponse(mergeResult.outputPath, res);
     } finally {
       fs.rm(workDir, { recursive: true, force: true }, () => undefined);
@@ -915,64 +1151,6 @@ export class WordTemplateMergeService {
         return typeof row.fileId === "string" ? row.fileId.trim() : "";
       })
       .filter(Boolean);
-  }
-
-  private resolveCompanyId(project: { companyId?: unknown }, ctx: MvAccessContext): ObjectId | null {
-    const raw = project.companyId ?? ctx.companyId;
-    if (raw instanceof ObjectId) return raw;
-    if (typeof raw !== "string" || !raw.trim() || !ObjectId.isValid(raw.trim())) return null;
-    return new ObjectId(raw.trim());
-  }
-
-  private async loadCompanyWordTemplateBuffer(
-    project: { companyId?: unknown },
-    ctx: MvAccessContext,
-  ): Promise<Buffer | null> {
-    const companyId = this.resolveCompanyId(project, ctx);
-    if (!companyId) return null;
-    const db = await getMongoDb();
-    const { companies, users, userCompanyMemberships } = getAuthCollections(db);
-    const company = await companies.findOne({ _id: companyId });
-    const adminMembership = await userCompanyMemberships.findOne({ companyId, role: "company_admin" });
-    const adminUserId = adminMembership?.userId ?? company?.adminUserId ?? null;
-    const adminUser = adminUserId ? await users.findOne({ _id: adminUserId }) : null;
-    const wordTemplate = resolveCompanyReportDefaults(company?.reportDefaults, {
-      companyName: company?.name,
-      adminPhone: adminUser?.phone,
-      adminUsername: adminUser?.username,
-    }).wordTemplate;
-
-    // 1) GridFS أولاً (يعمل عبر السيرفرات ولا يعتمد على مجلد uploads المحلي)
-    const gridFsId =
-      typeof wordTemplate?.gridFsFileId === "string" ? wordTemplate.gridFsFileId.trim() : "";
-    if (gridFsId) {
-      const fromGrid = await loadCompanyWordTemplateBufferFromGridFs(gridFsId);
-      if (fromGrid?.byteLength) return fromGrid;
-    }
-
-    // 2) ملف القرص المحلي من إعدادات الشركة (مفيد للتطوير وللسيرفر إن وُجد المجلد)
-    const filePath = wordTemplate?.fileUrl ? resolveCompanyWordTemplatePath(wordTemplate.fileUrl) : null;
-    if (filePath && fs.existsSync(filePath)) {
-      return fs.promises.readFile(filePath);
-    }
-
-    // 3) القالب المضمّن في المشروع — يعمل محلياً وفي الـ deployment دون إعادة رفع
-    const bundledPath = findBundledWordTemplateOnDisk();
-    if (bundledPath) {
-      if (wordTemplate?.fileUrl && !PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(wordTemplate.fileUrl.trim())) {
-        this.logger.warn(
-          `Company Word template missing (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}); falling back to bundled ${path.basename(bundledPath)} for company ${String(companyId)}`,
-        );
-      }
-      return fs.promises.readFile(bundledPath);
-    }
-
-    if (wordTemplate?.fileUrl) {
-      this.logger.warn(
-        `Company Word template metadata exists (url=${wordTemplate.fileUrl}, gridFs=${gridFsId || "none"}) but file is missing on disk/GridFS for company ${String(companyId)}`,
-      );
-    }
-    return null;
   }
 
   private async fetchImageBuffer(url: string, ctx: MvAccessContext): Promise<Buffer | null> {

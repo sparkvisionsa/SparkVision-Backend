@@ -25,6 +25,7 @@ const mongodb_2 = require("../server/mongodb");
 const collections_1 = require("../server/auth-tracking/collections");
 const collections_2 = require("./collections");
 const types_1 = require("./types");
+const report_data_defaults_1 = require("./report-data-defaults");
 const digitalocean_spaces_service_1 = require("./digitalocean-spaces.service");
 const inspector_files_constants_1 = require("./inspector-files.constants");
 const inspector_files_util_1 = require("./inspector-files.util");
@@ -551,16 +552,103 @@ function sanitizeReportPageOrientations(value) {
     }
     return out;
 }
+const MV_LEGACY_ARABIC_VALUATION_PURPOSES = {
+    بيع: "البيع",
+    شراء: "الشراء",
+    محاسبة: "المحاسبة",
+    رهن: "الرهن",
+    إفلاس: "الإفلاس",
+    تمويل: "التمويل",
+    تأمين: "التأمين",
+    "نزاعات و تقاضي": "النزاعات والتقاضي",
+    أخرى: "الأخرى",
+};
+function sanitizeValuationPurpose(value) {
+    const purpose = sanitizeOptionalText(value, 120);
+    return MV_LEGACY_ARABIC_VALUATION_PURPOSES[purpose] ?? purpose;
+}
+function buildWindowsStyleCopyName(baseName, existingNames, locale) {
+    const base = String(baseName ?? "").trim() || (locale === "ar" ? "مشروع" : "Project");
+    const suffix = locale === "ar" ? "نسخة" : "Copy";
+    const existing = new Set([...existingNames]
+        .map((name) => String(name ?? "").trim().toLocaleLowerCase())
+        .filter(Boolean));
+    const first = `${base} - ${suffix}`;
+    if (!existing.has(first.toLocaleLowerCase()))
+        return first;
+    for (let n = 2; n < 10_000; n += 1) {
+        const candidate = `${base} - ${suffix} (${n})`;
+        if (!existing.has(candidate.toLocaleLowerCase()))
+            return candidate;
+    }
+    return `${base} - ${suffix} (${Date.now()})`;
+}
+function hasMeaningfulSanitizedReportData(data) {
+    if (data.finalValue != null && Number.isFinite(Number(data.finalValue)))
+        return true;
+    if (Array.isArray(data.valuationTeam) && data.valuationTeam.length > 0)
+        return true;
+    const textKeys = [
+        "valuationMethod",
+        "reportReference",
+        "reportTitle",
+        "valuationPurpose",
+        "valuePremise",
+        "valuationBasis",
+        "reportIssueDate",
+        "agreementDate",
+        "inspectionDate",
+        "valuationDate",
+        "clientName",
+        "clientEmail",
+        "clientPhone",
+        "clientLegalType",
+        "clientActivity",
+        "clientRepresentativeName",
+        "clientRepresentativeRole",
+        "intendedUsers",
+        "intendedUse",
+        "inspectionLocation",
+        "inspectionMapUrl",
+        "finalValueWords",
+        "reportNarrativeB1",
+        "reportNarrativeB2",
+        "reportNarrativeB3",
+        "reportNarrativeB4",
+        "reportIntroExtraHtml",
+        "receivedClientDocumentsHtml",
+        "sceRegistrationCertificateHtml",
+    ];
+    for (const key of textKeys) {
+        const value = data[key];
+        if (typeof value === "string" && value.trim().length > 0)
+            return true;
+    }
+    if (data.reportTextOverrides && Object.keys(data.reportTextOverrides).length > 0)
+        return true;
+    if (Array.isArray(data.reportEditableSections) && data.reportEditableSections.length > 0)
+        return true;
+    if (Array.isArray(data.reportInsertedBlocks) && data.reportInsertedBlocks.length > 0)
+        return true;
+    if (Array.isArray(data.reportHiddenAnchorIds) && data.reportHiddenAnchorIds.length > 0)
+        return true;
+    return false;
+}
 function sanitizeReportData(raw) {
     const data = raw && typeof raw === "object" ? raw : {};
     return {
         reportReference: sanitizeOptionalText(data.reportReference, 120),
         reportTitle: sanitizeOptionalText(data.reportTitle, 220),
         valuationMethod: sanitizeOptionalText(data.valuationMethod, 120),
-        valuationPurpose: sanitizeOptionalText(data.valuationPurpose, 120),
+        valuationPurpose: sanitizeValuationPurpose(data.valuationPurpose),
+        assetSingularPlural: sanitizeOptionalText(data.assetSingularPlural, 120) ||
+            report_data_defaults_1.MV_REPORT_DEFAULT_ASSET_SINGULAR_PLURAL,
         valuePremise: sanitizeOptionalText(data.valuePremise, 120),
+        valuePremiseDefinition: sanitizeOptionalText(data.valuePremiseDefinition, 4000) ||
+            report_data_defaults_1.MV_REPORT_DEFAULT_VALUE_PREMISE_DEFINITION,
         valuationBasis: sanitizeOptionalText(data.valuationBasis, 220),
-        valuationBasisDefinition: sanitizeOptionalText(data.valuationBasisDefinition, 2000),
+        valuationBasisDefinition: sanitizeOptionalText(data.valuationBasisDefinition, 4000) ||
+            report_data_defaults_1.MV_REPORT_DEFAULT_VALUATION_BASIS_DEFINITION,
         includeAssetImages: data.includeAssetImages !== false,
         includeValuationAccountImages: data.includeValuationAccountImages !== false,
         reportIssueDate: sanitizeIsoDateOnly(data.reportIssueDate),
@@ -590,7 +678,8 @@ function sanitizeReportData(raw) {
         externalSpecialistUse: sanitizeOptionalText(data.externalSpecialistUse, 2000),
         esgConsiderations: sanitizeOptionalText(data.esgConsiderations, 2000),
         informationSources: sanitizeOptionalText(data.informationSources, 6000),
-        assetSubjectDescription: sanitizeOptionalText(data.assetSubjectDescription, 4000),
+        assetSubjectDescription: sanitizeOptionalText(data.assetSubjectDescription, 4000) ||
+            report_data_defaults_1.MV_REPORT_DEFAULT_ASSET_SUBJECT_DESCRIPTION,
         assetDetailedDescription: sanitizeOptionalText(data.assetDetailedDescription, 6000),
         inspectionLocation: sanitizeOptionalText(data.inspectionLocation, 500),
         inspectionMapUrl: sanitizeOptionalText(data.inspectionMapUrl, 800),
@@ -610,6 +699,14 @@ function sanitizeReportData(raw) {
             const n = Math.trunc(Number(data.clientDocumentsImagesPerRow));
             return n === 1 || n === 2 || n === 3 ? n : 2;
         })(),
+        wordAssetImagesPerRow: (() => {
+            const n = Math.trunc(Number(data.wordAssetImagesPerRow));
+            return Number.isFinite(n) ? Math.max(1, Math.min(6, n)) : 4;
+        })(),
+        wordImageQuality: (() => {
+            const n = Math.trunc(Number(data.wordImageQuality));
+            return Number.isFinite(n) ? Math.max(60, Math.min(100, n)) : 90;
+        })(),
         sceRegistrationCertificateHtml: sanitizeOptionalText(data.sceRegistrationCertificateHtml, 50_000),
         reportTextOverrides: sanitizeReportTextOverrides(data.reportTextOverrides),
         reportIntroExtraHtml: sanitizeOptionalText(data.reportIntroExtraHtml, 50_000),
@@ -621,10 +718,6 @@ function sanitizeReportData(raw) {
         reportInsertedBlocks: sanitizeReportInsertedBlocks(data.reportInsertedBlocks),
         reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
         reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
-        wordReportTemplateFileId: sanitizeOptionalText(data.wordReportTemplateFileId, 80),
-        wordReportTemplateFileName: sanitizeOptionalText(data.wordReportTemplateFileName, 240),
-        wordReportTemplatePlaceholders: sanitizeReportAnchorIds(data.wordReportTemplatePlaceholders),
-        wordReportTemplateAnalyzedAt: sanitizeIsoDateOnly(data.wordReportTemplateAnalyzedAt),
     };
 }
 function pickReportDataProgressSummary(raw) {
@@ -4203,6 +4296,54 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             createdByName: null,
             inspectionAssignments: [],
             inspectorFiles: [],
+        };
+    }
+    async duplicateProject(id, ctx, localeRaw) {
+        const db = await (0, mongodb_2.getMongoDb)();
+        const _id = toId(id);
+        const source = await this.loadProjectForAccess(db, _id, ctx);
+        const locale = localeRaw === "en" ? "en" : "ar";
+        const companyOid = source.companyId instanceof mongodb_1.ObjectId
+            ? source.companyId
+            : (0, object_id_util_1.tryParseObjectId)(source.companyId != null ? String(source.companyId) : "");
+        const nameFilter = companyOid ? { companyId: companyOid } : {};
+        const nameDocs = await db
+            .collection(collections_2.MV_PROJECTS_COLLECTION)
+            .find(nameFilter)
+            .project({ name: 1 })
+            .toArray();
+        const existingNames = nameDocs.map((doc) => String(doc.name ?? ""));
+        const newName = buildWindowsStyleCopyName(String(source.name ?? ""), existingNames, locale);
+        const companyIdStr = companyOid?.toString() ?? null;
+        const created = await this.createProject(newName, ctx, ctx.isSuperAdmin ? companyIdStr : undefined, projectReportType(source), [], []);
+        const reportData = sanitizeReportData(source.reportData);
+        const updated = await this.updateProject(created._id, ctx, { reportData });
+        return {
+            ok: true,
+            project: updated.project,
+        };
+    }
+    async cloneReportDataFromProject(targetId, sourceId, ctx) {
+        const targetTrim = String(targetId ?? "").trim();
+        const sourceTrim = String(sourceId ?? "").trim();
+        if (!targetTrim || !sourceTrim) {
+            throw new common_1.BadRequestException("sourceProjectId and target project id are required");
+        }
+        if (targetTrim === sourceTrim) {
+            throw new common_1.BadRequestException("Cannot clone report data from the same project");
+        }
+        const db = await (0, mongodb_2.getMongoDb)();
+        const source = await this.loadProjectForAccess(db, toId(sourceTrim), ctx);
+        await this.loadProjectForAccess(db, toId(targetTrim), ctx);
+        const reportData = sanitizeReportData(source.reportData);
+        if (!hasMeaningfulSanitizedReportData(reportData)) {
+            return { ok: false, empty: true, project: null };
+        }
+        const updated = await this.updateProject(targetTrim, ctx, { reportData });
+        return {
+            ok: true,
+            empty: false,
+            project: updated.project,
         };
     }
     async updateProject(id, ctx, body) {

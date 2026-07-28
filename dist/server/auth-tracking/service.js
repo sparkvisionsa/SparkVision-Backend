@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = exports.HttpError = void 0;
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = exports.HttpError = void 0;
 exports.assertCsrf = assertCsrf;
 exports.enforceGuestAccess = enforceGuestAccess;
 exports.recordActivities = recordActivities;
@@ -163,6 +163,20 @@ function requirePhoneIdentifier(value, message = "Phone number must include coun
     }
     return phone;
 }
+function isSafeValuationReportName(value) {
+    const normalized = normalizeOptionalText(value);
+    if (!normalized)
+        return false;
+    return (!/[0-9\u0660-\u0669\u06f0-\u06f9]/.test(normalized) &&
+        /[A-Za-z\u00c0-\u024f\u0600-\u06ff]/.test(normalized));
+}
+function resolveValuationReportDisplayName(user) {
+    const configured = normalizeOptionalText(user.valuationReportDisplayName);
+    if (configured && isSafeValuationReportName(configured))
+        return configured;
+    const legacyUsername = normalizeOptionalText(user.username);
+    return legacyUsername && isSafeValuationReportName(legacyUsername) ? legacyUsername : null;
+}
 function phoneIdentifierVariants(phone, raw) {
     const phoneDigits = phone.slice(1);
     const variants = new Set([phone, phoneDigits]);
@@ -304,6 +318,7 @@ function toPublicUser(user, company = null, opts) {
         username: user.username,
         email: user.email ?? null,
         phone: user.phone ?? null,
+        valuationReportDisplayName: user.valuationReportDisplayName ?? null,
         valuationReportJobTitle: user.valuationReportJobTitle ?? null,
         valuationReportMembershipNo: user.valuationReportMembershipNo ?? null,
         role: effectivePublicRole(user, opts?.membership ?? null),
@@ -1375,48 +1390,48 @@ const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS = 40_000_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "mv-word-template.docx";
-exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "تقرير تقييم.docx";
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME = "mv-word-template.docx";
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME = "نموذج تقرير الاسناد والتصفية انفاذ.docx";
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = `/files/${exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME}`;
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = `/files/${exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME}`;
+exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_URL = `/files/${exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME}`;
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = [
     exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
     exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME,
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME,
 ];
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = new Set([
     exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
     exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL,
+    exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_URL,
 ]);
 exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE = {
     fileName: exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
     fileUrl: exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
-    uploadedAt: "2026-07-04T00:00:00.000Z",
-    sizeBytes: 813_413,
+    uploadedAt: "2026-07-27T00:00:00.000Z",
+    sizeBytes: 792_172,
     bookmarkNames: [
-        "عميلغلاف",
-        "عنوان",
-        "عميل",
-        "الغرض",
-        "تاريختقييم",
-        "تاريخاتفاق",
-        "تاريخمعاينة",
-        "تاريخاصدار",
-        "عميلهوية",
-        "عنواناصل",
-        "غرضالتقييم",
-        "عميلاستخدام",
-        "فرضية",
-        "فرضية1",
-        "عنوانغ",
-        "موقع",
-        "تاريختقييمت",
-        "تاريخمعاين",
-        "قوقل",
-        "قيمة",
-        "قيمةاحرف",
-        "صورحسابات",
-        "صوراصول",
-        "مستنداتعميل",
+        "عنوان_التقرير",
+        "العميل",
+        "تاريخ_إصدار_التقرير",
+        "الرقم_المرجعي",
+        "الغرض_من_التقييم",
+        "اساس_القيمة",
+        "تاريخ_التقييم",
+        "تاريخ_الاتفاقية",
+        "تاريخ_المعاينة",
+        "أصلأصول",
+        "نشاط_الشركة",
+        "ممثل_العميل",
+        "صفتة",
+        "هوية_المستخدمين_الأخرين",
+        "الأصل_المعنية_الأصل_محل_التقييم",
+        "أساس_القيمة_المستخدم",
+        "فرضية_القيمة",
+        "المدينة",
+        "رابط_قوقل_ماب",
+        "رأي_القيمة_رقما_وكتابتا",
     ],
 };
 const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
@@ -1898,6 +1913,11 @@ function resolveCompanyReportDefaults(stored, context) {
     const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
     const wordTemplateStored = sanitizeCompanyReportWordTemplate(stored?.wordTemplate);
     const wordTemplateDefault = exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE;
+    const effectiveWordTemplate = !wordTemplateStored ||
+        (typeof wordTemplateStored.fileUrl === "string" &&
+            exports.PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(wordTemplateStored.fileUrl.trim()))
+        ? wordTemplateDefault
+        : wordTemplateStored;
     return {
         scope: {
             complianceStatement: scopeStored.complianceStatement?.trim() || seeds.scope?.complianceStatement || "",
@@ -1949,7 +1969,7 @@ function resolveCompanyReportDefaults(stored, context) {
         customSections: customSectionsStored,
         letterhead: letterheadStored,
         aiTemplates: aiTemplatesStored,
-        wordTemplate: wordTemplateStored ?? wordTemplateDefault,
+        wordTemplate: effectiveWordTemplate,
     };
 }
 const reportDefaultsImageDataUrlSchema = zod_1.z
@@ -2175,6 +2195,8 @@ function sanitizeCompanyUserJsonBody(body) {
         delete o.email;
     if (o.phone === null || o.phone === "")
         delete o.phone;
+    if (o.valuationReportDisplayName === null)
+        delete o.valuationReportDisplayName;
     if (o.valuationReportJobTitle === null)
         delete o.valuationReportJobTitle;
     if (o.valuationReportMembershipNo === null)
@@ -2194,6 +2216,7 @@ const createCompanyUserSchema = zod_1.z.object({
     role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema),
     productId: zod_1.z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    valuationReportDisplayName: zod_1.z.string().trim().max(160).refine((value) => value === "" || isSafeValuationReportName(value), { message: "Report display name must be a name, not a phone number." }).optional().or(zod_1.z.literal("")),
     valuationReportJobTitle: zod_1.z.string().trim().max(160).optional().or(zod_1.z.literal("")),
     valuationReportMembershipNo: zod_1.z.string().trim().max(80).optional().or(zod_1.z.literal("")),
     phone: zod_1.z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
@@ -2205,6 +2228,7 @@ const updateCompanyUserByCompanyAdminBodySchema = zod_1.z
     role: zod_1.z.preprocess(asTrimmedString, companyUserMemberRoleSchema).optional(),
     productId: zod_1.z.preprocess(asTrimmedString, valueTechProductIdSchema).optional(),
     email: zod_1.z.union([zod_1.z.string().email(), zod_1.z.literal("")]).optional(),
+    valuationReportDisplayName: zod_1.z.string().trim().max(160).refine((value) => value === "" || isSafeValuationReportName(value), { message: "Report display name must be a name, not a phone number." }).optional().or(zod_1.z.literal("")),
     valuationReportJobTitle: zod_1.z.string().trim().max(160).optional().or(zod_1.z.literal("")),
     valuationReportMembershipNo: zod_1.z.string().trim().max(80).optional().or(zod_1.z.literal("")),
     phone: zod_1.z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
@@ -2216,6 +2240,7 @@ const updateCompanyUserByCompanyAdminBodySchema = zod_1.z
     if (data.role === undefined &&
         data.productId === undefined &&
         data.email === undefined &&
+        data.valuationReportDisplayName === undefined &&
         data.valuationReportJobTitle === undefined &&
         data.valuationReportMembershipNo === undefined &&
         data.phone === undefined &&
@@ -2235,6 +2260,8 @@ function sanitizeCompanyUserUpdateJsonBody(body) {
         o.email = "";
     if (o.phone === null)
         o.phone = "";
+    if (o.valuationReportDisplayName === null)
+        o.valuationReportDisplayName = "";
     if (o.valuationReportJobTitle === null)
         o.valuationReportJobTitle = "";
     if (o.valuationReportMembershipNo === null)
@@ -2454,6 +2481,7 @@ async function listCompanyUsersForCompanyAdmin(request) {
                 companyId: companyId.toString(),
                 email: u.email ?? null,
                 phone: u.phone ?? null,
+                valuationReportDisplayName: u.valuationReportDisplayName ?? null,
                 valuationReportJobTitle: u.valuationReportJobTitle ?? null,
                 valuationReportMembershipNo: u.valuationReportMembershipNo ?? null,
                 productIds: membershipProductIds(memberLinks.find((m) => m.userId.equals(u._id)) ?? null, company),
@@ -2478,7 +2506,7 @@ async function resolveCompanyAdminReportIdentity(db, companyId, company) {
         return { membershipNo: null, name: null, phone: null };
     return {
         membershipNo: normalizeOptionalText(adminUser.valuationReportMembershipNo) ?? null,
-        name: normalizeOptionalText(adminUser.username) ?? null,
+        name: resolveValuationReportDisplayName(adminUser),
         phone: normalizeOptionalText(adminUser.phone) ?? null,
     };
 }
@@ -2490,9 +2518,7 @@ async function getCompanyReportDefaultsForMember(request) {
     const companyId = context.company._id;
     const company = await companies.findOne({ _id: companyId });
     const allMemberLinks = await userCompanyMemberships.find({ companyId }).toArray();
-    const memberLinks = context.companyMembership.role === "company_admin"
-        ? allMemberLinks.filter((m) => membershipHasProductAccess(m, "machine-valuation", company))
-        : allMemberLinks.filter((m) => m.userId.equals(context.user._id));
+    const memberLinks = allMemberLinks.filter((m) => membershipHasProductAccess(m, "machine-valuation", company));
     const memberIds = memberLinks.map((m) => m.userId);
     const roleByUserId = new Map(memberLinks.map((m) => [m.userId.toString(), m.role]));
     const memberUsers = await users
@@ -2500,7 +2526,8 @@ async function getCompanyReportDefaultsForMember(request) {
         .sort({ username: 1 })
         .limit(200)
         .toArray();
-    const reportSignatoryRows = memberUsers.map((u) => {
+    const reportSignatoryRows = memberUsers
+        .map((u) => {
         const memRole = roleByUserId.get(u._id.toString()) ?? "valuer";
         const roleLabel = normalizeOptionalText(u.valuationReportJobTitle) ??
             COMPANY_MEMBERSHIP_ROLE_LABELS_AR[memRole] ??
@@ -2511,12 +2538,17 @@ async function getCompanyReportDefaultsForMember(request) {
             : "";
         return {
             id: u._id.toString(),
-            name: u.username,
+            name: resolveValuationReportDisplayName(u) ?? "",
+            jobTitle: normalizeOptionalText(u.valuationReportJobTitle) ?? "",
             roleLabel,
             membershipNo: normalizeOptionalText(u.valuationReportMembershipNo) ?? "",
             signatureImageDataUrl: sig,
+            memberRole: memRole,
+            isCompanyAdmin: memRole === "company_admin",
         };
-    });
+    })
+        .sort((a, b) => Number(b.isCompanyAdmin) - Number(a.isCompanyAdmin) ||
+        a.name.localeCompare(b.name, "ar"));
     const companyAdminIdentity = await resolveCompanyAdminReportIdentity(db, companyId, company);
     return {
         context,
@@ -2692,6 +2724,7 @@ async function createCompanyUserByCompanyAdmin(request, body) {
     const username = phone;
     const usernameLower = username.toLowerCase();
     const email = normalizeOptionalText(payload.email);
+    const displayName = normalizeOptionalText(payload.valuationReportDisplayName);
     const jobTitle = normalizeOptionalText(payload.valuationReportJobTitle);
     const membershipNo = normalizeOptionalText(payload.valuationReportMembershipNo);
     const now = new Date();
@@ -2730,6 +2763,9 @@ async function createCompanyUserByCompanyAdmin(request, body) {
         const userSet = { updatedAt: now };
         if (email)
             userSet.email = email;
+        if (payload.valuationReportDisplayName !== undefined) {
+            userSet.valuationReportDisplayName = displayName ?? null;
+        }
         if (payload.valuationReportJobTitle !== undefined) {
             userSet.valuationReportJobTitle = jobTitle ?? null;
         }
@@ -2790,6 +2826,7 @@ async function createCompanyUserByCompanyAdmin(request, body) {
             passwordHash,
             ...(email ? { email } : {}),
             ...(phone ? { phone } : {}),
+            ...(displayName ? { valuationReportDisplayName: displayName } : {}),
             ...(jobTitle ? { valuationReportJobTitle: jobTitle } : {}),
             ...(membershipNo ? { valuationReportMembershipNo: membershipNo } : {}),
             role: payload.role,
@@ -2904,6 +2941,10 @@ async function updateCompanyUserByCompanyAdmin(request, userId, body) {
         userSet.usernameLower = ph.toLowerCase();
         userSet.phone = ph;
         profileSet.phone = ph;
+    }
+    if (parsed.data.valuationReportDisplayName !== undefined) {
+        userSet.valuationReportDisplayName =
+            normalizeOptionalText(parsed.data.valuationReportDisplayName) ?? null;
     }
     if (parsed.data.valuationReportJobTitle !== undefined) {
         userSet.valuationReportJobTitle = normalizeOptionalText(parsed.data.valuationReportJobTitle) ?? null;

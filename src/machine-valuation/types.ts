@@ -87,7 +87,11 @@ export interface MvProjectReportData {
   reportTitle?: string;
   valuationMethod?: string;
   valuationPurpose?: string;
+  /** الصيغة المستخدمة داخل نص التقرير عند الإشارة إلى أصل واحد أو عدة أصول. */
+  assetSingularPlural?: string;
   valuePremise?: string;
+  /** الشرح التفصيلي لفرضية القيمة المستخدم في قالب Word والتقرير. */
+  valuePremiseDefinition?: string;
   valuationBasis?: string;
   valuationBasisDefinition?: string;
   includeAssetImages?: boolean;
@@ -127,7 +131,10 @@ export interface MvProjectReportData {
   currencyLabel?: string;
   methodologyRationale?: string;
   costApproachDetails?: string;
-  /** @deprecated فريق التقييم لم يعد قسماً منفصلاً — يُستعمل صفوف المقيمين والتوقيعات من لوحة الشركة. */
+  /**
+   * معدّو هذا التقرير بالترتيب الظاهر في «رأي القيمة».
+   * الاسم/الوظيفة/العضوية لقطات احتياطية؛ الهوية والتوقيع يُحسمان من إعدادات الشركة عبر `id`.
+   */
   valuationTeam?: MvReportTeamMember[];
   /** @deprecated استخدم `generalAssumptions`. يُبقى للتوافق العكسي. */
   importantAssumptions?: string;
@@ -144,6 +151,10 @@ export interface MvProjectReportData {
   receivedClientDocumentsHtml?: string;
   /** عدد صور مستندات العميل في الصف/الارتفاع (1|2|3) لمرفق 3 وWord */
   clientDocumentsImagesPerRow?: 1 | 2 | 3;
+  /** عدد صور الأصول في صف مرفق Word (1..6). */
+  wordAssetImagesPerRow?: number;
+  /** جودة صور Word كنسبة مئوية (60..100). */
+  wordImageQuality?: number;
   /** HTML — شهادة التسجيل في بوابة «تقييم» */
   sceRegistrationCertificateHtml?: string;
   /** تعديلات نصية مباشرة داخل صفحة إعداد التقرير، بما يشمل القيم الديناميكية. */
@@ -163,11 +174,6 @@ export interface MvProjectReportData {
   reportHiddenAnchorIds?: string[];
   /** اتجاهات صفحات التقرير اليدوية، مفاتيحها anchor الصفحة أو معرف الصورة. */
   reportPageOrientations?: Record<string, MvReportPageOrientationPreference>;
-  /** معرف ملف قالب Word (.docx) المرفوع لدمج التقرير النهائي. */
-  wordReportTemplateFileId?: string;
-  wordReportTemplateFileName?: string;
-  wordReportTemplatePlaceholders?: string[];
-  wordReportTemplateAnalyzedAt?: string;
 }
 
 export interface MvProjectLocation {
