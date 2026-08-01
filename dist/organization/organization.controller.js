@@ -115,6 +115,26 @@ let OrganizationController = class OrganizationController {
         (0, context_1.applyContextCookies)(res, result.context);
         return result.payload;
     }
+    async createReportSignatory(req, res, body) {
+        const result = await (0, service_1.createCompanyReportOnlySignatory)(req, body ?? req.body);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
+    async patchReportSignatory(req, res, signatoryId, body) {
+        const result = await (0, service_1.updateCompanyReportOnlySignatory)(req, signatoryId, body ?? req.body);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
+    async patchReportSignatorySignature(req, res, signatoryId, body) {
+        const result = await (0, service_1.updateCompanyReportOnlySignatorySignature)(req, signatoryId, body ?? req.body);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
+    async deleteReportSignatory(req, res, signatoryId) {
+        const result = await (0, service_1.deleteCompanyReportOnlySignatory)(req, signatoryId);
+        (0, context_1.applyContextCookies)(res, result.context);
+        return result.payload;
+    }
 };
 exports.OrganizationController = OrganizationController;
 __decorate([
@@ -259,6 +279,44 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, String]),
     __metadata("design:returntype", Promise)
 ], OrganizationController.prototype, "deleteCompanyUserAsCompanyAdmin", null);
+__decorate([
+    (0, common_1.Post)("company/report-signatories"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, Object]),
+    __metadata("design:returntype", Promise)
+], OrganizationController.prototype, "createReportSignatory", null);
+__decorate([
+    (0, common_1.Patch)("company/report-signatories/:signatoryId"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("signatoryId")),
+    __param(3, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String, Object]),
+    __metadata("design:returntype", Promise)
+], OrganizationController.prototype, "patchReportSignatory", null);
+__decorate([
+    (0, common_1.Patch)("company/report-signatories/:signatoryId/signature"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("signatoryId")),
+    __param(3, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String, Object]),
+    __metadata("design:returntype", Promise)
+], OrganizationController.prototype, "patchReportSignatorySignature", null);
+__decorate([
+    (0, common_1.Delete)("company/report-signatories/:signatoryId"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
+    __param(2, (0, common_1.Param)("signatoryId")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String]),
+    __metadata("design:returntype", Promise)
+], OrganizationController.prototype, "deleteReportSignatory", null);
 exports.OrganizationController = OrganizationController = __decorate([
     (0, common_1.Controller)()
 ], OrganizationController);

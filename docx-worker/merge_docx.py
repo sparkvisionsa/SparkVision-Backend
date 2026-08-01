@@ -17,8 +17,9 @@ import re
 import sys
 import traceback
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from typing import Any, Union
+from typing import Any, Callable, TypeVar, Union
 
 from lxml import etree
 from PIL import Image
@@ -112,6 +113,7 @@ REPORT_COVER_FOOTER_MARKERS = (
     "تاريخ التقرير",
     "تاريخ_إصدار_التقرير",
     "تاريخ إصدار التقرير",
+    "المقيم المعتمد",
 )
 
 VISIBLE_VARIABLE_RE = re.compile(
@@ -153,6 +155,106 @@ VALUATION_IMAGE_JPEG_QUALITY = 96
 DOCUMENT_IMAGE_JPEG_QUALITY = 92
 ASSET_IMAGE_JPEG_QUALITY = 80
 
+# توازي تجهيز الصور (Pillow) قبل الإدراج التسلسلي في python-docx.
+_IMAGE_PREP_T = TypeVar("_IMAGE_PREP_T")
+
+
+def image_prep_worker_count(job_count: int = 1) -> int:
+    """توازي أعلى لتجهيز الصور — Nest يجهّز JPEG آمناً مسبقاً فالعمل أخف."""
+    if job_count <= 1:
+        return 1
+    cpus = os.cpu_count() or 2
+    return max(1, min(10, cpus * 2, job_count))
+
+
+def map_image_prep(
+    items: list[Any],
+    worker: Callable[[Any], _IMAGE_PREP_T],
+) -> list[_IMAGE_PREP_T | None]:
+    """نفّذ تجهيز الصور بالتوازي مع الحفاظ على الترتيب؛ الإخفاق يعيد None للعنصر."""
+    if not items:
+        return []
+    workers = image_prep_worker_count(len(items))
+    if workers == 1:
+        out: list[_IMAGE_PREP_T | None] = []
+        for item in items:
+            try:
+                out.append(worker(item))
+            except Exception as exc:
+                log_exception("image prep skipped", exc)
+                out.append(None)
+        return out
+    results: list[_IMAGE_PREP_T | None] = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(worker, item): idx for idx, item in enumerate(items)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as exc:
+                log_exception("image prep skipped", exc)
+                results[idx] = None
+    return results
+
+
+def jpeg_is_docx_safe_baseline(data: bytes) -> bool:
+    """
+    JPEG يقبله python-docx فعلياً:
+    - أساسي (SOF0) غير تدريجي
+    - ومعه APP0/JFIF أو APP1/Exif
+
+    ملفات sharp الافتراضية غالباً SOI+DQT بدون JFIF/Exif → UnrecognizedImageError.
+    """
+    if not data or len(data) < 4 or data[0:2] != b"\xff\xd8":
+        return False
+    i = 2
+    found_sof0 = False
+    found_identity_app = False
+    length = len(data)
+    while i < length - 1:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        while i < length and data[i] == 0xFF:
+            i += 1
+        if i >= length:
+            break
+        marker = data[i]
+        i += 1
+        if marker in (0xD8, 0xD9):
+            continue
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            continue
+        if i + 1 >= length:
+            break
+        seg_len = (data[i] << 8) | data[i + 1]
+        if seg_len < 2 or i + seg_len > length:
+            break
+        payload = data[i + 2 : i + seg_len]
+        if marker == 0xC0:  # SOF0 baseline
+            found_sof0 = True
+        elif marker in (
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        ):
+            return False
+        elif marker == 0xE0 and payload.startswith(b"JFIF\x00"):
+            found_identity_app = True
+        elif marker == 0xE1 and payload.startswith(b"Exif\x00\x00"):
+            found_identity_app = True
+        i += seg_len
+    return found_sof0 and found_identity_app
+
 
 def resolve_image_bytes(source: ImageSource) -> bytes:
     """حمّل بايتات صورة من مسار ملف أو من bytes جاهزة — بدون الإبقاء على كل الصور في الذاكرة."""
@@ -187,29 +289,30 @@ def collect_image_sources(payload: dict[str, Any], paths_key: str, b64_key: str)
 
 
 def adaptive_asset_max_side(count: int) -> int:
+    # يطابق أبعاد Nest (word-template-merge.service adaptiveAssetImageSettings)
     if count <= 80:
-        return ASSET_IMAGE_MAX_SQUARE_PX
+        return 1000
     if count <= 250:
-        return 900
+        return 820
     if count <= 800:
-        return 780
+        return 720
     if count <= 2000:
-        return 680
-    return 600
+        return 640
+    return 560
 
 
 def adaptive_asset_quality(count: int, requested_quality: int) -> int:
     """اعتبر اختيار المستخدم سقفاً، وخفّضه فقط للتقارير ذات الصور الكثيرة جداً."""
     if count <= 80:
-        ceiling = 95
+        ceiling = 92
     elif count <= 250:
-        ceiling = 90
+        ceiling = 86
     elif count <= 800:
-        ceiling = 84
+        ceiling = 80
     elif count <= 2000:
-        ceiling = 78
+        ceiling = 76
     else:
-        ceiling = 72
+        ceiling = 70
     return min(requested_quality, ceiling)
 
 
@@ -242,14 +345,32 @@ MAX_DRAWING_HEIGHT_EMU = int(20 * EMU_PER_INCH)
 
 def ensure_jpeg_bytes(img_bytes: bytes, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
     """أعد ترميز أي صورة إلى JPEG/RGB نظيف قبل الإدراج في Word."""
+    prepared, _w, _h = ensure_jpeg_bytes_with_size(img_bytes, quality)
+    return prepared
+
+
+def ensure_jpeg_bytes_with_size(
+    img_bytes: bytes,
+    quality: int = DOCUMENT_IMAGE_JPEG_QUALITY,
+) -> tuple[bytes, int, int]:
+    """مثل ensure_jpeg_bytes مع إرجاع الأبعاد لتجنّب فتح الصورة مرتين."""
     try:
         with Image.open(io.BytesIO(img_bytes)) as img:
+            width, height = img.size
+            if (
+                img.format == "JPEG"
+                and width > 0
+                and height > 0
+                and jpeg_is_docx_safe_baseline(img_bytes)
+            ):
+                return img_bytes, width, height
             img.load()
             rgb = img.convert("RGB") if img.mode != "RGB" else img
-            return _save_print_jpeg(rgb, quality)
+            prepared = _save_print_jpeg(rgb, quality)
+            return prepared, width, height
     except Exception as exc:
         log_exception("ensure_jpeg_bytes failed", exc)
-        return img_bytes
+        return img_bytes, 0, 0
 
 
 def normalize_heading_text(name: str) -> str:
@@ -907,15 +1028,40 @@ def placeholder_field_key(name: str) -> str | None:
     return None
 
 
+_PLACEHOLDER_DEFAULTS = {
+    "assetSingularPlural": "أصل/أصول",
+    "assetSubjectDescription": "الات ومعدات واجهزة متنوعه",
+}
+
+
 def placeholder_value(name: str, text_values: dict[str, str]) -> tuple[bool, str]:
     field = placeholder_field_key(name)
     if field is None:
         return False, ""
-    return True, sanitize_xml_text(str(text_values.get(field, "")), strip=False)
+    raw = str(text_values.get(field, "") or "").strip()
+    if not raw:
+        raw = _PLACEHOLDER_DEFAULTS.get(field, "")
+    # لا تمسح العنوان في الفهرس/المتن بقيمة فارغة لمتغير معروف
+    if not raw and field in _PLACEHOLDER_DEFAULTS:
+        raw = _PLACEHOLDER_DEFAULTS[field]
+    return True, sanitize_xml_text(raw, strip=False)
 
 
 def paragraph_has_nested_story(para: etree._Element) -> bool:
     return any(candidate is not para for candidate in para.iter(w("p")))
+
+
+def paragraph_is_toc_or_pageref(para: etree._Element) -> bool:
+    """فقرات الفهرس/PAGEREF — لا تُسطَّح حقول MERGEFIELD داخلها حتى لا تُمسح العناوين."""
+    for instr in para.iter(w("instrText")):
+        text = instr.text or ""
+        if re.search(r"\bPAGEREF\b|\bTOC\b", text, re.IGNORECASE):
+            return True
+    # نمط صفوف الفهرس: 8.0… أو 19.1…
+    visible = "".join(node.text or "" for node in para.iter(w("t")))
+    if re.match(r"^\d+\.\d*", visible.strip()):
+        return True
+    return False
 
 
 def element_field_char_types(element: etree._Element) -> list[str]:
@@ -1058,6 +1204,28 @@ def replace_text_range_in_selected_node(
     return touched and inserted
 
 
+def _paragraph_own_text_nodes_with_offsets(
+    para: etree._Element,
+) -> tuple[list[tuple[etree._Element, int, int]], str]:
+    """عقد w:t التابعة لهذه الفقرة فقط (يشمل روابط الفهرس، ويستثني فقرات مربعات النص المتداخلة)."""
+    nodes: list[tuple[etree._Element, int, int]] = []
+    parts: list[str] = []
+    offset = 0
+    for node in para.iter(w("t")):
+        owning = node.getparent()
+        while owning is not None and owning.tag != w("p"):
+            owning = owning.getparent()
+        if owning is not para:
+            continue
+        text = sanitize_xml_text(node.text or "", strip=False)
+        node.text = text
+        start = offset
+        offset += len(text)
+        nodes.append((node, start, offset))
+        parts.append(text)
+    return nodes, "".join(parts)
+
+
 def replace_visible_variables(
     root: etree._Element,
     text_values: dict[str, str],
@@ -1065,14 +1233,14 @@ def replace_visible_variables(
     """
     استبدل حصرياً المتغيرات المرئية «name» أو <<name>>، حتى عند انقسامها عبر runs.
 
-    لا تُقرأ تعليمات حقول Word لتحديد القيمة.
+    يشمل نتائج الفهرس/الروابط. لا تُقرأ تعليمات حقول Word لتحديد القيمة.
     """
     found = 0
     filled = 0
     for para in root.iter(w("p")):
-        if paragraph_has_nested_story(para):
+        nodes, full_text = _paragraph_own_text_nodes_with_offsets(para)
+        if not nodes:
             continue
-        nodes, full_text = text_nodes_with_offsets(para)
         matches = list(VISIBLE_VARIABLE_RE.finditer(full_text))
         found += len(matches)
         for match in reversed(matches):
@@ -1094,7 +1262,7 @@ def replace_visible_variables(
             ):
                 if value.strip():
                     filled += 1
-                nodes, full_text = text_nodes_with_offsets(para)
+                nodes, full_text = _paragraph_own_text_nodes_with_offsets(para)
     return found, filled
 
 
@@ -1104,10 +1272,12 @@ def flatten_mail_merge_fields(root: etree._Element) -> int:
 
     نحتفظ بعناصر النتيجة الظاهرة كما هي ونحذف begin/instrText/separate/end؛
     اسم MERGEFIELD لا يشارك مطلقاً في اختيار قيمة المتغير.
+
+    مهم: لا نُسطّح داخل صفوف الفهرس (PAGEREF) — كان يمسح عناوين 8 و19.
     """
     flattened = 0
     for para in list(root.iter(w("p"))):
-        if paragraph_has_nested_story(para):
+        if paragraph_has_nested_story(para) or paragraph_is_toc_or_pageref(para):
             continue
         idx = 0
         while True:
@@ -1128,6 +1298,10 @@ def flatten_mail_merge_fields(root: etree._Element) -> int:
                 for node in element.iter(w("instrText"))
             )
             if re.search(r"\bMERGEFIELD\b", instruction, re.IGNORECASE) is None:
+                idx = end_idx + 1
+                continue
+            # لا تُسطّح MERGEFIELD متداخل مع حقول أخرى في نفس التسلسل
+            if re.search(r"\bPAGEREF\b|\bHYPERLINK\b|\bTOC\b", instruction, re.IGNORECASE):
                 idx = end_idx + 1
                 continue
 
@@ -1436,7 +1610,7 @@ def apply_visible_variable_values(
 
 
 def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALITY) -> bytes:
-    """JPEG أساسي (baseline) — python-docx يرفض غالباً Progressive/mozjpeg المعقّد."""
+    """JPEG أساسي JFIF — python-docx يقبل JFIF/Exif فقط ويرفض مخرجات sharp الخام."""
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     elif img.mode == "L":
@@ -1449,6 +1623,7 @@ def _save_print_jpeg(img: Image.Image, quality: int = DOCUMENT_IMAGE_JPEG_QUALIT
         optimize=False,
         progressive=False,
         subsampling=0,  # 4:4:4 — أوضح للنصوص والجداول
+        dpi=(96, 96),
     )
     return out.getvalue()
 
@@ -1554,7 +1729,11 @@ def write_docx_zip(
                 data = zin.read(fname)
             else:
                 continue
-            compress = zipfile.ZIP_STORED if fname == "mimetype" else zipfile.ZIP_DEFLATED
+            compress = (
+                zipfile.ZIP_STORED
+                if fname == "mimetype" or fname.startswith("word/media/")
+                else zipfile.ZIP_DEFLATED
+            )
             zi = zipfile.ZipInfo(fname)
             zi.compress_type = compress
             zout.writestr(zi, data)
@@ -1607,36 +1786,48 @@ def downscale_jpeg_bytes(
 def prepare_valuation_image_bytes(img_bytes: bytes) -> tuple[bytes, int, int]:
     """
     إعداد صورة حسابات قيمة للطباعة:
-    - دائماً JPEG أساسي عبر Pillow (متوافق مع python-docx)
-    - تخطي ترميز sharp كان يسبب UnrecognizedImageError ثم PNG ضخم بطيء جداً
+    - إن كانت JPEG أساسياً آمناً وضمن الحدود (بعد تجهيز Nest/sharp) نمرّرها كما هي
+    - وإلا: تصغير + JPEG أساسي عبر Pillow
     يعيد (bytes, width_px, height_px)
     """
     if not img_bytes or len(img_bytes) < 32:
         raise ValueError(f"valuation image empty or too small ({0 if not img_bytes else len(img_bytes)} bytes)")
 
     try:
-        img = Image.open(io.BytesIO(img_bytes))
-        img.load()
-        img = img.convert("RGB")
-        width, height = img.size
-        if width <= 0 or height <= 0:
-            raise ValueError(f"invalid valuation size {width}x{height}")
-        scale = 1.0
-        longest = max(width, height)
-        if longest > VALUATION_IMAGE_MAX_DIMENSION_PX:
-            scale = min(scale, VALUATION_IMAGE_MAX_DIMENSION_PX / longest)
-        if width > 4800:
-            scale = min(scale, 4800 / width)
-        if height > 14000:
-            scale = min(scale, 14000 / height)
-        if scale < 1.0:
-            width = max(1, int(width * scale))
-            height = max(1, int(height * scale))
-            img = img.resize((width, height), Image.LANCZOS)
-        prepared = _save_print_jpeg(img, VALUATION_IMAGE_JPEG_QUALITY)
-        if not prepared or len(prepared) < 32:
-            raise ValueError("valuation image re-encode produced empty output")
-        return prepared, width, height
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            width, height = img.size
+            if width <= 0 or height <= 0:
+                raise ValueError(f"invalid valuation size {width}x{height}")
+            within_limits = (
+                max(width, height) <= VALUATION_IMAGE_MAX_DIMENSION_PX
+                and width <= 4800
+                and height <= 14000
+            )
+            if (
+                within_limits
+                and img.format == "JPEG"
+                and jpeg_is_docx_safe_baseline(img_bytes)
+            ):
+                return img_bytes, width, height
+
+            img.load()
+            work = img.convert("RGB") if img.mode != "RGB" else img
+            scale = 1.0
+            longest = max(width, height)
+            if longest > VALUATION_IMAGE_MAX_DIMENSION_PX:
+                scale = min(scale, VALUATION_IMAGE_MAX_DIMENSION_PX / longest)
+            if width > 4800:
+                scale = min(scale, 4800 / width)
+            if height > 14000:
+                scale = min(scale, 14000 / height)
+            if scale < 1.0:
+                width = max(1, int(width * scale))
+                height = max(1, int(height * scale))
+                work = work.resize((width, height), Image.LANCZOS)
+            prepared = _save_print_jpeg(work, VALUATION_IMAGE_JPEG_QUALITY)
+            if not prepared or len(prepared) < 32:
+                raise ValueError("valuation image re-encode produced empty output")
+            return prepared, width, height
     except Exception:
         # مسار احتياطي بنفس الضمانات
         prepared = downscale_jpeg_bytes(
@@ -1741,30 +1932,34 @@ def stretch_to_fill_canvas_jpeg_bytes(
     توحيد مساحة صور الأصول بدون اقتطاع وبدون هوامش داخلية:
     - الصورة كاملة تُمطَّط لتملأ الخلية 100%
     - كل الخلايا بنفس المقاس
-    - المصدر مضغوط مسبقاً من Node؛ إعادة عيّنة واحدة عند الحاجة فقط
+    - إن جهّز Nest اللوحة مسبقاً بـ JPEG أساسي آمناً نمرّر البايتات دون إعادة ترميز
     """
-    try:
-        img = Image.open(io.BytesIO(img_bytes))
-        img.load()
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-    except Exception:
-        return img_bytes
-
-    src_w, src_h = img.size
-    if src_w <= 0 or src_h <= 0:
-        return img_bytes
-
     canvas_w, canvas_h = _canvas_pixel_size_for_cell(
         target_width_emu,
         target_height_emu,
         max_side_px,
     )
-    # إن طابقت الأبعاد اللوحة: ترميز Pillow آمن لـ python-docx فقط (بدون إعادة تحجيم)
-    if src_w == canvas_w and src_h == canvas_h:
-        return _save_print_jpeg(img, quality)
-    stretched = _high_quality_stretch(img, canvas_w, canvas_h)
-    return _save_print_jpeg(stretched, quality)
+    try:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            src_w, src_h = img.size
+            if src_w <= 0 or src_h <= 0:
+                return img_bytes
+            # مسار سريع: المقاس مطابق + JPEG أساسي متوافق مع Word
+            if (
+                src_w == canvas_w
+                and src_h == canvas_h
+                and img.format == "JPEG"
+                and jpeg_is_docx_safe_baseline(img_bytes)
+            ):
+                return img_bytes
+            img.load()
+            work = img.convert("RGB") if img.mode != "RGB" else img
+            if src_w == canvas_w and src_h == canvas_h:
+                return _save_print_jpeg(work, quality)
+            stretched = _high_quality_stretch(work, canvas_w, canvas_h)
+            return _save_print_jpeg(stretched, quality)
+    except Exception:
+        return img_bytes
 
 
 # توافق مع الاستدعاءات/الاختبارات القديمة إن وُجدت
@@ -2388,6 +2583,39 @@ def make_docx_image_table_element(
     physical_side_margin = max(0, int(page_width * (1 - width_ratio) / 2))
     set_docx_table_indent(table, physical_side_margin - left_margin)
 
+    max_picture_height = min(image_emu, MAX_DRAWING_HEIGHT_EMU)
+
+    def _prep_table_image(source: ImageSource) -> tuple[bytes, int, int] | None:
+        raw = resolve_image_bytes(source)
+        if contain_images:
+            prepared, width_px, height_px = ensure_jpeg_bytes_with_size(
+                raw, DOCUMENT_IMAGE_JPEG_QUALITY
+            )
+            fit_w, fit_h = scaled_image_size_for_width_only(
+                prepared,
+                cell_width_emu,
+                max_picture_height,
+                width_px=width_px if width_px > 0 else None,
+                height_px=height_px if height_px > 0 else None,
+            )
+            if fit_w <= 0 or fit_h <= 0:
+                raise ValueError(f"invalid fit size {fit_w}x{fit_h}")
+            return prepared, fit_w, fit_h
+        stretched = stretch_to_fill_canvas_jpeg_bytes(
+            raw,
+            cell_width_emu,
+            image_emu,
+            max_side_px=asset_max_side_px,
+            quality=ASSET_IMAGE_JPEG_QUALITY,
+        )
+        return (
+            stretched,
+            max(1, cell_width_emu),
+            max(1, max_picture_height),
+        )
+
+    prepared_images = map_image_prep(list(images), _prep_table_image)
+
     inserted = 0
     img_index = 0
     for row in table.rows:
@@ -2410,47 +2638,38 @@ def make_docx_image_table_element(
             para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(0)
             para.paragraph_format.space_after = Pt(0)
-            if img_index >= len(images):
+            if img_index >= len(prepared_images):
                 continue
-            img_bytes: bytes | None = None
+            prepared = prepared_images[img_index]
+            img_index += 1
+            if prepared is None:
+                continue
+            img_bytes, pic_w, pic_h = prepared
             try:
-                # المصدر جاهز JPEG من Node — لا تعيد الترميز مرتين قبل الإدراج
-                img_bytes = resolve_image_bytes(images[img_index])
-                if contain_images:
-                    # مستندات العميل: ترميز Pillow واحد متوافق مع python-docx
-                    img_bytes = ensure_jpeg_bytes(img_bytes, DOCUMENT_IMAGE_JPEG_QUALITY)
-                    fit_w, fit_h = scaled_image_size_for_width(
-                        img_bytes,
-                        cell_width_emu,
-                        min(image_emu, MAX_DRAWING_HEIGHT_EMU),
-                    )
-                    if fit_w <= 0 or fit_h <= 0:
-                        raise ValueError(f"invalid fit size {fit_w}x{fit_h}")
+                try:
                     para.add_run().add_picture(
                         io.BytesIO(img_bytes),
-                        width=Emu(fit_w),
-                        height=Emu(fit_h),
+                        width=Emu(pic_w),
+                        height=Emu(pic_h),
                     )
-                else:
-                    # صور الأصول: تمطيط لملء الخلية (يعيد الترميز مرة واحدة فقط)
-                    stretched = stretch_to_fill_canvas_jpeg_bytes(
-                        img_bytes,
-                        cell_width_emu,
-                        image_emu,
-                        max_side_px=asset_max_side_px,
-                        quality=ASSET_IMAGE_JPEG_QUALITY,
-                    )
+                except Exception as jpeg_exc:
+                    log_exception("image JPEG insert failed, trying PNG", jpeg_exc)
+                    for run in list(para.runs):
+                        el = run._element
+                        parent = el.getparent()
+                        if parent is not None:
+                            parent.remove(el)
+                    png_bytes = prepare_valuation_image_png_fallback(img_bytes)
                     para.add_run().add_picture(
-                        io.BytesIO(stretched),
-                        width=Emu(max(1, cell_width_emu)),
-                        height=Emu(max(1, min(image_emu, MAX_DRAWING_HEIGHT_EMU))),
+                        io.BytesIO(png_bytes),
+                        width=Emu(pic_w),
+                        height=Emu(pic_h),
                     )
                 inserted += 1
             except Exception as exc:
                 log_exception("image insert skipped", exc)
             finally:
-                img_bytes = None
-            img_index += 1
+                prepared_images[img_index - 1] = None
 
     # python-docx leaves the table attached to the document body; detach before insertion.
     return detach_docx_body_element(table._tbl), inserted
@@ -2458,7 +2677,7 @@ def make_docx_image_table_element(
 
 def make_docx_valuation_image_element(
     doc,
-    image: ImageSource,
+    image: ImageSource | tuple[bytes, int, int],
     section_metrics: tuple[int, int, int, int, int, int] | None = None,
     *,
     layout_cache: dict[str, Any] | None = None,
@@ -2466,11 +2685,13 @@ def make_docx_valuation_image_element(
     from docx.shared import Emu, Pt
 
     p = doc.add_paragraph()
-    raw = resolve_image_bytes(image)
     try:
-        # بكسل عالي + JPEG Pillow أساسي (مرة واحدة) — بدون مسار PNG الثقيل
-        img_bytes, width_px, height_px = prepare_valuation_image_bytes(raw)
-        raw = None  # حرر مبكراً
+        if isinstance(image, tuple) and len(image) == 3:
+            img_bytes, width_px, height_px = image
+        else:
+            raw = resolve_image_bytes(image)  # type: ignore[arg-type]
+            img_bytes, width_px, height_px = prepare_valuation_image_bytes(raw)
+            raw = None  # حرر مبكراً
         cache = layout_cache if layout_cache is not None else {}
         if "target_width" not in cache:
             target_width, indent_left, indent_right = document_valuation_image_layout_emu(
@@ -2530,14 +2751,24 @@ def find_body_heading_index(
         normalize_heading_text(heading): heading
         for heading in headings
     }
+    prefix_hit: tuple[int, str] | None = None
     for idx in range(len(children) - 1, -1, -1):
         child = children[idx]
         if etree.QName(child).localname != "p":
             continue
         normalized = normalize_heading_text(block_text(child))
         for key, heading in wanted.items():
-            if normalized == key or normalized.startswith(key):
+            if normalized == key:
                 return idx, heading
+            if normalized.startswith(key):
+                # تجاهل صفوف الفهرس التي تلصق رقم الصفحة مثل «...منالعميل40»
+                rest = normalized[len(key) :]
+                if rest.isdigit():
+                    continue
+                if prefix_hit is None:
+                    prefix_hit = (idx, heading)
+    if prefix_hit is not None:
+        return prefix_hit[0], prefix_hit[1]
     return None, None
 
 
@@ -2595,17 +2826,28 @@ def insert_image_grid_pages(
 
     if layout == "valuation_pages":
         layout_cache: dict[str, Any] = {}
-        for image in images:
-            image_elem, count = make_docx_valuation_image_element(
-                doc, image, section_metrics, layout_cache=layout_cache
-            )
-            if count <= 0:
-                continue
-            if inserted > 0:
-                insert_elem(make_docx_page_break_element(doc))
-            insert_elem(image_elem)
-            inserted += count
-            if inserted % 40 == 0:
+
+        def _prep_valuation(source: ImageSource) -> tuple[bytes, int, int]:
+            return prepare_valuation_image_bytes(resolve_image_bytes(source))
+
+        # جهّز الصور على دفعات متوازية ثم أدرج تسلسلياً (docx ليس آمناً للتوازي).
+        batch_size = 24
+        for batch_start in range(0, len(images), batch_size):
+            batch = images[batch_start : batch_start + batch_size]
+            prepared_batch = map_image_prep(batch, _prep_valuation)
+            for prepared in prepared_batch:
+                if prepared is None:
+                    continue
+                image_elem, count = make_docx_valuation_image_element(
+                    doc, prepared, section_metrics, layout_cache=layout_cache
+                )
+                if count <= 0:
+                    continue
+                if inserted > 0:
+                    insert_elem(make_docx_page_break_element(doc))
+                insert_elem(image_elem)
+                inserted += count
+            if (batch_start // batch_size) % 2 == 1:
                 gc.collect()
         return inserted, insert_at
 

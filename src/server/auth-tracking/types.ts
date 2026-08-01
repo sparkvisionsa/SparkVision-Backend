@@ -28,8 +28,25 @@ export interface CompanyReportSignatoryRow {
   roleLabel: string;
   membershipNo?: string;
   signatureImageDataUrl: string;
-  memberRole: CompanyMembershipRole;
+  /** `report_only` = معدّ تقرير بدون حساب دخول. */
+  memberRole: CompanyMembershipRole | "report_only";
   isCompanyAdmin: boolean;
+  /** true عندما يكون السجل معدّاً للتقارير فقط (بدون مستخدم نظام). */
+  isReportOnly?: boolean;
+}
+
+/**
+ * معدّ تقرير يُضاف من تاب «المقيمون والتوقيعات» بدون حساب دخول.
+ * يُخزَّن على مستند الشركة ولا يظهر في مستخدمي الشركة.
+ */
+export interface CompanyReportOnlySignatory {
+  id: string;
+  name: string;
+  jobTitle?: string;
+  membershipNo?: string;
+  signatureImageDataUrl?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**
@@ -189,8 +206,13 @@ export interface CompanyDoc {
   adminUserId?: ObjectId;
   /** شعار الشركة كـ data URL (يفضّل PNG). */
   logoDataUrl?: string | null;
-  /** المقيمون والتوقيعات الافتراضية لمشاريع التقييم. */
+  /**
+   * @deprecated لم يعد يُستخدم كمصدر؛ القائمة تُبنى ديناميكياً من الأعضاء + reportOnlySignatories.
+   * يُبقى للتوافق مع بيانات قديمة إن وُجدت.
+   */
   reportSignatoryRows?: CompanyReportSignatoryRow[];
+  /** معدّو تقارير بدون حساب دخول (يظهرون في المقيمون والتوقيعات + اختيار معدّي التقرير فقط). */
+  reportOnlySignatories?: CompanyReportOnlySignatory[];
   /** قوالب أقسام التقرير النهائي الافتراضية (نطاق العمل، المنهجية، الافتراضات). */
   reportDefaults?: CompanyReportDefaults;
   /**

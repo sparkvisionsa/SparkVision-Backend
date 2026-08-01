@@ -1,22 +1,32 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine AS deps
+FROM node:20-bookworm-slim AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PYTHONDONTWRITEBYTECODE=1
-RUN apk add --no-cache python3 py3-pip py3-lxml py3-pillow \
-  && python3 -m pip install --no-cache-dir --break-system-packages "python-docx==1.2.0"
+# LibreOffice يحوّل Word→PDF بجودة صور عالية؛ python-docx لدمج القالب
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-lxml \
+    python3-pil \
+    libreoffice-writer-nogui \
+    fonts-dejavu-core \
+    fonts-noto-core \
+  && python3 -m pip install --no-cache-dir --break-system-packages "python-docx==1.2.0" \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/assets ./assets

@@ -41,6 +41,8 @@ import type {
   CompanyMembershipRole,
   CompanyReportDefaults,
   CompanyReportLetterheadTemplate,
+  CompanyReportOnlySignatory,
+  CompanyReportSignatoryRow,
   CompanyReportWordTemplate,
   GuestAccessStatus,
   PublicUser,
@@ -2617,6 +2619,112 @@ const updateMemberSignatureBodySchema = z.object({
   ]),
 });
 
+const REPORT_ONLY_SIGNATORY_ID_PREFIX = "ros_";
+
+function newReportOnlySignatoryId(): string {
+  return `${REPORT_ONLY_SIGNATORY_ID_PREFIX}${randomId()}`;
+}
+
+function isReportOnlySignatoryId(id: string): boolean {
+  return id.startsWith(REPORT_ONLY_SIGNATORY_ID_PREFIX);
+}
+
+function normalizeReportOnlySignatories(raw: unknown): CompanyReportOnlySignatory[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CompanyReportOnlySignatory[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const name = normalizeOptionalText(typeof row.name === "string" ? row.name : null) ?? "";
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    const signature =
+      typeof row.signatureImageDataUrl === "string" &&
+      row.signatureImageDataUrl.startsWith("data:image/")
+        ? row.signatureImageDataUrl
+        : null;
+    out.push({
+      id,
+      name,
+      jobTitle: normalizeOptionalText(typeof row.jobTitle === "string" ? row.jobTitle : null) ?? undefined,
+      membershipNo:
+        normalizeOptionalText(typeof row.membershipNo === "string" ? row.membershipNo : null) ??
+        undefined,
+      signatureImageDataUrl: signature,
+      createdAt:
+        typeof row.createdAt === "string" && row.createdAt.trim()
+          ? row.createdAt
+          : new Date(0).toISOString(),
+      updatedAt:
+        typeof row.updatedAt === "string" && row.updatedAt.trim()
+          ? row.updatedAt
+          : new Date(0).toISOString(),
+    });
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+
+function reportOnlySignatoryToApiRow(row: CompanyReportOnlySignatory): CompanyReportSignatoryRow {
+  const jobTitle = normalizeOptionalText(row.jobTitle) ?? "";
+  return {
+    id: row.id,
+    name: row.name,
+    jobTitle,
+    roleLabel: jobTitle || "معدّ تقرير",
+    membershipNo: normalizeOptionalText(row.membershipNo) ?? "",
+    signatureImageDataUrl:
+      typeof row.signatureImageDataUrl === "string" &&
+      row.signatureImageDataUrl.startsWith("data:image/")
+        ? row.signatureImageDataUrl
+        : "",
+    memberRole: "report_only",
+    isCompanyAdmin: false,
+    isReportOnly: true,
+  };
+}
+
+const createReportOnlySignatorySchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2)
+    .max(160)
+    .refine((value) => isSafeValuationReportName(value), {
+      message: "Report display name must be a name, not a phone number.",
+    }),
+  jobTitle: z.string().trim().max(160).optional().or(z.literal("")),
+  membershipNo: z.string().trim().max(80).optional().or(z.literal("")),
+});
+
+const updateReportOnlySignatorySchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2)
+    .max(160)
+    .refine((value) => isSafeValuationReportName(value), {
+      message: "Report display name must be a name, not a phone number.",
+    })
+    .optional(),
+  jobTitle: z.string().trim().max(160).optional().or(z.literal("")),
+  membershipNo: z.string().trim().max(80).optional().or(z.literal("")),
+});
+
+const updateReportOnlySignatorySignatureSchema = z.object({
+  signatureImageDataUrl: z.union([
+    z
+      .string()
+      .max(700_000)
+      .refine((s) => s === "" || s.startsWith("data:image/"), {
+        message: "signature must be data URL or empty",
+      }),
+    z.null(),
+  ]),
+});
+
 const valueTechProductIdSchema = z.enum([
   "real-estate-valuation",
   "machine-valuation",
@@ -3006,6 +3114,18 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
             ? u.valuationReportSignatureDataUrl
             : null,
       })),
+      reportOnlySignatories: normalizeReportOnlySignatories(company?.reportOnlySignatories).map(
+        (row) => ({
+          id: row.id,
+          name: row.name,
+          jobTitle: row.jobTitle ?? "",
+          membershipNo: row.membershipNo ?? "",
+          signatureImageDataUrl: row.signatureImageDataUrl ?? null,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          isReportOnly: true as const,
+        }),
+      ),
     },
   };
 }
@@ -3052,7 +3172,7 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
     .limit(200)
     .toArray();
 
-  const reportSignatoryRows = memberUsers
+  const memberSignatoryRows: CompanyReportSignatoryRow[] = memberUsers
     .map((u) => {
       const memRole = roleByUserId.get(u._id.toString()) ?? "valuer";
       const roleLabel =
@@ -3073,6 +3193,7 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
         signatureImageDataUrl: sig,
         memberRole: memRole,
         isCompanyAdmin: memRole === "company_admin",
+        isReportOnly: false,
       };
     })
     .sort(
@@ -3080,6 +3201,12 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
         Number(b.isCompanyAdmin) - Number(a.isCompanyAdmin) ||
         a.name.localeCompare(b.name, "ar"),
     );
+
+  const reportOnlyRows = normalizeReportOnlySignatories(company?.reportOnlySignatories)
+    .map(reportOnlySignatoryToApiRow)
+    .sort((a, b) => a.name.localeCompare(b.name, "ar"));
+
+  const reportSignatoryRows = [...memberSignatoryRows, ...reportOnlyRows];
 
   const companyAdminIdentity = await resolveCompanyAdminReportIdentity(db, companyId, company);
 
@@ -3286,6 +3413,246 @@ export async function getCurrentCompanyUserSignature(request: Request) {
         typeof value === "string" && value.startsWith("data:image/") ? value : null,
     },
   };
+}
+
+export async function createCompanyReportOnlySignatory(request: Request, body: unknown) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const parsed = createReportOnlySignatorySchema.safeParse(coerceRequestJsonBody(body));
+  if (!parsed.success) {
+    const flat = parsed.error.flatten();
+    throw new HttpError(400, "invalid_payload", "Invalid report preparer payload.", {
+      issues: flat,
+    } as Record<string, unknown>);
+  }
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  if (!company) {
+    throw new HttpError(404, "not_found", "Company not found.");
+  }
+
+  const nowIso = new Date().toISOString();
+  const next: CompanyReportOnlySignatory = {
+    id: newReportOnlySignatoryId(),
+    name: parsed.data.name.trim(),
+    jobTitle: normalizeOptionalText(parsed.data.jobTitle) ?? undefined,
+    membershipNo: normalizeOptionalText(parsed.data.membershipNo) ?? undefined,
+    signatureImageDataUrl: null,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+  const existing = normalizeReportOnlySignatories(company.reportOnlySignatories);
+  if (existing.length >= 100) {
+    throw new HttpError(400, "limit_reached", "تم بلوغ الحد الأقصى لمعدّي التقارير.");
+  }
+
+  await companies.updateOne(
+    { _id: companyId },
+    {
+      $set: {
+        reportOnlySignatories: [...existing, next],
+        updatedAt: new Date(),
+      } satisfies Partial<CompanyDoc>,
+    },
+  );
+
+  return {
+    context,
+    payload: {
+      signatory: {
+        id: next.id,
+        name: next.name,
+        jobTitle: next.jobTitle ?? "",
+        membershipNo: next.membershipNo ?? "",
+        signatureImageDataUrl: null,
+        createdAt: next.createdAt,
+        updatedAt: next.updatedAt,
+        isReportOnly: true as const,
+      },
+    },
+  };
+}
+
+export async function updateCompanyReportOnlySignatory(
+  request: Request,
+  signatoryId: string,
+  body: unknown,
+) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const id = String(signatoryId || "").trim();
+  if (!id || !isReportOnlySignatoryId(id)) {
+    throw new HttpError(400, "invalid_id", "Invalid report preparer id.");
+  }
+
+  const parsed = updateReportOnlySignatorySchema.safeParse(coerceRequestJsonBody(body));
+  if (!parsed.success) {
+    const flat = parsed.error.flatten();
+    throw new HttpError(400, "invalid_payload", "Invalid report preparer payload.", {
+      issues: flat,
+    } as Record<string, unknown>);
+  }
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  if (!company) {
+    throw new HttpError(404, "not_found", "Company not found.");
+  }
+
+  const existing = normalizeReportOnlySignatories(company.reportOnlySignatories);
+  const index = existing.findIndex((row) => row.id === id);
+  if (index < 0) {
+    throw new HttpError(404, "not_found", "Report preparer not found.");
+  }
+
+  const current = existing[index]!;
+  const nowIso = new Date().toISOString();
+  const updated: CompanyReportOnlySignatory = {
+    ...current,
+    name: parsed.data.name !== undefined ? parsed.data.name.trim() : current.name,
+    jobTitle:
+      parsed.data.jobTitle !== undefined
+        ? normalizeOptionalText(parsed.data.jobTitle) ?? undefined
+        : current.jobTitle,
+    membershipNo:
+      parsed.data.membershipNo !== undefined
+        ? normalizeOptionalText(parsed.data.membershipNo) ?? undefined
+        : current.membershipNo,
+    updatedAt: nowIso,
+  };
+  const nextRows = [...existing];
+  nextRows[index] = updated;
+
+  await companies.updateOne(
+    { _id: companyId },
+    {
+      $set: {
+        reportOnlySignatories: nextRows,
+        updatedAt: new Date(),
+      } satisfies Partial<CompanyDoc>,
+    },
+  );
+
+  return {
+    context,
+    payload: {
+      signatory: {
+        id: updated.id,
+        name: updated.name,
+        jobTitle: updated.jobTitle ?? "",
+        membershipNo: updated.membershipNo ?? "",
+        signatureImageDataUrl: updated.signatureImageDataUrl ?? null,
+        createdAt: updated.createdAt,
+        updatedAt: updated.updatedAt,
+        isReportOnly: true as const,
+      },
+    },
+  };
+}
+
+export async function updateCompanyReportOnlySignatorySignature(
+  request: Request,
+  signatoryId: string,
+  body: unknown,
+) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const id = String(signatoryId || "").trim();
+  if (!id || !isReportOnlySignatoryId(id)) {
+    throw new HttpError(400, "invalid_id", "Invalid report preparer id.");
+  }
+
+  const parsed = updateReportOnlySignatorySignatureSchema.safeParse(coerceRequestJsonBody(body));
+  if (!parsed.success) {
+    const flat = parsed.error.flatten();
+    throw new HttpError(400, "invalid_payload", "Invalid signature payload.", {
+      issues: flat,
+    } as Record<string, unknown>);
+  }
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  if (!company) {
+    throw new HttpError(404, "not_found", "Company not found.");
+  }
+
+  const existing = normalizeReportOnlySignatories(company.reportOnlySignatories);
+  const index = existing.findIndex((row) => row.id === id);
+  if (index < 0) {
+    throw new HttpError(404, "not_found", "Report preparer not found.");
+  }
+
+  const raw = parsed.data.signatureImageDataUrl;
+  const url = raw === "" || raw === null ? null : raw;
+  const nowIso = new Date().toISOString();
+  const nextRows = [...existing];
+  nextRows[index] = {
+    ...existing[index]!,
+    signatureImageDataUrl: url,
+    updatedAt: nowIso,
+  };
+
+  await companies.updateOne(
+    { _id: companyId },
+    {
+      $set: {
+        reportOnlySignatories: nextRows,
+        updatedAt: new Date(),
+      } satisfies Partial<CompanyDoc>,
+    },
+  );
+
+  return { context, payload: { ok: true as const } };
+}
+
+export async function deleteCompanyReportOnlySignatory(request: Request, signatoryId: string) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const id = String(signatoryId || "").trim();
+  if (!id || !isReportOnlySignatoryId(id)) {
+    throw new HttpError(400, "invalid_id", "Invalid report preparer id.");
+  }
+
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyId = context.company!._id;
+  const company = await companies.findOne({ _id: companyId });
+  if (!company) {
+    throw new HttpError(404, "not_found", "Company not found.");
+  }
+
+  const existing = normalizeReportOnlySignatories(company.reportOnlySignatories);
+  const nextRows = existing.filter((row) => row.id !== id);
+  if (nextRows.length === existing.length) {
+    throw new HttpError(404, "not_found", "Report preparer not found.");
+  }
+
+  await companies.updateOne(
+    { _id: companyId },
+    {
+      $set: {
+        reportOnlySignatories: nextRows,
+        updatedAt: new Date(),
+      } satisfies Partial<CompanyDoc>,
+    },
+  );
+
+  return { context, payload: { ok: true as const } };
 }
 
 export async function createCompanyUserByCompanyAdmin(request: Request, body: unknown) {

@@ -300,12 +300,21 @@ export class MachineValuationController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Param("id") id: string,
-    /** ‎summary‎: بدون مصفوفات صور/صوت في سجل مجلد الصور بـ ‎assets‎ (أخف لشجرة المجلدات)؛ المجلد الحالي يُحمَّل كاملاً عبر ‎GET .../subprojects/:sid‎ */
+    /**
+     * ‎report‎: مشروع خفيف لشاشة بيانات التقرير (بدون شجرة مجلدات/مساحات ثقيلة).
+     * ‎summary‎: بدون مصفوفات صور/صوت في مجلدات ‎assets‎ (أخف لشجرة المجلدات).
+     * غير ذلك: كامل.
+     */
     @Query("picAssetMode") picAssetMode?: string,
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
-    const mode = picAssetMode === "summary" ? "summary" : "full";
+    const mode =
+      picAssetMode === "report"
+        ? "report"
+        : picAssetMode === "summary"
+          ? "summary"
+          : "full";
     return this.mvService.getProject(id, toMvAccess(context), { picAssetMode: mode });
   }
 
@@ -926,6 +935,7 @@ export class MachineValuationController {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
+      alsoPdf?: boolean;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;
@@ -938,6 +948,20 @@ export class MachineValuationController {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     return this.wordTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body, res);
+  }
+
+  @Get("projects/:pid/word-template/pdf/:token")
+  async downloadMergedWordPdf(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param("pid") projectId: string,
+    @Param("token") token: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    // تأكيد صلاحية الوصول للمشروع قبل تنزيل PDF المؤقت
+    await this.mvService.getProject(projectId, toMvAccess(context), { picAssetMode: "report" });
+    return this.wordTemplateMerge.respondWithPendingPdf(projectId, token, res);
   }
 
   @Get("projects/:pid/files/:fid/download")

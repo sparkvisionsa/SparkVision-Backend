@@ -1,15 +1,54 @@
-import { Injectable, Logger, BadRequestException } from "@nestjs/common";
+import { Injectable, Logger, BadRequestException, NotFoundException } from "@nestjs/common";
 import { Response } from "express";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawn } from "child_process";
+import { randomUUID } from "crypto";
 import { ObjectId } from "mongodb";
 import sharp from "sharp";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
 import { getMongoDb } from "@/server/mongodb";
 import { MachineValuationService } from "./machine-valuation.service";
 import type { MvAccessContext, MvReportTeamMember } from "./types";
+import { convertDocxToPdf, isLibreOfficeAvailable } from "./docx-to-pdf";
+
+type PendingPdfExport = {
+  projectId: string;
+  filePath: string;
+  fileName: string;
+  expiresAt: number;
+};
+
+const pendingPdfExports = new Map<string, PendingPdfExport>();
+const PDF_EXPORT_TTL_MS = 10 * 60_000;
+
+function cleanupExpiredPdfExports() {
+  const now = Date.now();
+  for (const [token, row] of pendingPdfExports.entries()) {
+    if (row.expiresAt > now) continue;
+    pendingPdfExports.delete(token);
+    fs.rm(row.filePath, { force: true }, () => undefined);
+  }
+}
+
+function storePendingPdfExport(opts: {
+  projectId: string;
+  sourcePdfPath: string;
+  fileName: string;
+}): string {
+  cleanupExpiredPdfExports();
+  const token = randomUUID();
+  const persistPath = path.join(os.tmpdir(), `mv-merge-pdf-${token}.pdf`);
+  fs.copyFileSync(opts.sourcePdfPath, persistPath);
+  pendingPdfExports.set(token, {
+    projectId: opts.projectId,
+    filePath: persistPath,
+    fileName: opts.fileName,
+    expiresAt: Date.now() + PDF_EXPORT_TTL_MS,
+  });
+  return token;
+}
 
 type MergeImageLayout = {
   imagesPerRow: number;
@@ -73,13 +112,13 @@ function sanitizeImageLayout(value: unknown): MergeImageLayout {
     clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
   const requestedQuality = Math.trunc(Number(input.imageQuality));
   const imageQuality = Number.isFinite(requestedQuality)
-    ? Math.max(60, Math.min(100, requestedQuality))
-    : 90;
+    ? Math.max(70, Math.min(100, requestedQuality))
+    : 95;
   return {
     imagesPerRow: safeImagesPerRow,
     imagesPerPage: safeImagesPerPage,
     clientImagesPerRow,
-    clientImagesPerPage: clientImagesPerRow * clientImagesPerRow,
+    clientImagesPerPage: clientImagesPerRow * Math.max(2, clientImagesPerRow),
     imageQuality,
   };
 }
@@ -94,20 +133,20 @@ type OptimizeImageSettings = {
 
 /** صور الأصول — تُخفَّض مع ازدياد العدد لتتحمل آلاف الصور. */
 function adaptiveAssetImageSettings(imageCount: number, quality: number): OptimizeImageSettings {
+  // سقف أخف قليلاً مع الحفاظ على وضوح الطباعة — يسرّع sharp ويقلّل حجم الحزمة
   const qualityCeiling =
-    imageCount <= 80 ? 95 : imageCount <= 250 ? 90 : imageCount <= 800 ? 84 : imageCount <= 2000 ? 78 : 72;
+    imageCount <= 80 ? 92 : imageCount <= 250 ? 86 : imageCount <= 800 ? 80 : imageCount <= 2000 ? 76 : 70;
   const effectiveQuality = Math.min(quality, qualityCeiling);
-  if (imageCount <= 80) return { maxWidth: 1100, maxHeight: 1100, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 250) return { maxWidth: 900, maxHeight: 900, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 800) return { maxWidth: 780, maxHeight: 780, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
-  if (imageCount <= 2000) return { maxWidth: 680, maxHeight: 680, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
-  return { maxWidth: 600, maxHeight: 600, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 80) return { maxWidth: 1000, maxHeight: 1000, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 250) return { maxWidth: 820, maxHeight: 820, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 800) return { maxWidth: 720, maxHeight: 720, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  if (imageCount <= 2000) return { maxWidth: 640, maxHeight: 640, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+  return { maxWidth: 560, maxHeight: 560, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
 }
 
 /**
  * صور حسابات القيمة — دقة طباعة عالية.
- * نستخدم JPEG أساسي (baseline) متوافقاً مع python-docx؛ mozjpeg/optimizeScans
- * كانت تنتج Progressive JPEG فيفشل الإدراج بـ UnrecognizedImageError.
+ * JPEG أساسي (baseline) متوافقاً مع python-docx؛ يُمرَّر كما هو إن كان ضمن الحدود.
  */
 function valuationPrintImageSettings(quality: number): OptimizeImageSettings {
   return {
@@ -118,12 +157,12 @@ function valuationPrintImageSettings(quality: number): OptimizeImageSettings {
   };
 }
 
-/** مستندات العميل — جودة عالية للنصوص مع سقف معقول للذاكرة. */
+/** مستندات العميل — جودة طباعة عالية للنصوص والجداول. */
 function clientDocumentImageSettings(quality: number): OptimizeImageSettings {
   return {
-    maxWidth: 3600,
-    maxHeight: 10000,
-    quality,
+    maxWidth: 4800,
+    maxHeight: 14000,
+    quality: Math.max(quality, 92),
     chromaSubsampling: "4:4:4",
   };
 }
@@ -230,41 +269,33 @@ async function writeOptimizedJpegFile(
 ): Promise<boolean> {
   const isPrintImage = settings.chromaSubsampling === "4:4:4";
   try {
-    // صور الطباعة: تصغير سريع في Node (Pillow يعيد ترميزاً آمناً لاحقاً)
-    // صور الأصول: mozjpeg أخف حجماً
+    // صور الطباعة: contain داخل الحدود.
+    // صور الأصول: fill لمربع الخلية في Word حتى يتخطّى بايثون إعادة التمطيط/الترميز.
+    // JPEG أساسي (غير progressive، بدون mozjpeg) متوافق مع python-docx.
     let pipeline = sharp(input, { failOn: "none", sequentialRead: true }).rotate();
     if (isPrintImage) {
       pipeline = pipeline.toColourspace("srgb");
     }
+    // withMetadata يضيف Exif — python-docx يرفض JPEG الخام من sharp بدون JFIF/Exif
     await pipeline
       .resize({
         width: settings.maxWidth,
         height: settings.maxHeight,
-        fit: "inside",
+        fit: isPrintImage ? "inside" : "fill",
         withoutEnlargement: true,
-        // أسرع من lanczos3 الافتراضي مع فرق ضئيل بعد حدّ الأبعاد
-        kernel: isPrintImage ? sharp.kernel.lanczos3 : sharp.kernel.mitchell,
+        kernel: isPrintImage ? sharp.kernel.lanczos3 : sharp.kernel.cubic,
       })
-      .jpeg(
-        isPrintImage
-          ? {
-              quality: settings.quality,
-              mozjpeg: false,
-              chromaSubsampling: "4:4:4",
-              progressive: false,
-              optimizeScans: false,
-              trellisQuantisation: false,
-              overshootDeringing: false,
-              force: true,
-            }
-          : {
-              quality: settings.quality,
-              mozjpeg: true,
-              chromaSubsampling: "4:2:0",
-              progressive: false,
-              force: true,
-            },
-      )
+      .withMetadata({ density: 96 })
+      .jpeg({
+        quality: settings.quality,
+        mozjpeg: false,
+        chromaSubsampling: settings.chromaSubsampling,
+        progressive: false,
+        optimizeScans: false,
+        trellisQuantisation: false,
+        overshootDeringing: false,
+        force: true,
+      })
       .toFile(destPath);
     return true;
   } catch {
@@ -473,13 +504,13 @@ async function runDiskDocxMergeWorker(
 
 /**
  * توازي التحميل/الضغط أثناء تجهيز الدمج.
- * الأصول صغيرة نسبياً فتحتمل توازياً أعلى؛ صور الطباعة أكبر فتبقى معتدلة.
+ * رفع التوازي يقلّل زمن التجهيز (كان ~50–80 ثانية لمئات الصور).
  */
 const MV_MERGE_ASSET_FETCH_CONCURRENCY = Math.max(
-  4,
-  Math.min(10, typeof os.cpus === "function" ? os.cpus().length : 4),
+  8,
+  Math.min(24, typeof os.cpus === "function" ? os.cpus().length * 3 : 8),
 );
-const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(2, Math.min(4, MV_MERGE_ASSET_FETCH_CONCURRENCY));
+const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(4, Math.min(10, MV_MERGE_ASSET_FETCH_CONCURRENCY));
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -768,30 +799,76 @@ export class WordTemplateMergeService {
 
       const storedTeam = readStoredReportTeam(reportData.valuationTeam);
       const storedById = new Map(storedTeam.map((row) => [row.id, row]));
+      const reportOnlyById = new Map(
+        (Array.isArray(company?.reportOnlySignatories) ? company.reportOnlySignatories : [])
+          .filter((row) => Boolean(row) && typeof row === "object" && typeof (row as { id?: unknown }).id === "string")
+          .map((row) => {
+            const item = row as {
+              id: string;
+              name?: string;
+              jobTitle?: string;
+              membershipNo?: string;
+              signatureImageDataUrl?: string | null;
+            };
+            return [String(item.id), item] as const;
+          }),
+      );
+
       const orderedIds: string[] = [];
       if (managerId) orderedIds.push(managerId);
       for (const row of storedTeam) {
         if (row.id === managerId || orderedIds.includes(row.id)) continue;
-        // لا يُسمح بحقن مستخدم أو توقيع من خارج أعضاء الشركة المخولين.
-        if (!membershipByUserId.has(row.id)) continue;
+        // أعضاء الشركة أو معدّو التقارير فقط (بدون حساب دخول).
+        if (!membershipByUserId.has(row.id) && !reportOnlyById.has(row.id)) continue;
         orderedIds.push(row.id);
       }
 
       const userObjectIds = orderedIds
         .map(asObjectId)
         .filter((value): value is ObjectId => value !== null);
-      if (userObjectIds.length === 0) return [];
-      const userRows = await users.find({ _id: { $in: userObjectIds } }).toArray();
+      const userRows =
+        userObjectIds.length > 0
+          ? await users.find({ _id: { $in: userObjectIds } }).toArray()
+          : [];
       const userById = new Map(userRows.map((user) => [user._id.toString(), user]));
 
       const preparers: DiskReportPreparer[] = [];
       let nonManagerIndex = 0;
-      for (const userId of orderedIds) {
-        const user = userById.get(userId);
+      for (const entryId of orderedIds) {
+        const reportOnly = reportOnlyById.get(entryId);
+        if (reportOnly) {
+          const stored = storedById.get(entryId);
+          const reportRole =
+            cleanReportText(stored?.role, 500) ||
+            (nonManagerIndex === 0 ? REPORT_PREPARER_ROLE : REPORT_INSPECTION_ROLE);
+          nonManagerIndex += 1;
+          const signature =
+            typeof reportOnly.signatureImageDataUrl === "string" &&
+            reportOnly.signatureImageDataUrl.startsWith("data:image/")
+              ? reportOnly.signatureImageDataUrl
+              : "";
+          preparers.push({
+            userId: entryId,
+            reportDisplayName:
+              safeReportPersonName(reportOnly.name) ||
+              safeReportPersonName(stored?.name),
+            jobTitle:
+              cleanReportText(reportOnly.jobTitle, 200) ||
+              cleanReportText(stored?.title, 200),
+            membershipNo:
+              cleanReportText(reportOnly.membershipNo, 100) ||
+              cleanReportText(stored?.membershipNo, 100),
+            reportRole,
+            signatureImageDataUrl: signature,
+          });
+          continue;
+        }
+
+        const user = userById.get(entryId);
         if (!user) continue;
-        const isManager = userId === managerId;
-        if (!isManager && !membershipByUserId.has(userId)) continue;
-        const stored = storedById.get(userId);
+        const isManager = entryId === managerId;
+        if (!isManager && !membershipByUserId.has(entryId)) continue;
+        const stored = storedById.get(entryId);
         const currentDisplayName = safeReportPersonName(user.valuationReportDisplayName);
         const legacyDisplayName = safeReportPersonName(user.username);
         const reportRole =
@@ -808,7 +885,7 @@ export class WordTemplateMergeService {
             ? user.valuationReportSignatureDataUrl
             : "";
         preparers.push({
-          userId,
+          userId: entryId,
           reportDisplayName:
             currentDisplayName ||
             safeReportPersonName(stored?.name) ||
@@ -845,6 +922,8 @@ export class WordTemplateMergeService {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
+      /** عند true: يُرجع ZIP يحتوي Word + PDF محوّل من نفس الملف. */
+      alsoPdf?: boolean;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;
@@ -872,7 +951,6 @@ export class WordTemplateMergeService {
       ctx,
       urls: body.assetImageUrls,
       base64List: body.assetImagesBase64,
-      urlsProvided: Array.isArray(body.assetImageUrls),
       fallback: "assets",
     });
     const valuationSources = await this.resolveImageSources({
@@ -880,7 +958,6 @@ export class WordTemplateMergeService {
       ctx,
       urls: body.valuationImageUrls,
       base64List: body.valuationImagesBase64,
-      urlsProvided: Array.isArray(body.valuationImageUrls),
       fallback: "valuation",
       project,
     });
@@ -889,7 +966,6 @@ export class WordTemplateMergeService {
       ctx,
       urls: body.clientImageUrls,
       base64List: body.clientImagesBase64,
-      urlsProvided: Array.isArray(body.clientImageUrls),
       fallback: "client",
       project,
     });
@@ -923,8 +999,9 @@ export class WordTemplateMergeService {
       await fs.promises.mkdir(valuationDir, { recursive: true });
       await fs.promises.mkdir(clientDir, { recursive: true });
 
+      const prepareStartedAt = Date.now();
       this.logger.log(
-        `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, valuation≤${valuationSettings.maxWidth}x${valuationSettings.maxHeight}@q${valuationSettings.quality})`,
+        `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, concurrency=${MV_MERGE_ASSET_FETCH_CONCURRENCY}/${MV_MERGE_PRINT_FETCH_CONCURRENCY})`,
       );
 
       const [assetImagePaths, valuationImagePaths, clientImagePaths, reportPreparers] = await Promise.all([
@@ -940,6 +1017,9 @@ export class WordTemplateMergeService {
         this.materializeImagesToDisk(clientSources, clientDir, "c", clientSettings, projectId, ctx),
         this.resolveReportPreparers(reportData, project.companyId, ctx),
       ]);
+      this.logger.log(
+        `Prepared Word images for ${projectId} in ${Date.now() - prepareStartedAt}ms (asset=${assetImagePaths.length}, valuation=${valuationImagePaths.length}, client=${clientImagePaths.length})`,
+      );
 
       const storedTextValues = buildTextValues(
         reportData,
@@ -949,6 +1029,15 @@ export class WordTemplateMergeService {
       // وجود المفتاح في الطلب — حتى لو كانت قيمته فارغة — يتغلب على القيمة المخزنة.
       const requestTextValues = sanitizeVariableOverrides(body.textValues);
       const textValues = { ...storedTextValues, ...requestTextValues };
+      // منع مسح عناوين الفهرس/المتن عندما تصل قيمة فارغة من الواجهة
+      if (!String(textValues.assetSingularPlural || "").trim()) {
+        textValues.assetSingularPlural =
+          storedTextValues.assetSingularPlural || "أصل/أصول";
+      }
+      if (!String(textValues.assetSubjectDescription || "").trim()) {
+        textValues.assetSubjectDescription =
+          storedTextValues.assetSubjectDescription || "الات ومعدات واجهزة متنوعه";
+      }
 
       const manifest: DiskMergeManifest = {
         templatePath,
@@ -1006,16 +1095,8 @@ export class WordTemplateMergeService {
         );
       }
       const safeName = (project.name || "report").replace(/[\\/:*?"<>|]+/g, "-");
-      const fileStat = await fs.promises.stat(mergeResult.outputPath);
-      res.setHeader(
-        "Content-Type",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      );
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${encodeURIComponent(`${safeName}-updated-report.docx`)}"`,
-      );
-      res.setHeader("Content-Length", String(fileStat.size));
+      const docxName = `${safeName}-merged-report.docx`;
+      const pdfName = `${safeName}-merged-report.pdf`;
       res.setHeader("X-Word-Merge-Stats", encodeURIComponent(JSON.stringify(stats)));
       if (imageWarnings.length > 0) {
         res.setHeader(
@@ -1023,9 +1104,89 @@ export class WordTemplateMergeService {
           encodeURIComponent(JSON.stringify(imageWarnings)),
         );
       }
+
+      const wantPdf = body.alsoPdf === true;
+      if (wantPdf) {
+        try {
+          const pdfPath = await convertDocxToPdf(mergeResult.outputPath, workDir, {
+            timeoutMs: Math.min(15 * 60_000, Math.max(180_000, imageCount * 1200)),
+          });
+          const pdfToken = storePendingPdfExport({
+            projectId,
+            sourcePdfPath: pdfPath,
+            fileName: pdfName,
+          });
+          res.setHeader("X-Word-Merge-Pdf", "1");
+          res.setHeader("X-Word-Merge-Pdf-Token", pdfToken);
+          res.setHeader("Access-Control-Expose-Headers", [
+            "Content-Disposition",
+            "X-Word-Merge-Stats",
+            "X-Word-Merge-Warnings",
+            "X-Word-Merge-Pdf",
+            "X-Word-Merge-Pdf-Token",
+            "X-Word-Merge-Pdf-Error",
+            "X-Word-Merge-Pdf-Available",
+          ].join(", "));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`Word→PDF conversion failed for ${projectId}: ${msg}`);
+          res.setHeader("X-Word-Merge-Pdf", "0");
+          res.setHeader(
+            "X-Word-Merge-Pdf-Error",
+            encodeURIComponent(msg.slice(0, 300)),
+          );
+          // نكمل بتنزيل Word فقط حتى لا يفشل التصدير بالكامل
+        }
+      } else {
+        res.setHeader(
+          "X-Word-Merge-Pdf-Available",
+          isLibreOfficeAvailable() ? "1" : "0",
+        );
+      }
+
+      const fileStat = await fs.promises.stat(mergeResult.outputPath);
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${encodeURIComponent(docxName)}"`,
+      );
+      res.setHeader("Content-Length", String(fileStat.size));
       await pipeFileToResponse(mergeResult.outputPath, res);
     } finally {
       fs.rm(workDir, { recursive: true, force: true }, () => undefined);
+    }
+  }
+
+  /** تنزيل PDF جاهز من نفس عملية الدمج — ملف PDF منفصل بدون ZIP. */
+  async respondWithPendingPdf(
+    projectId: string,
+    token: string,
+    res: Response,
+  ): Promise<void> {
+    cleanupExpiredPdfExports();
+    const row = pendingPdfExports.get(token);
+    if (!row || row.projectId !== projectId) {
+      throw new NotFoundException("انتهت صلاحية ملف PDF أو الرمز غير صالح. أعد تنزيل التقرير.");
+    }
+    if (!fs.existsSync(row.filePath)) {
+      pendingPdfExports.delete(token);
+      throw new NotFoundException("تعذر العثور على ملف PDF. أعد تنزيل التقرير.");
+    }
+    const fileStat = await fs.promises.stat(row.filePath);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(row.fileName)}"`,
+    );
+    res.setHeader("Content-Length", String(fileStat.size));
+    try {
+      await pipeFileToResponse(row.filePath, res);
+    } finally {
+      pendingPdfExports.delete(token);
+      fs.rm(row.filePath, { force: true }, () => undefined);
     }
   }
 
@@ -1034,7 +1195,6 @@ export class WordTemplateMergeService {
     ctx: MvAccessContext;
     urls?: string[];
     base64List?: string[];
-    urlsProvided: boolean;
     fallback: "assets" | "valuation" | "client";
     project?: { _id?: unknown; valuationAccountingWorkspace?: unknown; clientDocumentsWorkspace?: unknown };
   }): Promise<ImageSource[]> {
@@ -1049,15 +1209,13 @@ export class WordTemplateMergeService {
     }
     if (fromBase64.length > 0) return fromBase64;
 
-    if ((opts.urls?.length ?? 0) > 0) {
-      return (opts.urls ?? [])
-        .map((url) => url.trim())
-        .filter(Boolean)
-        .map((url) => ({ kind: "url" as const, url }));
+    const trimmedUrls = (opts.urls ?? []).map((url) => url.trim()).filter(Boolean);
+    if (trimmedUrls.length > 0) {
+      return trimmedUrls.map((url) => ({ kind: "url" as const, url }));
     }
 
-    // قائمة URLs فارغة صراحةً = لا صور من هذا النوع
-    if (opts.urlsProvided) return [];
+    // قائمة URLs فارغة (أو غير مُرسلة) → احتياطي الخادم.
+    // الواجهة كانت ترسل [] عند فراغ المخزن المحلي فتُمنع صور مرفق 3 بالكامل.
 
     if (opts.fallback === "assets") {
       const fileIds = await this.listReportAssetFileIds(opts.projectId, opts.ctx);
@@ -1068,6 +1226,9 @@ export class WordTemplateMergeService {
       return fileIds.map((fileId) => ({ kind: "fileId" as const, fileId }));
     }
     const fileIds = this.listWorkspaceImageFileIds(opts.project?.clientDocumentsWorkspace);
+    this.logger.log(
+      `Word merge client images fallback for ${opts.projectId}: ${fileIds.length} fileId(s) from workspace`,
+    );
     return fileIds.map((fileId) => ({ kind: "fileId" as const, fileId }));
   }
 

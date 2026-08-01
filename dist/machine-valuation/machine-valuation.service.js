@@ -4333,17 +4333,84 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             throw new common_1.BadRequestException("Cannot clone report data from the same project");
         }
         const db = await (0, mongodb_2.getMongoDb)();
-        const source = await this.loadProjectForAccess(db, toId(sourceTrim), ctx);
-        await this.loadProjectForAccess(db, toId(targetTrim), ctx);
+        const sourceOid = toId(sourceTrim);
+        const targetOid = toId(targetTrim);
+        const projects = db.collection(collections_2.MV_PROJECTS_COLLECTION);
+        const source = await projects.findOne({ _id: sourceOid }, { projection: { reportData: 1, companyId: 1, userId: 1 } });
+        if (!source)
+            throw new common_1.NotFoundException("Project not found");
+        this.assertProjectInScope(source, ctx);
+        const target = await projects.findOne({ _id: targetOid }, {
+            projection: {
+                name: 1,
+                companyId: 1,
+                userId: 1,
+                displayNumber: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                workflowStatus: 1,
+                reportType: 1,
+                locations: 1,
+                contacts: 1,
+                inspectionAssignments: 1,
+            },
+        });
+        if (!target)
+            throw new common_1.NotFoundException("Project not found");
+        this.assertProjectInScope(target, ctx);
         const reportData = sanitizeReportData(source.reportData);
         if (!hasMeaningfulSanitizedReportData(reportData)) {
             return { ok: false, empty: true, project: null };
         }
-        const updated = await this.updateProject(targetTrim, ctx, { reportData });
+        const now = new Date();
+        const updated = await projects.findOneAndUpdate({ _id: targetOid }, { $set: { reportData, updatedAt: now } }, {
+            returnDocument: "after",
+            projection: {
+                name: 1,
+                companyId: 1,
+                userId: 1,
+                displayNumber: 1,
+                createdAt: 1,
+                updatedAt: 1,
+                workflowStatus: 1,
+                reportType: 1,
+                reportData: 1,
+                locations: 1,
+                contacts: 1,
+                inspectionAssignments: 1,
+            },
+        });
+        if (!updated)
+            throw new common_1.NotFoundException("Project not found");
+        const updatedDisplayNumber = await this.ensureDisplayNumberForProject(db, updated);
         return {
             ok: true,
             empty: false,
-            project: updated.project,
+            project: {
+                _id: updated._id.toString(),
+                name: updated.name,
+                companyId: updated.companyId instanceof mongodb_1.ObjectId
+                    ? updated.companyId.toString()
+                    : updated.companyId != null && String(updated.companyId).trim() !== ""
+                        ? String(updated.companyId).trim()
+                        : null,
+                displayNumber: updatedDisplayNumber,
+                createdAt: mvProjectDateToIso(updated.createdAt),
+                updatedAt: mvProjectDateToIso(updated.updatedAt),
+                workflowStatus: projectWorkflowStatus(updated),
+                reportType: projectReportType(updated),
+                reportData: sanitizeReportData(updated.reportData),
+                locations: sanitizeProjectLocations(updated.locations, false),
+                contacts: sanitizeProjectContacts(updated.contacts, false),
+                inspectionAssignments: sanitizeInspectionAssignments(updated.inspectionAssignments, sanitizeProjectLocations(updated.locations, false)).map(serializeInspectionAssignment),
+                createdByUserId: (0, object_id_util_1.tryCoerceToObjectId)(updated.userId)?.toString() ??
+                    (typeof updated.userId === "string" ? updated.userId : null),
+                createdByName: null,
+                inspectorFiles: [],
+                valuationAccountingWorkspace: null,
+                valuationReadyExcelWorkspace: null,
+                clientDocumentsWorkspace: null,
+            },
         };
     }
     async updateProject(id, ctx, body) {
@@ -4457,6 +4524,73 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
         const db = await (0, mongodb_2.getMongoDb)();
         const _id = toId(id);
         const project = await this.loadProjectForAccess(db, _id, ctx);
+        const picAssetMode = opts?.picAssetMode === "summary"
+            ? "summary"
+            : opts?.picAssetMode === "report"
+                ? "report"
+                : "full";
+        if (picAssetMode === "report") {
+            const [creatorOid, assetImageAgg] = await Promise.all([
+                Promise.resolve((0, object_id_util_1.tryCoerceToObjectId)(project.userId)),
+                db
+                    .collection(collections_3.ASSETS_COLLECTION)
+                    .aggregate([
+                    { $match: { projectId: _id, ...MV_PHOTO_FOLDER_FILTER } },
+                    {
+                        $group: {
+                            _id: null,
+                            imageCount: { $sum: mongoPicAssetImagesCount("$images") },
+                        },
+                    },
+                ])
+                    .toArray()
+                    .catch(() => []),
+            ]);
+            const creator = creatorOid
+                ? await (0, collections_1.getAuthCollections)(db).users.findOne({ _id: creatorOid }, { projection: { _id: 1, username: 1 } })
+                : null;
+            const ensuredDisplayNumber = await this.ensureDisplayNumberForProject(db, project);
+            const valuationAccountImageCount = Array.isArray(project.valuationAccountingWorkspace?.images)
+                ? project.valuationAccountingWorkspace.images.length
+                : 0;
+            const clientDocumentImageCount = Array.isArray(project.clientDocumentsWorkspace?.images)
+                ? project.clientDocumentsWorkspace.images.length
+                : 0;
+            const assetImageCount = toSafeNonNegativeInt(assetImageAgg[0]?.imageCount);
+            return {
+                project: {
+                    _id: project._id.toString(),
+                    name: project.name,
+                    companyId: project.companyId instanceof mongodb_1.ObjectId
+                        ? project.companyId.toString()
+                        : project.companyId != null && String(project.companyId).trim() !== ""
+                            ? String(project.companyId).trim()
+                            : null,
+                    displayNumber: ensuredDisplayNumber,
+                    createdAt: mvProjectDateToIso(project.createdAt),
+                    updatedAt: mvProjectDateToIso(project.updatedAt),
+                    workflowStatus: projectWorkflowStatus(project),
+                    reportType: projectReportType(project),
+                    reportData: sanitizeReportData(project.reportData),
+                    locations: sanitizeProjectLocations(project.locations, false),
+                    contacts: sanitizeProjectContacts(project.contacts, false),
+                    inspectionAssignments: sanitizeInspectionAssignments(project.inspectionAssignments, sanitizeProjectLocations(project.locations, false)).map(serializeInspectionAssignment),
+                    sheetCount: 0,
+                    subProjectCount: 0,
+                    assetImageCount,
+                    valuationAccountImageCount,
+                    clientDocumentImageCount,
+                    createdByUserId: creatorOid?.toString() ??
+                        (typeof project.userId === "string" ? project.userId : null),
+                    createdByName: creator?.username ?? null,
+                    inspectorFiles: [],
+                    valuationAccountingWorkspace: sanitizeValuationAccountingWorkspaceForClient(project.valuationAccountingWorkspace),
+                    valuationReadyExcelWorkspace: null,
+                    clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(project.clientDocumentsWorkspace),
+                },
+                subProjects: [],
+            };
+        }
         const creatorOid = (0, object_id_util_1.tryCoerceToObjectId)(project.userId);
         const creator = creatorOid
             ? await (0, collections_1.getAuthCollections)(db).users.findOne({ _id: creatorOid }, { projection: { _id: 1, username: 1 } })
@@ -4478,7 +4612,6 @@ let MachineValuationService = MachineValuationService_1 = class MachineValuation
             ...subProjects.map((s) => s),
             ...itemRows,
         ];
-        const picAssetMode = opts?.picAssetMode === "summary" ? "summary" : "full";
         const picRows = picAssetMode === "summary"
             ? (await db
                 .collection(collections_3.ASSETS_COLLECTION)

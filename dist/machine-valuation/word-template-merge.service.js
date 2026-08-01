@@ -52,11 +52,37 @@ const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const child_process_1 = require("child_process");
+const crypto_1 = require("crypto");
 const mongodb_1 = require("mongodb");
 const sharp_1 = __importDefault(require("sharp"));
 const collections_1 = require("../server/auth-tracking/collections");
 const mongodb_2 = require("../server/mongodb");
 const machine_valuation_service_1 = require("./machine-valuation.service");
+const docx_to_pdf_1 = require("./docx-to-pdf");
+const pendingPdfExports = new Map();
+const PDF_EXPORT_TTL_MS = 10 * 60_000;
+function cleanupExpiredPdfExports() {
+    const now = Date.now();
+    for (const [token, row] of pendingPdfExports.entries()) {
+        if (row.expiresAt > now)
+            continue;
+        pendingPdfExports.delete(token);
+        fs.rm(row.filePath, { force: true }, () => undefined);
+    }
+}
+function storePendingPdfExport(opts) {
+    cleanupExpiredPdfExports();
+    const token = (0, crypto_1.randomUUID)();
+    const persistPath = path.join(os.tmpdir(), `mv-merge-pdf-${token}.pdf`);
+    fs.copyFileSync(opts.sourcePdfPath, persistPath);
+    pendingPdfExports.set(token, {
+        projectId: opts.projectId,
+        filePath: persistPath,
+        fileName: opts.fileName,
+        expiresAt: Date.now() + PDF_EXPORT_TTL_MS,
+    });
+    return token;
+}
 function sanitizeImageLayout(value) {
     const input = value && typeof value === "object" && !Array.isArray(value)
         ? value
@@ -80,28 +106,28 @@ function sanitizeImageLayout(value) {
     const clientImagesPerRow = clientRaw === 1 || clientRaw === 2 || clientRaw === 3 ? clientRaw : 2;
     const requestedQuality = Math.trunc(Number(input.imageQuality));
     const imageQuality = Number.isFinite(requestedQuality)
-        ? Math.max(60, Math.min(100, requestedQuality))
-        : 90;
+        ? Math.max(70, Math.min(100, requestedQuality))
+        : 95;
     return {
         imagesPerRow: safeImagesPerRow,
         imagesPerPage: safeImagesPerPage,
         clientImagesPerRow,
-        clientImagesPerPage: clientImagesPerRow * clientImagesPerRow,
+        clientImagesPerPage: clientImagesPerRow * Math.max(2, clientImagesPerRow),
         imageQuality,
     };
 }
 function adaptiveAssetImageSettings(imageCount, quality) {
-    const qualityCeiling = imageCount <= 80 ? 95 : imageCount <= 250 ? 90 : imageCount <= 800 ? 84 : imageCount <= 2000 ? 78 : 72;
+    const qualityCeiling = imageCount <= 80 ? 92 : imageCount <= 250 ? 86 : imageCount <= 800 ? 80 : imageCount <= 2000 ? 76 : 70;
     const effectiveQuality = Math.min(quality, qualityCeiling);
     if (imageCount <= 80)
-        return { maxWidth: 1100, maxHeight: 1100, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+        return { maxWidth: 1000, maxHeight: 1000, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
     if (imageCount <= 250)
-        return { maxWidth: 900, maxHeight: 900, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+        return { maxWidth: 820, maxHeight: 820, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
     if (imageCount <= 800)
-        return { maxWidth: 780, maxHeight: 780, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+        return { maxWidth: 720, maxHeight: 720, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
     if (imageCount <= 2000)
-        return { maxWidth: 680, maxHeight: 680, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
-    return { maxWidth: 600, maxHeight: 600, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+        return { maxWidth: 640, maxHeight: 640, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
+    return { maxWidth: 560, maxHeight: 560, quality: effectiveQuality, chromaSubsampling: "4:2:0" };
 }
 function valuationPrintImageSettings(quality) {
     return {
@@ -113,9 +139,9 @@ function valuationPrintImageSettings(quality) {
 }
 function clientDocumentImageSettings(quality) {
     return {
-        maxWidth: 3600,
-        maxHeight: 10000,
-        quality,
+        maxWidth: 4800,
+        maxHeight: 14000,
+        quality: Math.max(quality, 92),
         chromaSubsampling: "4:4:4",
     };
 }
@@ -208,28 +234,21 @@ async function writeOptimizedJpegFile(input, destPath, settings) {
             .resize({
             width: settings.maxWidth,
             height: settings.maxHeight,
-            fit: "inside",
+            fit: isPrintImage ? "inside" : "fill",
             withoutEnlargement: true,
-            kernel: isPrintImage ? sharp_1.default.kernel.lanczos3 : sharp_1.default.kernel.mitchell,
+            kernel: isPrintImage ? sharp_1.default.kernel.lanczos3 : sharp_1.default.kernel.cubic,
         })
-            .jpeg(isPrintImage
-            ? {
-                quality: settings.quality,
-                mozjpeg: false,
-                chromaSubsampling: "4:4:4",
-                progressive: false,
-                optimizeScans: false,
-                trellisQuantisation: false,
-                overshootDeringing: false,
-                force: true,
-            }
-            : {
-                quality: settings.quality,
-                mozjpeg: true,
-                chromaSubsampling: "4:2:0",
-                progressive: false,
-                force: true,
-            })
+            .withMetadata({ density: 96 })
+            .jpeg({
+            quality: settings.quality,
+            mozjpeg: false,
+            chromaSubsampling: settings.chromaSubsampling,
+            progressive: false,
+            optimizeScans: false,
+            trellisQuantisation: false,
+            overshootDeringing: false,
+            force: true,
+        })
             .toFile(destPath);
         return true;
     }
@@ -396,8 +415,8 @@ async function runDiskDocxMergeWorker(manifest, imageCount) {
         }
     });
 }
-const MV_MERGE_ASSET_FETCH_CONCURRENCY = Math.max(4, Math.min(10, typeof os.cpus === "function" ? os.cpus().length : 4));
-const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(2, Math.min(4, MV_MERGE_ASSET_FETCH_CONCURRENCY));
+const MV_MERGE_ASSET_FETCH_CONCURRENCY = Math.max(8, Math.min(24, typeof os.cpus === "function" ? os.cpus().length * 3 : 8));
+const MV_MERGE_PRINT_FETCH_CONCURRENCY = Math.max(4, Math.min(10, MV_MERGE_ASSET_FETCH_CONCURRENCY));
 async function mapWithConcurrency(items, limit, fn) {
     if (items.length === 0)
         return [];
@@ -643,33 +662,62 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
                 "";
             const storedTeam = readStoredReportTeam(reportData.valuationTeam);
             const storedById = new Map(storedTeam.map((row) => [row.id, row]));
+            const reportOnlyById = new Map((Array.isArray(company?.reportOnlySignatories) ? company.reportOnlySignatories : [])
+                .filter((row) => Boolean(row) && typeof row === "object" && typeof row.id === "string")
+                .map((row) => {
+                const item = row;
+                return [String(item.id), item];
+            }));
             const orderedIds = [];
             if (managerId)
                 orderedIds.push(managerId);
             for (const row of storedTeam) {
                 if (row.id === managerId || orderedIds.includes(row.id))
                     continue;
-                if (!membershipByUserId.has(row.id))
+                if (!membershipByUserId.has(row.id) && !reportOnlyById.has(row.id))
                     continue;
                 orderedIds.push(row.id);
             }
             const userObjectIds = orderedIds
                 .map(asObjectId)
                 .filter((value) => value !== null);
-            if (userObjectIds.length === 0)
-                return [];
-            const userRows = await users.find({ _id: { $in: userObjectIds } }).toArray();
+            const userRows = userObjectIds.length > 0
+                ? await users.find({ _id: { $in: userObjectIds } }).toArray()
+                : [];
             const userById = new Map(userRows.map((user) => [user._id.toString(), user]));
             const preparers = [];
             let nonManagerIndex = 0;
-            for (const userId of orderedIds) {
-                const user = userById.get(userId);
+            for (const entryId of orderedIds) {
+                const reportOnly = reportOnlyById.get(entryId);
+                if (reportOnly) {
+                    const stored = storedById.get(entryId);
+                    const reportRole = cleanReportText(stored?.role, 500) ||
+                        (nonManagerIndex === 0 ? REPORT_PREPARER_ROLE : REPORT_INSPECTION_ROLE);
+                    nonManagerIndex += 1;
+                    const signature = typeof reportOnly.signatureImageDataUrl === "string" &&
+                        reportOnly.signatureImageDataUrl.startsWith("data:image/")
+                        ? reportOnly.signatureImageDataUrl
+                        : "";
+                    preparers.push({
+                        userId: entryId,
+                        reportDisplayName: safeReportPersonName(reportOnly.name) ||
+                            safeReportPersonName(stored?.name),
+                        jobTitle: cleanReportText(reportOnly.jobTitle, 200) ||
+                            cleanReportText(stored?.title, 200),
+                        membershipNo: cleanReportText(reportOnly.membershipNo, 100) ||
+                            cleanReportText(stored?.membershipNo, 100),
+                        reportRole,
+                        signatureImageDataUrl: signature,
+                    });
+                    continue;
+                }
+                const user = userById.get(entryId);
                 if (!user)
                     continue;
-                const isManager = userId === managerId;
-                if (!isManager && !membershipByUserId.has(userId))
+                const isManager = entryId === managerId;
+                if (!isManager && !membershipByUserId.has(entryId))
                     continue;
-                const stored = storedById.get(userId);
+                const stored = storedById.get(entryId);
                 const currentDisplayName = safeReportPersonName(user.valuationReportDisplayName);
                 const legacyDisplayName = safeReportPersonName(user.username);
                 const reportRole = cleanReportText(stored?.role, 500) ||
@@ -685,7 +733,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
                     ? user.valuationReportSignatureDataUrl
                     : "";
                 preparers.push({
-                    userId,
+                    userId: entryId,
                     reportDisplayName: currentDisplayName ||
                         safeReportPersonName(stored?.name) ||
                         legacyDisplayName,
@@ -719,7 +767,6 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             ctx,
             urls: body.assetImageUrls,
             base64List: body.assetImagesBase64,
-            urlsProvided: Array.isArray(body.assetImageUrls),
             fallback: "assets",
         });
         const valuationSources = await this.resolveImageSources({
@@ -727,7 +774,6 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             ctx,
             urls: body.valuationImageUrls,
             base64List: body.valuationImagesBase64,
-            urlsProvided: Array.isArray(body.valuationImageUrls),
             fallback: "valuation",
             project,
         });
@@ -736,7 +782,6 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             ctx,
             urls: body.clientImageUrls,
             base64List: body.clientImagesBase64,
-            urlsProvided: Array.isArray(body.clientImageUrls),
             fallback: "client",
             project,
         });
@@ -762,16 +807,26 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             await fs.promises.mkdir(assetDir, { recursive: true });
             await fs.promises.mkdir(valuationDir, { recursive: true });
             await fs.promises.mkdir(clientDir, { recursive: true });
-            this.logger.log(`Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, valuation≤${valuationSettings.maxWidth}x${valuationSettings.maxHeight}@q${valuationSettings.quality})`);
+            const prepareStartedAt = Date.now();
+            this.logger.log(`Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, concurrency=${MV_MERGE_ASSET_FETCH_CONCURRENCY}/${MV_MERGE_PRINT_FETCH_CONCURRENCY})`);
             const [assetImagePaths, valuationImagePaths, clientImagePaths, reportPreparers] = await Promise.all([
                 this.materializeImagesToDisk(assetSources, assetDir, "a", assetSettings, projectId, ctx),
                 this.materializeImagesToDisk(valuationSources, valuationDir, "v", valuationSettings, projectId, ctx),
                 this.materializeImagesToDisk(clientSources, clientDir, "c", clientSettings, projectId, ctx),
                 this.resolveReportPreparers(reportData, project.companyId, ctx),
             ]);
+            this.logger.log(`Prepared Word images for ${projectId} in ${Date.now() - prepareStartedAt}ms (asset=${assetImagePaths.length}, valuation=${valuationImagePaths.length}, client=${clientImagePaths.length})`);
             const storedTextValues = buildTextValues(reportData, project.name || "", project.displayNumber);
             const requestTextValues = sanitizeVariableOverrides(body.textValues);
             const textValues = { ...storedTextValues, ...requestTextValues };
+            if (!String(textValues.assetSingularPlural || "").trim()) {
+                textValues.assetSingularPlural =
+                    storedTextValues.assetSingularPlural || "أصل/أصول";
+            }
+            if (!String(textValues.assetSubjectDescription || "").trim()) {
+                textValues.assetSubjectDescription =
+                    storedTextValues.assetSubjectDescription || "الات ومعدات واجهزة متنوعه";
+            }
             const manifest = {
                 templatePath,
                 outputPath,
@@ -805,18 +860,75 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
                 this.logger.warn(`Word merge completed with image warnings for ${projectId}: ${imageWarnings.join(" ")}`);
             }
             const safeName = (project.name || "report").replace(/[\\/:*?"<>|]+/g, "-");
-            const fileStat = await fs.promises.stat(mergeResult.outputPath);
-            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-            res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(`${safeName}-updated-report.docx`)}"`);
-            res.setHeader("Content-Length", String(fileStat.size));
+            const docxName = `${safeName}-merged-report.docx`;
+            const pdfName = `${safeName}-merged-report.pdf`;
             res.setHeader("X-Word-Merge-Stats", encodeURIComponent(JSON.stringify(stats)));
             if (imageWarnings.length > 0) {
                 res.setHeader("X-Word-Merge-Warnings", encodeURIComponent(JSON.stringify(imageWarnings)));
             }
+            const wantPdf = body.alsoPdf === true;
+            if (wantPdf) {
+                try {
+                    const pdfPath = await (0, docx_to_pdf_1.convertDocxToPdf)(mergeResult.outputPath, workDir, {
+                        timeoutMs: Math.min(15 * 60_000, Math.max(180_000, imageCount * 1200)),
+                    });
+                    const pdfToken = storePendingPdfExport({
+                        projectId,
+                        sourcePdfPath: pdfPath,
+                        fileName: pdfName,
+                    });
+                    res.setHeader("X-Word-Merge-Pdf", "1");
+                    res.setHeader("X-Word-Merge-Pdf-Token", pdfToken);
+                    res.setHeader("Access-Control-Expose-Headers", [
+                        "Content-Disposition",
+                        "X-Word-Merge-Stats",
+                        "X-Word-Merge-Warnings",
+                        "X-Word-Merge-Pdf",
+                        "X-Word-Merge-Pdf-Token",
+                        "X-Word-Merge-Pdf-Error",
+                        "X-Word-Merge-Pdf-Available",
+                    ].join(", "));
+                }
+                catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.logger.warn(`Word→PDF conversion failed for ${projectId}: ${msg}`);
+                    res.setHeader("X-Word-Merge-Pdf", "0");
+                    res.setHeader("X-Word-Merge-Pdf-Error", encodeURIComponent(msg.slice(0, 300)));
+                }
+            }
+            else {
+                res.setHeader("X-Word-Merge-Pdf-Available", (0, docx_to_pdf_1.isLibreOfficeAvailable)() ? "1" : "0");
+            }
+            const fileStat = await fs.promises.stat(mergeResult.outputPath);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+            res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(docxName)}"`);
+            res.setHeader("Content-Length", String(fileStat.size));
             await pipeFileToResponse(mergeResult.outputPath, res);
         }
         finally {
             fs.rm(workDir, { recursive: true, force: true }, () => undefined);
+        }
+    }
+    async respondWithPendingPdf(projectId, token, res) {
+        cleanupExpiredPdfExports();
+        const row = pendingPdfExports.get(token);
+        if (!row || row.projectId !== projectId) {
+            throw new common_1.NotFoundException("انتهت صلاحية ملف PDF أو الرمز غير صالح. أعد تنزيل التقرير.");
+        }
+        if (!fs.existsSync(row.filePath)) {
+            pendingPdfExports.delete(token);
+            throw new common_1.NotFoundException("تعذر العثور على ملف PDF. أعد تنزيل التقرير.");
+        }
+        const fileStat = await fs.promises.stat(row.filePath);
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(row.fileName)}"`);
+        res.setHeader("Content-Length", String(fileStat.size));
+        try {
+            await pipeFileToResponse(row.filePath, res);
+        }
+        finally {
+            pendingPdfExports.delete(token);
+            fs.rm(row.filePath, { force: true }, () => undefined);
         }
     }
     async resolveImageSources(opts) {
@@ -832,14 +944,10 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
         }
         if (fromBase64.length > 0)
             return fromBase64;
-        if ((opts.urls?.length ?? 0) > 0) {
-            return (opts.urls ?? [])
-                .map((url) => url.trim())
-                .filter(Boolean)
-                .map((url) => ({ kind: "url", url }));
+        const trimmedUrls = (opts.urls ?? []).map((url) => url.trim()).filter(Boolean);
+        if (trimmedUrls.length > 0) {
+            return trimmedUrls.map((url) => ({ kind: "url", url }));
         }
-        if (opts.urlsProvided)
-            return [];
         if (opts.fallback === "assets") {
             const fileIds = await this.listReportAssetFileIds(opts.projectId, opts.ctx);
             return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
@@ -849,6 +957,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
         }
         const fileIds = this.listWorkspaceImageFileIds(opts.project?.clientDocumentsWorkspace);
+        this.logger.log(`Word merge client images fallback for ${opts.projectId}: ${fileIds.length} fileId(s) from workspace`);
         return fileIds.map((fileId) => ({ kind: "fileId", fileId }));
     }
     async materializeImagesToDisk(sources, destDir, prefix, settings, projectId, ctx) {

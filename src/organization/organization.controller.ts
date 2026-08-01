@@ -13,9 +13,11 @@ import type { Request, Response } from "express";
 import { applyContextCookies } from "@/server/auth-tracking/context";
 import {
   createCompanyBySuperAdmin,
+  createCompanyReportOnlySignatory,
   createCompanyUserByCompanyAdmin,
   deleteCompanyBySuperAdmin,
   deleteCompanyMemberBySuperAdmin,
+  deleteCompanyReportOnlySignatory,
   deleteCompanyUserByCompanyAdmin,
   getCompanyDetailForSuperAdmin,
   getCurrentCompanyUserSignature,
@@ -27,6 +29,8 @@ import {
   updateCompanyBySuperAdmin,
   updateCompanyMemberReportSignatureByCompanyAdmin,
   updateCompanyReportDefaultsByCompanyAdmin,
+  updateCompanyReportOnlySignatory,
+  updateCompanyReportOnlySignatorySignature,
   updateCompanyUserByCompanyAdmin,
 } from "@/server/auth-tracking/service";
 
@@ -206,6 +210,56 @@ export class OrganizationController {
     @Param("userId") userId: string
   ) {
     const result = await deleteCompanyUserByCompanyAdmin(req, userId);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Post("company/report-signatories")
+  async createReportSignatory(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await createCompanyReportOnlySignatory(req, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/report-signatories/:signatoryId")
+  async patchReportSignatory(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("signatoryId") signatoryId: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateCompanyReportOnlySignatory(req, signatoryId, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/report-signatories/:signatoryId/signature")
+  async patchReportSignatorySignature(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("signatoryId") signatoryId: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateCompanyReportOnlySignatorySignature(
+      req,
+      signatoryId,
+      body ?? req.body,
+    );
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Delete("company/report-signatories/:signatoryId")
+  async deleteReportSignatory(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("signatoryId") signatoryId: string,
+  ) {
+    const result = await deleteCompanyReportOnlySignatory(req, signatoryId);
     applyContextCookies(res, result.context);
     return result.payload;
   }

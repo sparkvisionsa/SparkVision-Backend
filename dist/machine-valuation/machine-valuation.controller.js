@@ -180,7 +180,11 @@ let MachineValuationController = class MachineValuationController {
     async getProject(req, res, id, picAssetMode) {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
-        const mode = picAssetMode === "summary" ? "summary" : "full";
+        const mode = picAssetMode === "report"
+            ? "report"
+            : picAssetMode === "summary"
+                ? "summary"
+                : "full";
         return this.mvService.getProject(id, toMvAccess(context), { picAssetMode: mode });
     }
     async streamProjectEvents(req, res, id) {
@@ -448,6 +452,12 @@ let MachineValuationController = class MachineValuationController {
         const context = await (0, context_1.resolveRequestContext)(req);
         (0, context_1.applyContextCookies)(res, context);
         return this.wordTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body, res);
+    }
+    async downloadMergedWordPdf(req, res, projectId, token) {
+        const context = await (0, context_1.resolveRequestContext)(req);
+        (0, context_1.applyContextCookies)(res, context);
+        await this.mvService.getProject(projectId, toMvAccess(context), { picAssetMode: "report" });
+        return this.wordTemplateMerge.respondWithPendingPdf(projectId, token, res);
     }
     async downloadProjectFile(req, projectId, fileId, res) {
         const context = await (0, context_1.resolveRequestContext)(req);
@@ -991,6 +1001,16 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object, String, Object]),
     __metadata("design:returntype", Promise)
 ], MachineValuationController.prototype, "mergeWordTemplate", null);
+__decorate([
+    (0, common_1.Get)("projects/:pid/word-template/pdf/:token"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Res)()),
+    __param(2, (0, common_1.Param)("pid")),
+    __param(3, (0, common_1.Param)("token")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, String, String]),
+    __metadata("design:returntype", Promise)
+], MachineValuationController.prototype, "downloadMergedWordPdf", null);
 __decorate([
     (0, common_1.Get)("projects/:pid/files/:fid/download"),
     __param(0, (0, common_1.Req)()),

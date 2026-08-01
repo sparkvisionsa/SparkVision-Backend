@@ -201,6 +201,26 @@ def test_stretch_fills_uniform_canvas_without_crop_or_pad() -> None:
     assert ASSET_IMAGE_MAX_SQUARE_PX >= 600
 
 
+def test_docx_safe_baseline_jpeg_passthrough_skips_reencode() -> None:
+    """صور Nest الجاهزة (مقاس اللوحة + JPEG أساسي) تُمرَّر دون إعادة ترميز."""
+    from PIL import Image
+
+    cell = int(2.0 * EMU_PER_INCH)
+    canvas_w, canvas_h = worker._canvas_pixel_size_for_cell(cell, cell, 400)
+    buf = io.BytesIO()
+    Image.new("RGB", (canvas_w, canvas_h), (12, 180, 40)).save(
+        buf, format="JPEG", quality=90, optimize=False, progressive=False, subsampling=0
+    )
+    source = buf.getvalue()
+    assert worker.jpeg_is_docx_safe_baseline(source)
+    out = stretch_to_fill_canvas_jpeg_bytes(source, cell, cell, max_side_px=400)
+    assert out is source or out == source
+
+    prepared, width, height = worker.prepare_valuation_image_bytes(source)
+    assert prepared is source or prepared == source
+    assert (width, height) == (canvas_w, canvas_h)
+
+
 def test_visible_syntaxes_split_runs_and_rpr() -> None:
     xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="{W_NS}">
@@ -986,6 +1006,8 @@ def test_legacy_bookmarks_do_not_drive_text_or_images() -> None:
 def main() -> None:
     test_stretch_fills_uniform_canvas_without_crop_or_pad()
     print("OK: image canvas regression")
+    test_docx_safe_baseline_jpeg_passthrough_skips_reencode()
+    print("OK: baseline JPEG passthrough skips re-encode")
     test_visible_syntaxes_split_runs_and_rpr()
     print("OK: visible « » and << >> variables, split runs, rPr, no bookmark values")
     test_actual_template_variables_mail_merge_cleanup_and_images()
