@@ -145,6 +145,70 @@ def make_transparent_signature_png(
     return output.getvalue()
 
 
+def make_opaque_signature_with_large_white_margins() -> bytes:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (1200, 700), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.line(
+        [(430, 385), (515, 300), (610, 390), (760, 305)],
+        fill=(15, 55, 160),
+        width=18,
+    )
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=90)
+    return output.getvalue()
+
+
+def test_report_signature_removes_opaque_white_margins() -> None:
+    from PIL import Image, ImageChops
+
+    prepared = worker.prepare_report_signature_png(
+        make_opaque_signature_with_large_white_margins()
+    )
+    assert prepared is not None
+
+    with Image.open(io.BytesIO(prepared)) as signature:
+        assert signature.size == worker.REPORT_SIGNATURE_CANVAS_SIZE
+        assert signature.mode == "RGBA"
+        rgb = signature.convert("RGB")
+        difference = ImageChops.difference(
+            rgb,
+            Image.new("RGB", signature.size, (255, 255, 255)),
+        )
+        red, green, blue = difference.split()
+        ink_bounds = ImageChops.lighter(red, ImageChops.lighter(green, blue)).point(
+            lambda value: 255
+            if value > worker.REPORT_SIGNATURE_WHITE_THRESHOLD
+            else 0
+        ).getbbox()
+        assert ink_bounds is not None
+        left, top, right, bottom = ink_bounds
+        canvas_width, canvas_height = signature.size
+        # بعد إزالة الهوامش البيضاء يجب أن يملأ أثر التوقيع معظم عرض اللوحة،
+        # بدلاً من بقائه صغيراً في المنتصف كما في الصورة الأصلية.
+        assert right - left >= int(canvas_width * 0.9)
+        assert left <= int(canvas_width * 0.05)
+        assert canvas_width - right <= int(canvas_width * 0.05)
+
+
+def test_redundant_blank_page_breaks_are_removed() -> None:
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}"><w:body>
+  <w:p><w:r><w:t>محتوى</w:t></w:r></w:p>
+  <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+  <w:p/>
+  <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+  <w:p><w:r><w:t>محتوى تالٍ</w:t></w:r></w:p>
+  <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>""".encode("utf-8")
+    cleaned, removed = worker.cleanup_redundant_page_breaks(document_xml)
+    assert removed == 2
+    root = etree.fromstring(cleaned)
+    assert len(list(root.iter(f"{{{W_NS}}}br"))) == 1
+
+
 def toc_paragraphs(xml_bytes: bytes) -> list[bytes]:
     root = etree.fromstring(xml_bytes)
     w = lambda tag: f"{{{W_NS}}}{tag}"
@@ -680,6 +744,15 @@ def test_actual_template_dynamic_report_preparers_without_annex_images() -> None
         assert table is not None
         rows = table.findall(f"{{{W_NS}}}tr")
         assert len(rows) == 4
+        bookmark_names = {
+            node.get(f"{{{W_NS}}}name")
+            for node in document_root.iter(f"{{{W_NS}}}bookmarkStart")
+        }
+        assert "_Toc235735706" in bookmark_names
+        assert "_Toc235735717" in bookmark_names
+
+        settings_root = etree.fromstring(output_zip.read("word/settings.xml"))
+        assert settings_root.find(f"{{{W_NS}}}doNotAutoCompressPictures") is not None
 
         # خصائص الجدول وصف الرأس تبقى كما في القالب، مع توسيع عمود التوقيع فقط.
         w = lambda tag: f"{{{W_NS}}}{tag}"
@@ -1003,9 +1076,64 @@ def test_legacy_bookmarks_do_not_drive_text_or_images() -> None:
     assert not list(root.iter(f"{{{W_NS}}}drawing"))
 
 
+def test_toc_keeps_template_font_direction_and_styles() -> None:
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}"><w:body>
+  <w:p>
+    <w:pPr><w:pStyle w:val="10"/><w:bidi/><w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs><w:jc w:val="right"/></w:pPr>
+    <w:r><w:rPr><w:rFonts w:ascii="CoconNextArabic-Light" w:hAnsi="CoconNextArabic-Light" w:cs="CoconNextArabic-Light"/><w:rtl/></w:rPr><w:t>8.0\t«أصلأصول» محل التقييم\t</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText>PAGEREF _Toc123 \\h</w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:rPr><w:rFonts w:cs="CoconNextArabic-Light"/><w:rtl/></w:rPr><w:t>3</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+  <w:sectPr/>
+</w:body></w:document>""".encode("utf-8")
+    original = etree.fromstring(document_xml)
+    original_para = next(original.iter(f"{{{W_NS}}}p"))
+    original_ppr = etree.tostring(
+        original_para.find(f"{{{W_NS}}}pPr"), method="c14n"
+    )
+    original_rprs = [
+        etree.tostring(node, method="c14n")
+        for node in original_para.iter(f"{{{W_NS}}}rPr")
+    ]
+
+    font_safe = worker.apply_report_fonts_to_part(document_xml)
+    merged, found, filled = worker.apply_visible_variable_values(
+        font_safe, {"assetSingularPlural": "الأصول"}
+    )
+    result = etree.fromstring(merged)
+    result_para = next(result.iter(f"{{{W_NS}}}p"))
+    assert found == 1 and filled == 1
+    assert "8.0\tالأصول محل التقييم\t3" == visible_text(result_para)
+    assert etree.tostring(result_para.find(f"{{{W_NS}}}pPr"), method="c14n") == original_ppr
+    assert [
+        etree.tostring(node, method="c14n")
+        for node in result_para.iter(f"{{{W_NS}}}rPr")
+    ] == original_rprs
+
+    styles_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="{W_NS}">
+  <w:style w:type="paragraph" w:styleId="10"><w:name w:val="toc 1"/><w:rPr><w:rFonts w:cs="CoconNextArabic-Light"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:rPr><w:rFonts w:cs="CoconNextArabic-Light"/></w:rPr></w:style>
+</w:styles>""".encode("utf-8")
+    styles = etree.fromstring(worker.apply_tajawal_to_styles(styles_xml))
+    style_rows = list(styles.iter(f"{{{W_NS}}}style"))
+    toc_font = next(style_rows[0].iter(f"{{{W_NS}}}rFonts")).get(f"{{{W_NS}}}cs")
+    body_font = next(style_rows[1].iter(f"{{{W_NS}}}rFonts")).get(f"{{{W_NS}}}cs")
+    assert toc_font == "CoconNextArabic-Light"
+    assert body_font == "Tajawal"
+
+
 def main() -> None:
     test_stretch_fills_uniform_canvas_without_crop_or_pad()
     print("OK: image canvas regression")
+    test_report_signature_removes_opaque_white_margins()
+    print("OK: report signature white margins are removed")
+    test_redundant_blank_page_breaks_are_removed()
+    print("OK: redundant blank page breaks are removed")
     test_docx_safe_baseline_jpeg_passthrough_skips_reencode()
     print("OK: baseline JPEG passthrough skips re-encode")
     test_visible_syntaxes_split_runs_and_rpr()
@@ -1016,6 +1144,8 @@ def main() -> None:
     print("OK: dynamic report preparers, signatures, preserved Word table formatting")
     test_legacy_bookmarks_do_not_drive_text_or_images()
     print("OK: legacy bookmarks do not drive text or image insertion")
+    test_toc_keeps_template_font_direction_and_styles()
+    print("OK: TOC keeps template font, direction, tabs, and styles")
 
 
 if __name__ == "__main__":

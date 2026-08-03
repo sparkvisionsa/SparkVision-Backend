@@ -22,7 +22,7 @@ from copy import deepcopy
 from typing import Any, Callable, TypeVar, Union
 
 from lxml import etree
-from PIL import Image
+from PIL import Image, ImageChops
 
 ImageSource = Union[bytes, str]
 
@@ -96,8 +96,13 @@ REPORT_PREPARER_MAX_ROWS = 100
 REPORT_SIGNATURE_MAX_SOURCE_BYTES = 20 * 1024 * 1024
 # لوحة PNG بنسبة صورة القالب (~1.743) بدقة أعلى لطباعة أوضح بعد تكبير العرض.
 REPORT_SIGNATURE_CANVAS_SIZE = (1400, 803)
+# تجاهل فروقات اللون الطفيفة الناتجة من ضغط JPEG عند قص الخلفية البيضاء.
+REPORT_SIGNATURE_WHITE_THRESHOLD = 18
+# هامش صغير فقط حول أثر التوقيع حتى لا تلامس ضرباته حافة الصورة.
+REPORT_SIGNATURE_CONTENT_PADDING_RATIO = 0.02
+REPORT_SIGNATURE_CANVAS_PADDING_RATIO = 0.0125
 # تكبير مساحة التوقيع الظاهرة في Word أمام كل مُعدّ (بالنسبة لأبعاد wp:extent في القالب).
-REPORT_SIGNATURE_DISPLAY_SCALE = 1.85
+REPORT_SIGNATURE_DISPLAY_SCALE = 1.65
 
 # خط التقرير بعد الدمج: Tajawal لكل النص، مع الإبقاء على Cocon أسفل الغلاف فقط.
 REPORT_BODY_FONT = "Tajawal"
@@ -577,17 +582,70 @@ def prepare_report_signature_png(source_bytes: bytes) -> bytes | None:
             source.load()
             rgba = source.convert("RGBA")
 
-        alpha_bounds = rgba.getchannel("A").getbbox()
+        alpha = rgba.getchannel("A")
+        alpha_bounds = alpha.getbbox()
         if alpha_bounds is None:
             return None
-        rgba = rgba.crop(alpha_bounds)
+
+        # getbbox على قناة alpha لا يزيل الهوامش من صور JPEG أو PNG ذات الخلفية
+        # البيضاء المعتمة. كوّن قناعاً من مقدار ابتعاد كل بكسل عن الأبيض، واضربه
+        # في alpha حتى تُستبعد أيضاً البكسلات الشفافة. العتبة تتسامح مع شوائب JPEG.
+        rgb_difference = ImageChops.difference(
+            rgba.convert("RGB"),
+            Image.new("RGB", rgba.size, (255, 255, 255)),
+        )
+        red_difference, green_difference, blue_difference = rgb_difference.split()
+        strongest_difference = ImageChops.lighter(
+            red_difference,
+            ImageChops.lighter(green_difference, blue_difference),
+        )
+        visible_ink = ImageChops.multiply(strongest_difference, alpha)
+        visible_ink = visible_ink.point(
+            lambda value: 255 if value > REPORT_SIGNATURE_WHITE_THRESHOLD else 0
+        )
+        content_bounds = visible_ink.getbbox() or alpha_bounds
+
+        left, top, right, bottom = content_bounds
+        content_padding = max(
+            2,
+            int(
+                round(
+                    max(right - left, bottom - top)
+                    * REPORT_SIGNATURE_CONTENT_PADDING_RATIO
+                )
+            ),
+        )
+        content_bounds = (
+            max(0, left - content_padding),
+            max(0, top - content_padding),
+            min(rgba.width, right + content_padding),
+            min(rgba.height, bottom + content_padding),
+        )
+        rgba = rgba.crop(content_bounds)
 
         canvas_width, canvas_height = REPORT_SIGNATURE_CANVAS_SIZE
-        padding = max(8, int(min(canvas_width, canvas_height) * 0.035))
+        padding = max(
+            4,
+            int(
+                round(
+                    min(canvas_width, canvas_height)
+                    * REPORT_SIGNATURE_CANVAS_PADDING_RATIO
+                )
+            ),
+        )
         max_width = max(1, canvas_width - padding * 2)
         max_height = max(1, canvas_height - padding * 2)
         resampling = getattr(Image, "Resampling", Image).LANCZOS
-        rgba.thumbnail((max_width, max_height), resampling)
+        # thumbnail لا يكبّر الصور الصغيرة؛ وهذا كان يُبقي التوقيع بحجمه الأصلي
+        # الصغير وسط اللوحة الكبيرة. احسب القياس صراحةً ليملأ التوقيع المساحة
+        # المتاحة سواء احتاج إلى تصغير أو تكبير، مع الحفاظ على نسبة أبعاده.
+        resize_scale = min(max_width / rgba.width, max_height / rgba.height)
+        resized_size = (
+            max(1, int(round(rgba.width * resize_scale))),
+            max(1, int(round(rgba.height * resize_scale))),
+        )
+        if rgba.size != resized_size:
+            rgba = rgba.resize(resized_size, resampling)
 
         canvas = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 0))
         offset = (
@@ -1310,7 +1368,13 @@ def flatten_mail_merge_fields(root: etree._Element) -> int:
             for element in sequence:
                 if element.getparent() is not para:
                     continue
-                if id(element) in result_ids:
+                # قد تبدأ/تنتهي علامة فهرس Word داخل نفس تسلسل MERGEFIELD.
+                # حذفها يُبقي النتيجة المخزنة ظاهرة في DOCX، لكن عند تحديث
+                # الفهرس أثناء إنشاء PDF يظهر: «خطأ! الإشارة المرجعية غير معرّفة».
+                if id(element) in result_ids or element.tag in (
+                    w("bookmarkStart"),
+                    w("bookmarkEnd"),
+                ):
                     kept += 1
                     continue
                 para.remove(element)
@@ -1500,6 +1564,29 @@ def _paragraph_is_cover_footer(para: etree._Element) -> bool:
     return any(marker in text for marker in REPORT_COVER_FOOTER_MARKERS)
 
 
+def _paragraph_is_toc_content(para: etree._Element) -> bool:
+    """The template TOC is protected; only its visible variables may change."""
+    text = _paragraph_own_text(para).strip()
+    if text in ("الفهرس", "Table of Contents", "Contents"):
+        return True
+    return paragraph_is_toc_or_pageref(para)
+
+
+def _style_is_toc(style: etree._Element) -> bool:
+    identifiers = [style.get(w("styleId")) or ""]
+    for tag in ("name", "aliases"):
+        node = style.find(w(tag))
+        if node is not None:
+            identifiers.append(node.get(w("val")) or "")
+    normalized = " ".join(identifiers).casefold().replace(" ", "")
+    return (
+        "toc" in normalized
+        or "tableofcontents" in normalized
+        or "جدولالمحتويات" in normalized
+        or "فهرس" in normalized
+    )
+
+
 def _rewrite_rfonts_element(rfonts: etree._Element, font_name: str) -> bool:
     """Replace Cocon* font names with the target font. Leave other fonts untouched."""
     changed = False
@@ -1527,6 +1614,9 @@ def apply_report_fonts_to_part(xml_bytes: bytes) -> bytes:
     root = etree.fromstring(xml_bytes)
     # أولاً: كل إشارات Cocon → Tajawal (بما فيها sdtPr / sdtEndPr وغيرها).
     for rfonts in root.iter(w("rFonts")):
+        owning_para = find_ancestor(rfonts, w("p"))
+        if owning_para is not None and _paragraph_is_toc_content(owning_para):
+            continue
         _rewrite_rfonts_element(rfonts, REPORT_BODY_FONT)
     # ثانياً: ثبّت Cocon على فقرات أسفل الغلاف فقط.
     for para in root.iter(w("p")):
@@ -1575,6 +1665,9 @@ def apply_tajawal_to_styles(xml_bytes: bytes) -> bytes:
     """حوّل إشارات Cocon في الأنماط إلى Tajawal."""
     root = etree.fromstring(xml_bytes)
     for rfonts in root.iter(w("rFonts")):
+        owning_style = find_ancestor(rfonts, w("style"))
+        if owning_style is not None and _style_is_toc(owning_style):
+            continue
         _rewrite_rfonts_element(rfonts, REPORT_BODY_FONT)
     return serialize_word_xml(root)
 
@@ -1665,6 +1758,82 @@ def strip_mail_merge_settings(xml_bytes: bytes) -> bytes:
         encoding="UTF-8",
         standalone="yes",
     )
+
+
+def ensure_print_quality_settings(xml_bytes: bytes) -> bytes:
+    """أبقِ الصور المضمّنة بدقتها الأصلية عند فتح Word أو تصديره."""
+    root = etree.fromstring(xml_bytes)
+    node = root.find(w("doNotAutoCompressPictures"))
+    if node is None:
+        node = etree.Element(w("doNotAutoCompressPictures"))
+        root.append(node)
+    node.set(w("val"), "true")
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone="yes",
+    )
+
+
+def cleanup_redundant_page_breaks(xml_bytes: bytes) -> tuple[bytes, int]:
+    """احذف فقط فواصل الصفحات الصريحة التي لا يمكن أن تنتج إلا صفحة فارغة."""
+    root = etree.fromstring(xml_bytes)
+    body = root.find(w("body"))
+    if body is None:
+        return xml_bytes, 0
+
+    def is_empty_paragraph(element: etree._Element) -> bool:
+        if element.tag != w("p"):
+            return False
+        if _element_visible_text(element).strip():
+            return False
+        protected = (w("drawing"), w("pict"), w("sectPr"))
+        return not any(any(True for _ in element.iter(tag)) for tag in protected)
+
+    def is_page_break_only(element: etree._Element) -> bool:
+        if not is_empty_paragraph(element):
+            return False
+        breaks = list(element.iter(w("br")))
+        return bool(breaks) and all(
+            (node.get(w("type")) or "textWrapping") == "page"
+            for node in breaks
+        )
+
+    removed = 0
+    # احذف فاصل نهاية المستند؛ فهو ينشئ صفحة أخيرة فارغة دائماً.
+    children = list(body)
+    final_sect_pr = children[-1] if children and children[-1].tag == w("sectPr") else None
+    content = children[:-1] if final_sect_pr is not None else children
+    index = len(content) - 1
+    trailing_empty: list[etree._Element] = []
+    while index >= 0 and is_empty_paragraph(content[index]) and not is_page_break_only(content[index]):
+        trailing_empty.append(content[index])
+        index -= 1
+    if index >= 0 and is_page_break_only(content[index]):
+        for element in [content[index], *trailing_empty]:
+            if element.getparent() is body:
+                body.remove(element)
+                removed += 1
+
+    # فاصلان وبينهما فقرات فارغة فقط = صفحة فارغة مؤكدة؛ أبقِ الأول واحذف الثاني.
+    last_break_index: int | None = None
+    children = list(body)
+    for index, element in enumerate(children):
+        if is_page_break_only(element):
+            if last_break_index is not None:
+                between = children[last_break_index + 1 : index]
+                if all(is_empty_paragraph(candidate) for candidate in between):
+                    body.remove(element)
+                    removed += 1
+                    continue
+            last_break_index = index
+        elif not is_empty_paragraph(element):
+            last_break_index = None
+
+    if not removed:
+        return xml_bytes, 0
+    return serialize_word_xml(root), removed
 
 
 def strip_mail_merge_relationships(xml_bytes: bytes) -> bytes:
@@ -3130,6 +3299,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
     variables_occurrences_found = 0
     variables_filled = 0
     header_wraps_normalized = 0
+    redundant_page_breaks_removed = 0
     img_stats = {"asset": 0, "valuation": 0, "client": 0}
     preparer_stats = {
         "tableFound": 0,
@@ -3218,10 +3388,14 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
             modified.update(signature_parts)
 
         should_clean_mail_merge = variables_occurrences_found > 0
-        if should_clean_mail_merge and "word/settings.xml" in names:
-            modified["word/settings.xml"] = strip_mail_merge_settings(
-                zin.read("word/settings.xml")
+        if "word/settings.xml" in names:
+            settings_xml = modified.get(
+                "word/settings.xml",
+                zin.read("word/settings.xml"),
             )
+            if should_clean_mail_merge:
+                settings_xml = strip_mail_merge_settings(settings_xml)
+            modified["word/settings.xml"] = ensure_print_quality_settings(settings_xml)
         if should_clean_mail_merge and "word/_rels/settings.xml.rels" in names:
             modified["word/_rels/settings.xml.rels"] = strip_mail_merge_relationships(
                 zin.read("word/_rels/settings.xml.rels")
@@ -3240,6 +3414,12 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
                     "word/_rels/recipientData.xml.rels",
                 }
             )
+
+        if "word/document.xml" in names:
+            cleaned_document, redundant_page_breaks_removed = cleanup_redundant_page_breaks(
+                modified.get("word/document.xml", zin.read("word/document.xml"))
+            )
+            modified["word/document.xml"] = cleaned_document
 
         result = write_docx_zip(zin, modified, removed_parts)
 
@@ -3275,6 +3455,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
                 "variablesOccurrencesFound": variables_occurrences_found,
                 "variablesFilled": variables_filled,
                 "headerWrapsNormalized": header_wraps_normalized,
+                "redundantPageBreaksRemoved": redundant_page_breaks_removed,
                 "reportPreparerTableFound": preparer_stats.get("tableFound", 0),
                 "reportPreparerRowsRemoved": preparer_stats.get("rowsRemoved", 0),
                 "reportPreparersInserted": preparer_stats.get(

@@ -75,6 +75,8 @@ function candidateSofficeBins() {
         "/usr/bin/soffice",
         "/usr/bin/libreoffice",
         "/usr/lib/libreoffice/program/soffice",
+        "/usr/lib/libreoffice/program/soffice.bin",
+        "/snap/bin/libreoffice",
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
     ];
     return [
@@ -241,18 +243,57 @@ try {
   $word = New-Object -ComObject Word.Application
   $word.Visible = $false
   $word.DisplayAlerts = 0
-  $doc = $word.Documents.Open($docx, $false, $true)
-  # 17 = wdFormatPDF — SaveAs2 يحافظ على تقسيم الصفحات كما في Word
-  $wdFormatPDF = 17
+  $doc = $word.Documents.Open($docx, $false, $false)
+
+  # حدّث الفهرس بعد أن أصلح عامل الدمج العلامات المرجعية، ثم احذف الصفحات
+  # الفارغة فعلياً فقط. التنفيذ عكسياً يمنع تغيّر أرقام الصفحات أثناء الحذف.
   try {
-    $doc.SaveAs2($pdf, $wdFormatPDF)
-  } catch {
-    $doc.SaveAs([ref]$pdf, [ref]$wdFormatPDF)
+    for ($i = 1; $i -le $doc.Fields.Count; $i++) {
+      $field = $doc.Fields.Item($i)
+      $insideToc = $false
+      for ($j = 1; $j -le $doc.TablesOfContents.Count; $j++) {
+        $tocRange = $doc.TablesOfContents.Item($j).Range
+        if ($field.Code.Start -ge $tocRange.Start -and $field.Code.End -le $tocRange.End) {
+          $insideToc = $true
+          break
+        }
+      }
+      if (-not $insideToc) { $field.Update() | Out-Null }
+    }
+  } catch {}
+  $doc.Repaginate()
+  for ($pass = 0; $pass -lt 2; $pass++) {
+    $pageCount = $doc.ComputeStatistics(2)
+    $removed = 0
+    for ($page = $pageCount; $page -ge 1; $page--) {
+      $start = $doc.GoTo(1, 1, $page).Start
+      if ($page -lt $pageCount) {
+        $end = $doc.GoTo(1, 1, $page + 1).Start
+      } else {
+        $end = $doc.Content.End
+      }
+      $range = $doc.Range($start, $end)
+      $printable = ($range.Text -replace '[\s\x00-\x1F\x7F]', '')
+      $shapeCount = 0
+      try { $shapeCount = $range.InlineShapes.Count } catch {}
+      try { $shapeCount += $range.ShapeRange.Count } catch {}
+      if ($printable.Length -eq 0 -and $range.Tables.Count -eq 0 -and $shapeCount -eq 0) {
+        $range.Delete() | Out-Null
+        $removed++
+      }
+    }
+    if ($removed -eq 0) { break }
+    $doc.Repaginate()
   }
-  if (-not (Test-Path -LiteralPath $pdf)) {
-    # احتياطي: تصدير كل المستند (Range=0, Item=0) وليس وضع markup
-    $doc.ExportAsFixedFormat($pdf, 17, $false, 0, 0, 0, 0, 0, $true, $true, 0, $true, $true, $false)
-  }
+  try {
+    for ($i = 1; $i -le $doc.TablesOfContents.Count; $i++) {
+      $doc.TablesOfContents.Item($i).UpdatePageNumbers() | Out-Null
+    }
+  } catch {}
+  $doc.Save()
+
+  # 17 = PDF، OptimizeFor=0 للطباعة، وRange=0 لكل المستند.
+  $doc.ExportAsFixedFormat($pdf, 17, $false, 0, 0, 1, 1, 0, $true, $true, 1, $true, $true, $false)
   if (-not (Test-Path -LiteralPath $pdf)) { throw 'Word PDF export did not create a file' }
   $len = (Get-Item -LiteralPath $pdf).Length
   if ($len -lt 200) { throw "PDF too small ($len bytes)" }
@@ -302,7 +343,9 @@ async function convertDocxToPdf(docxPath, outDir, opts) {
         }
     }
     else {
-        errors.push("LibreOffice غير متوفر");
+        errors.push(process.platform === "win32"
+            ? "LibreOffice غير متوفر"
+            : "LibreOffice غير متوفر على الخادم — ثبّته بـ: bash scripts/install-pdf-deps.sh ثم أعد تشغيل Nest");
     }
     if (process.platform === "win32" && !isMicrosoftWordAvailable()) {
         try {

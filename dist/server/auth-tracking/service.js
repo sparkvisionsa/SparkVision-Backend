@@ -1172,9 +1172,7 @@ async function loginUser(request, body) {
         isRemembered: Boolean(payload.rememberMe),
         lastSeenAt: now,
     };
-    await (0, session_store_1.writeCachedSession)(nextSession, payload.rememberMe
-        ? config_1.authTrackingConfig.rememberMeDays * 24 * 60 * 60
-        : (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes) * 60);
+    await (0, session_store_1.writeCachedSession)(nextSession, (0, context_1.getEffectiveSessionTimeoutMinutes)(context.config.sessionTimeoutMinutes) * 60);
     const profile = await userProfiles.findOne({ userId: user._id });
     await recordActivities(context.session._id, context.identityId, user._id, [
         {

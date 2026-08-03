@@ -1443,9 +1443,7 @@ export async function loginUser(
   } as SessionDoc;
   await writeCachedSession(
     nextSession,
-    payload.rememberMe
-      ? authTrackingConfig.rememberMeDays * 24 * 60 * 60
-      : getEffectiveSessionTimeoutMinutes(context.config.sessionTimeoutMinutes) * 60
+    getEffectiveSessionTimeoutMinutes(context.config.sessionTimeoutMinutes) * 60
   );
 
   const profile = await userProfiles.findOne({ userId: user._id });

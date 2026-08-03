@@ -150,9 +150,9 @@ function adaptiveAssetImageSettings(imageCount: number, quality: number): Optimi
  */
 function valuationPrintImageSettings(quality: number): OptimizeImageSettings {
   return {
-    maxWidth: 4800,
-    maxHeight: 14000,
-    quality,
+    maxWidth: 6000,
+    maxHeight: 18000,
+    quality: Math.max(98, quality),
     chromaSubsampling: "4:4:4",
   };
 }

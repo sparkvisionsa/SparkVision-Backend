@@ -140,19 +140,19 @@ function detectBrowser(userAgent: string) {
 }
 
 const SESSION_PERSIST_INTERVAL_MS = 20_000;
-const MIN_SESSION_TIMEOUT_MINUTES = 24 * 60;
+const SESSION_TIMEOUT_MINUTES = 24 * 60;
 const SYSTEM_CONFIG_CACHE_PREFIX = "auth:system-config";
 const SYSTEM_CONFIG_CACHE_KEY = `${SYSTEM_CONFIG_CACHE_PREFIX}:system`;
 const SYSTEM_CONFIG_CACHE_TTL_MS = 15_000;
 const SYSTEM_CONFIG_CACHE_STALE_TTL_MS = 60_000;
 
 export function getEffectiveSessionTimeoutMinutes(timeoutMinutes?: number) {
-  const minutes = timeoutMinutes ?? authTrackingConfig.sessionTimeoutMinutes;
-  return Math.max(MIN_SESSION_TIMEOUT_MINUTES, minutes);
+  void timeoutMinutes;
+  return SESSION_TIMEOUT_MINUTES;
 }
 
 function sessionCookieMaxAgeSeconds(rememberMe = false, timeoutMinutes?: number) {
-  if (rememberMe) return authTrackingConfig.rememberMeDays * 24 * 60 * 60;
+  void rememberMe;
   return getEffectiveSessionTimeoutMinutes(timeoutMinutes) * 60;
 }
 
