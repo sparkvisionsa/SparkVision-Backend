@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MV_FILES_FILES_COLLECTION = exports.MV_FILES_BUCKET = exports.MV_HEADER_OPTIONS_COLLECTION = exports.MV_SHEETS_COLLECTION = exports.MV_ITEMS_COLLECTION = exports.MV_SUBPROJECTS_COLLECTION = exports.MV_PROJECTS_COLLECTION = void 0;
+exports.MV_PROJECTS_COLLECTION = "mv_projects";
+exports.MV_SUBPROJECTS_COLLECTION = "mv_subprojects";
+exports.MV_ITEMS_COLLECTION = "items";
+exports.MV_SHEETS_COLLECTION = "mv_sheets";
+exports.MV_HEADER_OPTIONS_COLLECTION = "mv_header_options";
+exports.MV_FILES_BUCKET = "mv_files";
+exports.MV_FILES_FILES_COLLECTION = `${exports.MV_FILES_BUCKET}.files`;
