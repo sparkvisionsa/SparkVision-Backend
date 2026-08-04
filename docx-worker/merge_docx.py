@@ -2113,6 +2113,16 @@ def stretch_to_fill_canvas_jpeg_bytes(
             src_w, src_h = img.size
             if src_w <= 0 or src_h <= 0:
                 return img_bytes
+            # Nest already prepares asset photos as square baseline JPEGs. Word scales
+            # that square to the cell, so encoding it a second time only costs CPU and
+            # adds another lossy JPEG generation without changing the rendered layout.
+            if (
+                img.format == "JPEG"
+                and src_w == src_h
+                and src_w <= max_side_px
+                and jpeg_is_docx_safe_baseline(img_bytes)
+            ):
+                return img_bytes
             # مسار سريع: المقاس مطابق + JPEG أساسي متوافق مع Word
             if (
                 src_w == canvas_w

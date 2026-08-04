@@ -284,6 +284,15 @@ def test_docx_safe_baseline_jpeg_passthrough_skips_reencode() -> None:
     assert prepared is source or prepared == source
     assert (width, height) == (canvas_w, canvas_h)
 
+    # A square JPEG prepared by Nest does not need to match Pillow's target pixel
+    # count: Word performs the final visual scaling inside the fixed square cell.
+    smaller = make_solid_jpeg(320, 320, (20, 120, 210))
+    assert worker.jpeg_is_docx_safe_baseline(smaller)
+    smaller_out = stretch_to_fill_canvas_jpeg_bytes(
+        smaller, cell, cell, max_side_px=400
+    )
+    assert smaller_out is smaller or smaller_out == smaller
+
 
 def test_visible_syntaxes_split_runs_and_rpr() -> None:
     xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { ObjectId } from "mongodb";
 import sharp from "sharp";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
@@ -40,7 +40,13 @@ function storePendingPdfExport(opts: {
   cleanupExpiredPdfExports();
   const token = randomUUID();
   const persistPath = path.join(os.tmpdir(), `mv-merge-pdf-${token}.pdf`);
-  fs.copyFileSync(opts.sourcePdfPath, persistPath);
+  try {
+    // Conversion output and pending exports normally share the OS temp volume.
+    // Rename is atomic/O(1), while copying a large image-heavy PDF can add seconds.
+    fs.renameSync(opts.sourcePdfPath, persistPath);
+  } catch {
+    fs.copyFileSync(opts.sourcePdfPath, persistPath);
+  }
   pendingPdfExports.set(token, {
     projectId: opts.projectId,
     filePath: persistPath,
@@ -130,6 +136,77 @@ type OptimizeImageSettings = {
   /** 4:4:4 للنصوص/الجداول، 4:2:0 لصور الأصول الكثيرة */
   chromaSubsampling: "4:4:4" | "4:2:0";
 };
+
+const WORD_IMAGE_CACHE_VERSION = "v1";
+const WORD_IMAGE_CACHE_TTL_MS = 6 * 60 * 60_000;
+const WORD_IMAGE_CACHE_CLEANUP_INTERVAL_MS = 60 * 60_000;
+const wordImageCacheInflight = new Map<string, Promise<string | null>>();
+let lastWordImageCacheCleanupAt = 0;
+
+function wordImageCacheRoot(): string {
+  return path.join(os.tmpdir(), "mv-word-image-cache");
+}
+
+function imageSourceIdentity(source: ImageSource): string {
+  if (source.kind === "fileId") return `file:${source.fileId}`;
+  if (source.kind === "url") return `url:${source.url}`;
+  return `buffer:${createHash("sha256").update(source.buffer).digest("hex")}`;
+}
+
+function optimizedImageCacheKey(
+  projectId: string,
+  source: ImageSource,
+  settings: OptimizeImageSettings,
+  accessScope: string,
+): string {
+  return createHash("sha256")
+    .update(WORD_IMAGE_CACHE_VERSION)
+    .update("\0")
+    .update(projectId)
+    .update("\0")
+    .update(accessScope)
+    .update("\0")
+    .update(imageSourceIdentity(source))
+    .update("\0")
+    .update(JSON.stringify(settings))
+    .digest("hex");
+}
+
+async function cachedImageIsFresh(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    return stat.size > 32 && Date.now() - stat.mtimeMs <= WORD_IMAGE_CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+function scheduleWordImageCacheCleanup(): void {
+  const now = Date.now();
+  if (now - lastWordImageCacheCleanupAt < WORD_IMAGE_CACHE_CLEANUP_INTERVAL_MS) return;
+  lastWordImageCacheCleanupAt = now;
+  const root = wordImageCacheRoot();
+  void fs.promises
+    .readdir(root, { withFileTypes: true })
+    .then(async (entries) => {
+      await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".jpg"))
+          .map(async (entry) => {
+            const filePath = path.join(root, entry.name);
+            try {
+              const stat = await fs.promises.stat(filePath);
+              if (now - stat.mtimeMs > WORD_IMAGE_CACHE_TTL_MS) {
+                await fs.promises.rm(filePath, { force: true });
+              }
+            } catch {
+              /* best-effort cache cleanup */
+            }
+          }),
+      );
+    })
+    .catch(() => undefined);
+}
 
 /** صور الأصول — تُخفَّض مع ازدياد العدد لتتحمل آلاف الصور. */
 function adaptiveAssetImageSettings(imageCount: number, quality: number): OptimizeImageSettings {
@@ -1247,20 +1324,20 @@ export class WordTemplateMergeService {
         : MV_MERGE_ASSET_FETCH_CONCURRENCY;
     const paths = await mapWithConcurrency(sources, concurrency, async (source, index) => {
       try {
-        let buffer: Buffer | null = null;
-        if (source.kind === "buffer") {
-          buffer = source.buffer;
-        } else if (source.kind === "fileId") {
-          const download = await this.mvService.getProjectFileDownload(projectId, source.fileId, ctx);
-          buffer = await bufferFromStream(download.stream);
-        } else {
-          buffer = await this.fetchImageBuffer(source.url, ctx);
-        }
-        if (!buffer || buffer.byteLength === 0) return null;
         const destPath = path.join(destDir, `${prefix}-${String(index + 1).padStart(5, "0")}.jpg`);
-        const ok = await writeOptimizedJpegFile(buffer, destPath, settings);
-        buffer = null;
-        return ok ? destPath : null;
+        const cachedPath = await this.getOrCreateOptimizedImageCacheFile(
+          source,
+          settings,
+          projectId,
+          ctx,
+        );
+        if (!cachedPath) return null;
+        try {
+          await fs.promises.link(cachedPath, destPath);
+        } catch {
+          await fs.promises.copyFile(cachedPath, destPath);
+        }
+        return destPath;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
@@ -1277,6 +1354,61 @@ export class WordTemplateMergeService {
       }
     });
     return paths.filter((item): item is string => Boolean(item));
+  }
+
+  private async getOrCreateOptimizedImageCacheFile(
+    source: ImageSource,
+    settings: OptimizeImageSettings,
+    projectId: string,
+    ctx: MvAccessContext,
+  ): Promise<string | null> {
+    const cacheRoot = wordImageCacheRoot();
+    await fs.promises.mkdir(cacheRoot, { recursive: true });
+    scheduleWordImageCacheCleanup();
+    const accessScope = `${ctx.companyId ?? ""}:${ctx.userId ?? "anonymous"}:${ctx.isSuperAdmin ? "1" : "0"}`;
+    const key = optimizedImageCacheKey(projectId, source, settings, accessScope);
+    const cachePath = path.join(cacheRoot, `${key}.jpg`);
+    if (await cachedImageIsFresh(cachePath)) return cachePath;
+
+    const running = wordImageCacheInflight.get(key);
+    if (running) return running;
+
+    const task = (async (): Promise<string | null> => {
+      if (await cachedImageIsFresh(cachePath)) return cachePath;
+      let buffer: Buffer | null = null;
+      if (source.kind === "buffer") {
+        buffer = source.buffer;
+      } else if (source.kind === "fileId") {
+        const download = await this.mvService.getProjectFileDownload(projectId, source.fileId, ctx);
+        buffer = await bufferFromStream(download.stream);
+      } else {
+        buffer = await this.fetchImageBuffer(source.url, ctx);
+      }
+      if (!buffer || buffer.byteLength === 0) return null;
+
+      const tempPath = path.join(cacheRoot, `${key}.${randomUUID()}.tmp`);
+      try {
+        const ok = await writeOptimizedJpegFile(buffer, tempPath, settings);
+        buffer = null;
+        if (!ok) return null;
+        await fs.promises.rm(cachePath, { force: true });
+        await fs.promises.rename(tempPath, cachePath);
+        return cachePath;
+      } finally {
+        buffer = null;
+        await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
+      }
+    })();
+    wordImageCacheInflight.set(key, task);
+    void task.then(
+      () => {
+        if (wordImageCacheInflight.get(key) === task) wordImageCacheInflight.delete(key);
+      },
+      () => {
+        if (wordImageCacheInflight.get(key) === task) wordImageCacheInflight.delete(key);
+      },
+    );
+    return task;
   }
 
   private async listReportAssetFileIds(projectId: string, ctx: MvAccessContext): Promise<string[]> {
