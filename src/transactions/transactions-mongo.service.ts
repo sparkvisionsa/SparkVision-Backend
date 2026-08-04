@@ -25,8 +25,37 @@ import {
 
 // ─── serialiser ───────────────────────────────────────────────────────────────
 
-function toTransactionJson(d: TransactionDoc) {
+// ─── serialiser ───────────────────────────────────────────────────────────────
+
+async function toTransactionJson(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  d: TransactionDoc,
+) {
   const evalData: EvalData = { ...emptyEvalData(), ...(d.evalData ?? {}) };
+
+  // Resolve client name
+  let clientName = d.clientId;
+  if (d.clientId && ObjectId.isValid(d.clientId)) {
+    const client = await db
+      .collection<ClientDoc>(CLIENTS_COLLECTION)
+      .findOne(
+        { _id: new ObjectId(d.clientId) },
+        { projection: { name: 1 } },
+      );
+    if (client?.name) clientName = client.name;
+  }
+
+  // Resolve template name
+  let templateName: string | null = null;
+  if (d.templateId && ObjectId.isValid(d.templateId)) {
+    const tpl = await db
+      .collection<FormTemplateDoc>(FORM_TEMPLATES_COLLECTION)
+      .findOne(
+        { _id: new ObjectId(d.templateId) },
+        { projection: { name: 1 } },
+      );
+    if (tpl?.name) templateName = tpl.name;
+  }
 
   return {
     id: d._id.toString(),
@@ -46,16 +75,16 @@ function toTransactionJson(d: TransactionDoc) {
     ownershipType: d.ownershipType,
     valuationHypothesis: d.valuationHypothesis,
     clientId: d.clientId,
+    clientName,               // ← NEW
     branch: d.branch,
     templateId: d.templateId,
+    templateName,             // ← NEW
 
     templateFieldValues: d.templateFieldValues ?? {},
     evalData,
 
-    // ── add these two ──────────────────────────────────────────────────────
     isOpened: d.isOpened ?? false,
     isCompleted: d.isCompleted ?? false,
-    // ──────────────────────────────────────────────────────────────────────
 
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
@@ -350,9 +379,6 @@ export class TransactionsMongoService {
     const filter: Record<string, unknown> = {};
     if (companyId) filter.companyId = companyId;
     if (inspectorId) filter.assignedInspectorIds = inspectorId;
-    // ↑ MongoDB's $elemMatch isn't needed for a simple string array —
-    //   { assignedInspectorIds: "someId" } already matches docs where
-    //   the array contains that value.
 
     const rows = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
@@ -360,7 +386,7 @@ export class TransactionsMongoService {
       .sort({ createdAt: -1 })
       .toArray();
 
-    return rows.map(toTransactionJson);
+    return Promise.all(rows.map((r) => toTransactionJson(db, r)));
   }
 
   async listFreelanceInspectors() {
@@ -400,7 +426,7 @@ export class TransactionsMongoService {
         { returnDocument: "after" },
       );
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
-    return toTransactionJson(row);
+    return toTransactionJson(db, row);
   }
 
   async assignInspectors(id: string, inspectorIds: string[]) {
@@ -416,9 +442,8 @@ export class TransactionsMongoService {
         { returnDocument: "after" },
       );
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
-    return toTransactionJson(row);
+    return toTransactionJson(db, row);
   }
-
   async getTransaction(id: string, markOpened = false) {
     if (!ObjectId.isValid(id))
       throw new NotFoundException({ message: "المعاملة غير موجودة" });
@@ -437,7 +462,7 @@ export class TransactionsMongoService {
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOne({ _id: new ObjectId(id) });
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
-    return toTransactionJson(row);
+    return toTransactionJson(db, row);
   }
 
   async createTransaction(
@@ -488,7 +513,7 @@ export class TransactionsMongoService {
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOne({ _id: insertedId });
     if (!row) throw new NotFoundException();
-    return toTransactionJson(row);
+    return toTransactionJson(db, row);
   }
 
   // PATCH — only evalData is updated; templateFieldValues is never touched
@@ -512,7 +537,7 @@ export class TransactionsMongoService {
         { returnDocument: "after" },
       );
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
-    return toTransactionJson(row);
+    return toTransactionJson(db, row);
   }
 
   async deleteTransaction(id: string) {
