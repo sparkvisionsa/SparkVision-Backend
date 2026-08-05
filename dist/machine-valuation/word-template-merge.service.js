@@ -822,6 +822,7 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
     async mergeAndRespond(projectId, ctx, body, res) {
         const loaded = await this.mvService.getProject(projectId, ctx);
         const project = loaded.project;
+        const useStoredProjectState = body.useStoredProjectState === true;
         const reportData = (project.reportData ?? {});
         const sourceTemplatePath = findBundledWordTemplateOnDisk();
         if (!sourceTemplatePath) {
@@ -832,23 +833,23 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
         const assetSources = await this.resolveImageSources({
             projectId,
             ctx,
-            urls: body.assetImageUrls,
-            base64List: body.assetImagesBase64,
+            urls: useStoredProjectState ? undefined : body.assetImageUrls,
+            base64List: useStoredProjectState ? undefined : body.assetImagesBase64,
             fallback: "assets",
         });
         const valuationSources = await this.resolveImageSources({
             projectId,
             ctx,
-            urls: body.valuationImageUrls,
-            base64List: body.valuationImagesBase64,
+            urls: useStoredProjectState ? undefined : body.valuationImageUrls,
+            base64List: useStoredProjectState ? undefined : body.valuationImagesBase64,
             fallback: "valuation",
             project,
         });
         const clientSources = await this.resolveImageSources({
             projectId,
             ctx,
-            urls: body.clientImageUrls,
-            base64List: body.clientImagesBase64,
+            urls: useStoredProjectState ? undefined : body.clientImageUrls,
+            base64List: useStoredProjectState ? undefined : body.clientImagesBase64,
             fallback: "client",
             project,
         });
@@ -884,7 +885,9 @@ let WordTemplateMergeService = WordTemplateMergeService_1 = class WordTemplateMe
             ]);
             this.logger.log(`Prepared Word images for ${projectId} in ${Date.now() - prepareStartedAt}ms (asset=${assetImagePaths.length}, valuation=${valuationImagePaths.length}, client=${clientImagePaths.length})`);
             const storedTextValues = buildTextValues(reportData, project.name || "", project.displayNumber);
-            const requestTextValues = sanitizeVariableOverrides(body.textValues);
+            const requestTextValues = useStoredProjectState
+                ? {}
+                : sanitizeVariableOverrides(body.textValues);
             const textValues = { ...storedTextValues, ...requestTextValues };
             if (!String(textValues.assetSingularPlural || "").trim()) {
                 textValues.assetSingularPlural =

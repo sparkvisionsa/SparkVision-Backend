@@ -936,6 +936,7 @@ export class MachineValuationController {
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
       alsoPdf?: boolean;
+      useStoredProjectState?: boolean;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;

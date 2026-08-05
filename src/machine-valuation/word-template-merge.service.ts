@@ -1001,6 +1001,8 @@ export class WordTemplateMergeService {
       textValues?: Record<string, string>;
       /** عند true: يُرجع ZIP يحتوي Word + PDF محوّل من نفس الملف. */
       alsoPdf?: boolean;
+      /** تجاهل نسخة الواجهة واقرأ أحدث بيانات وصور المشروع من قاعدة البيانات. */
+      useStoredProjectState?: boolean;
       imageLayout?: {
         imagesPerRow?: number;
         imagesPerPage?: number;
@@ -1013,6 +1015,7 @@ export class WordTemplateMergeService {
   ): Promise<void> {
     const loaded = await this.mvService.getProject(projectId, ctx);
     const project = loaded.project;
+    const useStoredProjectState = body.useStoredProjectState === true;
     const reportData = (project.reportData ?? {}) as Record<string, unknown>;
     const sourceTemplatePath = findBundledWordTemplateOnDisk();
     if (!sourceTemplatePath) {
@@ -1026,23 +1029,23 @@ export class WordTemplateMergeService {
     const assetSources = await this.resolveImageSources({
       projectId,
       ctx,
-      urls: body.assetImageUrls,
-      base64List: body.assetImagesBase64,
+      urls: useStoredProjectState ? undefined : body.assetImageUrls,
+      base64List: useStoredProjectState ? undefined : body.assetImagesBase64,
       fallback: "assets",
     });
     const valuationSources = await this.resolveImageSources({
       projectId,
       ctx,
-      urls: body.valuationImageUrls,
-      base64List: body.valuationImagesBase64,
+      urls: useStoredProjectState ? undefined : body.valuationImageUrls,
+      base64List: useStoredProjectState ? undefined : body.valuationImagesBase64,
       fallback: "valuation",
       project,
     });
     const clientSources = await this.resolveImageSources({
       projectId,
       ctx,
-      urls: body.clientImageUrls,
-      base64List: body.clientImagesBase64,
+      urls: useStoredProjectState ? undefined : body.clientImageUrls,
+      base64List: useStoredProjectState ? undefined : body.clientImagesBase64,
       fallback: "client",
       project,
     });
@@ -1104,7 +1107,9 @@ export class WordTemplateMergeService {
         project.displayNumber,
       );
       // وجود المفتاح في الطلب — حتى لو كانت قيمته فارغة — يتغلب على القيمة المخزنة.
-      const requestTextValues = sanitizeVariableOverrides(body.textValues);
+      const requestTextValues = useStoredProjectState
+        ? {}
+        : sanitizeVariableOverrides(body.textValues);
       const textValues = { ...storedTextValues, ...requestTextValues };
       // منع مسح عناوين الفهرس/المتن عندما تصل قيمة فارغة من الواجهة
       if (!String(textValues.assetSingularPlural || "").trim()) {
