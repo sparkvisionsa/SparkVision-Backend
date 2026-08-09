@@ -266,6 +266,7 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     scope: str("scope"),
     assumptions: str("assumptions"),
     risks: str("risks"),
+    authorEntries: arr("authorEntries"),
     author1Id: str("author1Id"),
     author1Title: str("author1Title"),
     author2Id: str("author2Id"),

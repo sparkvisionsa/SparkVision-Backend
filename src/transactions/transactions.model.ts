@@ -9,6 +9,12 @@ export type SavedFieldEntry = {
 
 // ─── Available Services sub-document ─────────────────────────────────────────
 
+export type AuthorEntry = {
+  id: string;       // author1Id/author2Id/etc equivalent — signatory id or free text
+  signatoryId: string; // company signatory id, if selected from dropdown
+  title: string;
+};
+
 export type AvailableServices = {
   electricity: boolean | null;
   electricityUnits: number | null;
@@ -131,6 +137,8 @@ export type EvalData = {
   scope: string;
   assumptions: string;
   risks: string;
+
+    authorEntries: AuthorEntry[];
 
   // report authors
   author1Id: string;
@@ -277,6 +285,8 @@ export function emptyEvalData(): EvalData {
     scope: "",
     assumptions: "",
     risks: "",
+    authorEntries: [],
+
     author1Id: "",
     author1Title: "",
     author2Id: "",
