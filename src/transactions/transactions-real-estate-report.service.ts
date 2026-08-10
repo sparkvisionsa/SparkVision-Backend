@@ -12,6 +12,7 @@ import {
 } from "./transactions.model";
 import { IMAGES_COLLECTION, type ImageDoc } from "./transactions-media.model";
 import { RealEstateReportTemplateService } from "./real-estate-report-template.service";
+import { convertDocxBufferToPdf } from "./docx-to-pdf";
 
 // ─── Label maps used to turn stored IDs into the Arabic labels the template
 // expects. Kept intentionally small — extend as the template grows. ─────────
@@ -140,7 +141,7 @@ export class TransactionsRealEstateReportService {
 
   constructor(private readonly templateSvc: RealEstateReportTemplateService) {}
 
-  async generateReport(id: string, res: Response): Promise<void> {
+  async generateReport(id: string, res: Response, disposition: "inline" | "attachment" = "attachment",): Promise<void> {
     this.logger.log(`Starting real-estate Word report for transaction: ${id}`);
 
     if (!ObjectId.isValid(id)) {
@@ -242,15 +243,43 @@ export class TransactionsRealEstateReportService {
 
     this.logger.log(`Word report generated: ${docxBuffer.length} bytes`);
 
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="real-estate-report-${id}.docx"`,
-    );
-    res.end(docxBuffer);
-    this.logger.log(`Word report sent successfully`);
-  }
-}
+        // ── Download: send the .docx as-is ─────────────────────────────────────
+        if (disposition === "attachment") {
+          res.setHeader(
+            "Content-Type",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          );
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="real-estate-report-${id}.docx"`,
+          );
+          res.end(docxBuffer);
+          this.logger.log(`Word report (docx) sent successfully`);
+          return;
+        }
+
+        // ── View: convert to PDF so it opens inline in the browser ─────────────
+        this.logger.log(`Converting docx to PDF for inline viewing...`);
+        let pdfBuffer: Buffer;
+        try {
+          pdfBuffer = await convertDocxBufferToPdf(docxBuffer);
+        } catch (err) {
+          this.logger.error(`DOCX→PDF conversion failed: ${(err as Error).message}`);
+          res.status(500).json({
+            error: "Failed to generate PDF preview",
+            details: (err as Error).message,
+          });
+          return;
+        }
+
+        this.logger.log(`PDF generated: ${pdfBuffer.length} bytes`);
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+          "Content-Disposition",
+          `inline; filename="real-estate-report-${id}.pdf"`,
+        );
+        res.end(pdfBuffer);
+        this.logger.log(`PDF report sent successfully`);
+      }
+    }

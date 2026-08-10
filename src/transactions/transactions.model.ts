@@ -107,6 +107,8 @@ export type EvalData = {
   zoomComparisons: string;
 
   // appraiser opinion
+  appraiserData: Record<string, unknown>;
+
   evalDate: string;
   completedDate: string;
   reportDate: string;
@@ -263,6 +265,7 @@ export function emptyEvalData(): EvalData {
     zoomMap: "",
     zoomAerial: "",
     zoomComparisons: "",
+    appraiserData: {},
     evalDate: "",
     completedDate: "",
     reportDate: "",
@@ -336,6 +339,7 @@ export function emptyEvalData(): EvalData {
     operationType: "",
     propertyStatus: "",
     restrictions: "",
+
     ownerId: "",
     ownerNationality: "",
     ownershipPercentage: "",

@@ -243,6 +243,12 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     zoomMap: str("zoomMap"),
     zoomAerial: str("zoomAerial"),
     zoomComparisons: str("zoomComparisons"),
+    appraiserData: (() => {
+          const src = raw["appraiserData"];
+          return src && typeof src === "object" && !Array.isArray(src)
+            ? { ...(src as Record<string, unknown>) }
+            : {};
+        })(),
     evalDate: str("evalDate"),
     completedDate: str("completedDate"),
     reportDate: str("reportDate"),
@@ -517,7 +523,6 @@ export class TransactionsMongoService {
     return toTransactionJson(db, row);
   }
 
-  // PATCH — only evalData is updated; templateFieldValues is never touched
   async updateTransaction(
     id: string,
     body: Record<string, unknown>,
@@ -529,12 +534,26 @@ export class TransactionsMongoService {
     const db = await getMongoDb();
     const evalData = extractEvalData(body);
 
+    // Core (top-level) fields the ExpandedDetail edit form may also send.
+    const topLevelKeys = [
+      "valuationPurpose",
+      "valuationHypothesis",
+      "valuationBasis",
+      "ownershipType",
+      "contactNo",
+    ] as const;
+    const topLevelUpdates: Record<string, string> = {};
+    for (const k of topLevelKeys) {
+      const v = body[k];
+      if (typeof v === "string") topLevelUpdates[k] = v.trim();
+    }
+
     const now = new Date();
     const row = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOneAndUpdate(
         { _id: new ObjectId(id) },
-        { $set: { evalData, updatedAt: now } },
+        { $set: { evalData, ...topLevelUpdates, updatedAt: now } },
         { returnDocument: "after" },
       );
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
