@@ -8,6 +8,7 @@ import type { RequestContext } from "@/server/auth-tracking/context";
 const COMPANIES_COLLECTION = "companies";
 const MAX_TEMPLATE_BYTES = 25 * 1024 * 1024;
 const UPLOAD_ROOT = path.join(process.cwd(), "uploads", "real-estate-templates");
+const USER_COMPANY_MEMBERSHIPS_COLLECTION = "userCompanyMemberships";
 
 export type RealEstateWordTemplate = {
   fileName: string;
@@ -61,6 +62,8 @@ export class RealEstateReportTemplateService {
     return company?.reportTemplates?.realEstate ?? null;
   }
 
+
+
   /** يُستخدم داخلياً فقط عند دمج التقرير الفعلي — يعيد المسار المطلق على القرص إن وُجد الملف. */
   async getTemplateForRender(
     companyId: string,
@@ -77,6 +80,34 @@ export class RealEstateReportTemplateService {
     const absolutePath = absoluteFromRelative(template.fileUrl);
     if (!fs.existsSync(absolutePath)) return null;
     return { ...template, absolutePath };
+  }
+
+  async getTemplateForRenderByUserFallback(
+    userId: string,
+    excludeCompanyId?: string | null,
+  ): Promise<
+    (RealEstateWordTemplate & { absolutePath: string; companyId: string }) | null
+  > {
+    if (!ObjectId.isValid(userId)) return null;
+
+    const db = await getMongoDb();
+    const memberships = await db
+      .collection(USER_COMPANY_MEMBERSHIPS_COLLECTION)
+      .find({ userId: new ObjectId(userId) })
+      .sort({ updatedAt: -1 })
+      .toArray();
+
+    for (const m of memberships) {
+      const companyId = String(m.companyId);
+      if (excludeCompanyId && companyId === String(excludeCompanyId)) continue;
+
+      const template = await this.getTemplateForRender(companyId);
+      if (template) {
+        return { ...template, companyId };
+      }
+    }
+
+    return null;
   }
 
   async upsertTemplate(

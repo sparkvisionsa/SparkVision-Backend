@@ -33,6 +33,7 @@ export interface CompanyReportSignatoryRow {
   isCompanyAdmin: boolean;
   /** true عندما يكون السجل معدّاً للتقارير فقط (بدون مستخدم نظام). */
   isReportOnly?: boolean;
+  productIds?: ValueTechProductId[];
 }
 
 /**
@@ -45,6 +46,7 @@ export interface CompanyReportOnlySignatory {
   jobTitle?: string;
   membershipNo?: string;
   signatureImageDataUrl?: string | null;
+  productIds?: ValueTechProductId[];
   createdAt: string;
   updatedAt: string;
 }

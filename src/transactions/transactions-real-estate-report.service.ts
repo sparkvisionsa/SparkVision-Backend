@@ -139,9 +139,14 @@ async function runPythonWorker(payload: object): Promise<Buffer> {
 export class TransactionsRealEstateReportService {
   private readonly logger = new Logger(TransactionsRealEstateReportService.name);
 
-  constructor(private readonly templateSvc: RealEstateReportTemplateService) {}
+  constructor(private readonly templateSvc: RealEstateReportTemplateService) { }
 
-  async generateReport(id: string, res: Response, disposition: "inline" | "attachment" = "attachment",): Promise<void> {
+  async generateReport(
+    id: string,
+    res: Response,
+    disposition: "inline" | "attachment" = "attachment",
+    forcePdf: boolean = false,
+  ): Promise<void> {
     this.logger.log(`Starting real-estate Word report for transaction: ${id}`);
 
     if (!ObjectId.isValid(id)) {
@@ -155,12 +160,30 @@ export class TransactionsRealEstateReportService {
 
     if (!tx) throw new NotFoundException("المعاملة غير موجودة");
 
-    if (!tx.companyId) {
-      res.status(400).json({ error: "لا يمكن إنشاء التقرير: المعاملة غير مرتبطة بشركة." });
-      return;
+    // ── Resolve template: prefer the transaction's own company, but fall
+    // back to any other company the creating user belongs to that has a
+    // real-estate template uploaded. ────────────────────────────────────────
+    let template: Awaited<ReturnType<typeof this.templateSvc.getTemplateForRender>> = null;
+    let resolvedCompanyId: string | null = tx.companyId ?? null;
+
+    if (resolvedCompanyId) {
+      template = await this.templateSvc.getTemplateForRender(resolvedCompanyId);
     }
 
-    const template = await this.templateSvc.getTemplateForRender(tx.companyId);
+    if (!template && tx.createdByUserId) {
+      const fallback = await this.templateSvc.getTemplateForRenderByUserFallback(
+        tx.createdByUserId,
+        resolvedCompanyId,
+      );
+      if (fallback) {
+        template = fallback;
+        resolvedCompanyId = fallback.companyId;
+        this.logger.log(
+          `Transaction ${id}: using fallback template from company ${resolvedCompanyId} (own companyId had none)`,
+        );
+      }
+    }
+
     if (!template) {
       res.status(400).json({
         error: "لم يتم رفع قالب Word للتقارير العقارية لهذه الشركة بعد.",
@@ -243,43 +266,48 @@ export class TransactionsRealEstateReportService {
 
     this.logger.log(`Word report generated: ${docxBuffer.length} bytes`);
 
-        // ── Download: send the .docx as-is ─────────────────────────────────────
-        if (disposition === "attachment") {
-          res.setHeader(
-            "Content-Type",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          );
-          res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="real-estate-report-${id}.docx"`,
-          );
-          res.end(docxBuffer);
-          this.logger.log(`Word report (docx) sent successfully`);
-          return;
-        }
+    // Whether we need a PDF: either explicit inline viewing, or an
+    // attachment download explicitly requested as PDF via ?format=pdf.
+    const needsPdf = disposition === "inline" || forcePdf;
 
-        // ── View: convert to PDF so it opens inline in the browser ─────────────
-        this.logger.log(`Converting docx to PDF for inline viewing...`);
-        let pdfBuffer: Buffer;
-        try {
-          pdfBuffer = await convertDocxBufferToPdf(docxBuffer);
-        } catch (err) {
-          this.logger.error(`DOCX→PDF conversion failed: ${(err as Error).message}`);
-          res.status(500).json({
-            error: "Failed to generate PDF preview",
-            details: (err as Error).message,
-          });
-          return;
-        }
-
-        this.logger.log(`PDF generated: ${pdfBuffer.length} bytes`);
-
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader(
-          "Content-Disposition",
-          `inline; filename="real-estate-report-${id}.pdf"`,
-        );
-        res.end(pdfBuffer);
-        this.logger.log(`PDF report sent successfully`);
-      }
+    if (!needsPdf) {
+      // ── Default download: send the .docx as-is ──────────────────────────
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="real-estate-report-${id}.docx"`,
+      );
+      res.end(docxBuffer);
+      this.logger.log(`Word report (docx) sent successfully`);
+      return;
     }
+
+    // ── PDF path: used for inline viewing AND for ?format=pdf downloads ───
+    this.logger.log(`Converting docx to PDF...`);
+    let pdfBuffer: Buffer;
+    try {
+      pdfBuffer = await convertDocxBufferToPdf(docxBuffer);
+    } catch (err) {
+      this.logger.error(`DOCX→PDF conversion failed: ${(err as Error).message}`);
+      res.status(500).json({
+        error: "Failed to generate PDF",
+        details: (err as Error).message,
+      });
+      return;
+    }
+
+    this.logger.log(`PDF generated: ${pdfBuffer.length} bytes`);
+
+    const pdfDisposition = disposition === "inline" ? "inline" : "attachment";
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `${pdfDisposition}; filename="real-estate-report-${id}.pdf"`,
+    );
+    res.end(pdfBuffer);
+    this.logger.log(`PDF report sent successfully`);
+  }
+}
