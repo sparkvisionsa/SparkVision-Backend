@@ -19,6 +19,7 @@ function parseCorsOrigins() {
   const raw =
     process.env.CORS_ORIGINS ??
     process.env.FRONTEND_ORIGIN ??
+
     "http://localhost:3000";
   return raw
     .split(",")
