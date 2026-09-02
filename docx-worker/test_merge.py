@@ -53,6 +53,24 @@ EMPTY_DOCUMENT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
 
 
+def actual_template_path() -> str | None:
+    """Return an explicitly supplied legacy template used by integration checks.
+
+    The historical report document is no longer tracked in Git, so the core
+    worker regression suite must stay self-contained after a clean checkout.
+    Set DOCX_WORKER_REGRESSION_TEMPLATE to run the two full-template checks.
+    """
+    configured = os.environ.get("DOCX_WORKER_REGRESSION_TEMPLATE", "").strip()
+    if not configured:
+        return None
+    template_path = os.path.abspath(configured)
+    assert os.path.isfile(template_path), (
+        "DOCX_WORKER_REGRESSION_TEMPLATE does not point to a readable .docx file: "
+        + template_path
+    )
+    return template_path
+
+
 def make_solid_jpeg(
     width: int,
     height: int,
@@ -432,10 +450,9 @@ def actual_template_values() -> dict[str, str]:
 
 
 def test_actual_template_variables_mail_merge_cleanup_and_images() -> None:
-    template_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "assets", "تقرير تقييم.docx")
-    )
-    assert os.path.isfile(template_path)
+    template_path = actual_template_path()
+    if template_path is None:
+        return
     with zipfile.ZipFile(template_path, "r") as template_zip:
         template_document_xml = template_zip.read("word/document.xml")
         template_settings_xml = template_zip.read("word/settings.xml")
@@ -681,9 +698,9 @@ def test_actual_template_variables_mail_merge_cleanup_and_images() -> None:
 
 
 def test_actual_template_dynamic_report_preparers_without_annex_images() -> None:
-    template_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "assets", "تقرير تقييم.docx")
-    )
+    template_path = actual_template_path()
+    if template_path is None:
+        return
     signature_one = make_transparent_signature_png(280, 105)
     signature_two = make_transparent_signature_png(
         155,
@@ -1147,10 +1164,13 @@ def main() -> None:
     print("OK: baseline JPEG passthrough skips re-encode")
     test_visible_syntaxes_split_runs_and_rpr()
     print("OK: visible « » and << >> variables, split runs, rPr, no bookmark values")
-    test_actual_template_variables_mail_merge_cleanup_and_images()
-    print("OK: actual template variables, mail-merge cleanup, heading-based images")
-    test_actual_template_dynamic_report_preparers_without_annex_images()
-    print("OK: dynamic report preparers, signatures, preserved Word table formatting")
+    if actual_template_path() is None:
+        print("SKIP: full-template checks (set DOCX_WORKER_REGRESSION_TEMPLATE to enable)")
+    else:
+        test_actual_template_variables_mail_merge_cleanup_and_images()
+        print("OK: actual template variables, mail-merge cleanup, heading-based images")
+        test_actual_template_dynamic_report_preparers_without_annex_images()
+        print("OK: dynamic report preparers, signatures, preserved Word table formatting")
     test_legacy_bookmarks_do_not_drive_text_or_images()
     print("OK: legacy bookmarks do not drive text or image insertion")
     test_toc_keeps_template_font_direction_and_styles()

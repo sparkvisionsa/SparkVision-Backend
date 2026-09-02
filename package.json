@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:auth-tracking": "node --import tsx --test tests/auth-tracking.test.ts",
     "test:report-templates": "node --import tsx --test tests/report-template-catalog.test.ts",
+    "test:pending-pdf": "node --import tsx --test tests/pending-pdf-export.test.ts",
     "migrate:auth-tracking": "node scripts/migrate-auth-tracking.mjs",
     "migrate:asset-images-to-spaces": "node scripts/migrate-asset-images-to-spaces.mjs",
     "seed:asset-descriptions": "node scripts/seed-asset-descriptions.mjs",

@@ -32,6 +32,17 @@ The DOCX/PPTX merge workers use `docx-worker/venv`; the WeasyPrint renderer
 uses `pdf-worker/.venv`. Their requirements are committed so a deployment does
 not depend on a previously copied virtual environment.
 
+The self-contained DOCX worker checks run with:
+
+```bash
+docx-worker/venv/bin/python docx-worker/test_merge.py
+```
+
+The two legacy full-template integration checks are intentionally opt-in because
+their historical input file is not committed. Set
+`DOCX_WORKER_REGRESSION_TEMPLATE` to the approved `.docx` file before running
+that command to enable them.
+
 On Linux, converting Word or PowerPoint files to PDF currently requires
 LibreOffice. The Microsoft Office renderer in this codebase uses Windows COM;
 Microsoft 365 cloud conversion is not configured by this repository.

@@ -16,7 +16,7 @@ import {
   isPptxPdfConversionAvailable,
   machineValuationPdfTimeoutMs,
 } from "./docx-to-pdf";
-import { storePendingPdfExport, takePendingPdfExport } from "./pending-pdf-export";
+import { getPendingPdfExport, storePendingPdfExport } from "./pending-pdf-export";
 
 type PptxMergeRequest = {
   /** Selects one of the owning company's saved PowerPoint templates. */
@@ -901,7 +901,7 @@ export class PptxTemplateMergeService {
     token: string,
     res: Response,
   ): Promise<void> {
-    const row = takePendingPdfExport(projectId, token);
+    const row = getPendingPdfExport(projectId, token);
     if (!row) {
       throw new NotFoundException("انتهت صلاحية ملف PDF أو الرمز غير صالح. أعد تنزيل التقرير.");
     }
@@ -916,11 +916,7 @@ export class PptxTemplateMergeService {
       `attachment; filename="${encodeURIComponent(row.fileName)}"`,
     );
     res.setHeader("Content-Length", String(fileStat.size));
-    try {
-      await pipeFileToResponse(row.filePath, res);
-    } finally {
-      fs.rm(row.filePath, { force: true }, () => undefined);
-    }
+    await pipeFileToResponse(row.filePath, res);
   }
 
   private async materializeReportAssetImages(

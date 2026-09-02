@@ -17,7 +17,7 @@ import {
   isDocxPdfConversionAvailable,
   machineValuationPdfTimeoutMs,
 } from "./docx-to-pdf";
-import { storePendingPdfExport, takePendingPdfExport } from "./pending-pdf-export";
+import { getPendingPdfExport, storePendingPdfExport } from "./pending-pdf-export";
 
 type MergeImageLayout = {
   imagesPerRow: number;
@@ -1540,7 +1540,7 @@ export class WordTemplateMergeService {
     token: string,
     res: Response,
   ): Promise<void> {
-    const row = takePendingPdfExport(projectId, token);
+    const row = getPendingPdfExport(projectId, token);
     if (!row) {
       throw new NotFoundException("انتهت صلاحية ملف PDF أو الرمز غير صالح. أعد تنزيل التقرير.");
     }
@@ -1554,11 +1554,7 @@ export class WordTemplateMergeService {
       `attachment; filename="${encodeURIComponent(row.fileName)}"`,
     );
     res.setHeader("Content-Length", String(fileStat.size));
-    try {
-      await pipeFileToResponse(row.filePath, res);
-    } finally {
-      fs.rm(row.filePath, { force: true }, () => undefined);
-    }
+    await pipeFileToResponse(row.filePath, res);
   }
 
   private async resolveImageSources(opts: {
