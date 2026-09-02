@@ -75,12 +75,24 @@ IMAGE_SECTION_HEADINGS: dict[str, tuple[str, ...]] = {
     "asset": (
         "مرفق 2: الصور الفوتوغرافية",
         "مرفق2: الصور الفوتوغرافية",
+        "مرفق 2: صور الأصول",
+        "مرفق2: صور الأصول",
     ),
     "client": (
         "مرفق 3: المستندات المستلمة من العميل",
         "مرفق3: المستندات المستلمة من العميل",
     ),
 }
+DEFAULT_ASSET_IMAGE_MARKERS = (
+    "صور_الاصول",
+    "صور_الأصول",
+)
+DEFAULT_VALUATION_IMAGE_MARKERS = (
+    "صور_حسابات_القيمة",
+)
+DEFAULT_CLIENT_IMAGE_MARKERS = (
+    "صور_ملفات_العميل",
+)
 
 REPORT_PREPARER_TABLE_HEADERS = (
     "بيانات المقيم",
@@ -122,7 +134,10 @@ REPORT_COVER_FOOTER_MARKERS = (
 )
 
 VISIBLE_VARIABLE_RE = re.compile(
-    r"«(?P<guillemet>[^»\r\n]+)»|<<(?P<ascii>[^<>\r\n]+)>>"
+    r"\u00ab(?P<guillemet>[^\u00bb\r\n]+)\u00bb|"
+    r"\u00bb(?P<guillemet_reverse>[^\u00ab\r\n]+)\u00ab|"
+    r"<<(?P<ascii>[^<>\r\n]+)>>|"
+    r">>(?P<ascii_reverse>[^<>\r\n]+)<<"
 )
 CLIENT_DOCS_IMAGES_PER_ROW = 2
 CLIENT_DOCS_IMAGES_PER_PAGE = 4
@@ -1070,9 +1085,15 @@ def normalize_placeholder_name(value: str) -> str:
         sanitize_xml_text(value or ""),
     )
     cleaned = cleaned.strip()
-    if cleaned.startswith("«") and cleaned.endswith("»"):
+    if (
+        (cleaned.startswith("«") and cleaned.endswith("»"))
+        or (cleaned.startswith("»") and cleaned.endswith("«"))
+    ):
         cleaned = cleaned[1:-1]
-    elif cleaned.startswith("<<") and cleaned.endswith(">>"):
+    elif (
+        (cleaned.startswith("<<") and cleaned.endswith(">>"))
+        or (cleaned.startswith(">>") and cleaned.endswith("<<"))
+    ):
         cleaned = cleaned[2:-2]
     cleaned = cleaned.replace("*", "_")
     return re.sub(r"\s+", "_", cleaned)
@@ -1092,7 +1113,27 @@ _PLACEHOLDER_DEFAULTS = {
 }
 
 
-def placeholder_value(name: str, text_values: dict[str, str]) -> tuple[bool, str]:
+def placeholder_value(
+    name: str,
+    text_values: dict[str, str],
+    excluded_variable_names: set[str] | None = None,
+) -> tuple[bool, str]:
+    """Resolve an exact company mapping first, then retain legacy aliases.
+
+    `PLACEHOLDER_FIELDS` used to be the only source of truth, which meant a
+    valid company placeholder (for example ``<<branchManager>>``) was never
+    filled.  The server now sends values keyed by the raw template variable;
+    normalising both sides keeps that working even when Word splits runs or a
+    template uses spaces/RTL marks.
+    """
+    normalized = normalize_placeholder_name(name)
+    if excluded_variable_names and normalized in excluded_variable_names:
+        return False, ""
+
+    for value_key, value in text_values.items():
+        if normalize_placeholder_name(value_key) == normalized:
+            return True, sanitize_xml_text(str(value or ""), strip=False)
+
     field = placeholder_field_key(name)
     if field is None:
         return False, ""
@@ -1173,14 +1214,20 @@ def find_complex_field_end(
 
 def visible_variable_name(match: re.Match[str]) -> str:
     return sanitize_xml_text(
-        match.group("guillemet") or match.group("ascii") or "",
+        match.group("guillemet")
+        or match.group("guillemet_reverse")
+        or match.group("ascii")
+        or match.group("ascii_reverse")
+        or "",
         strip=False,
     )
 
 
 def visible_variable_inner_span(match: re.Match[str]) -> tuple[int, int]:
-    group_name = "guillemet" if match.group("guillemet") is not None else "ascii"
-    return match.start(group_name), match.end(group_name)
+    for group_name in ("guillemet", "guillemet_reverse", "ascii", "ascii_reverse"):
+        if match.group(group_name) is not None:
+            return match.start(group_name), match.end(group_name)
+    return match.start(), match.end()
 
 
 def text_node_run(node: etree._Element) -> etree._Element | None:
@@ -1287,6 +1334,7 @@ def _paragraph_own_text_nodes_with_offsets(
 def replace_visible_variables(
     root: etree._Element,
     text_values: dict[str, str],
+    excluded_variable_names: set[str] | None = None,
 ) -> tuple[int, int]:
     """
     استبدل حصرياً المتغيرات المرئية «name» أو <<name>>، حتى عند انقسامها عبر runs.
@@ -1305,6 +1353,7 @@ def replace_visible_variables(
             known, value = placeholder_value(
                 visible_variable_name(match),
                 text_values,
+                excluded_variable_names,
             )
             if not known:
                 continue
@@ -1675,11 +1724,16 @@ def apply_tajawal_to_styles(xml_bytes: bytes) -> bytes:
 def apply_visible_variable_values(
     xml_bytes: bytes,
     text_values: dict[str, str] | None = None,
+    excluded_variable_names: set[str] | None = None,
 ) -> tuple[bytes, int, int]:
     root = etree.fromstring(xml_bytes)
     repair_text_nodes(root)
     clean_text_values = text_values or {}
-    found, filled = replace_visible_variables(root, clean_text_values)
+    found, filled = replace_visible_variables(
+        root,
+        clean_text_values,
+        excluded_variable_names,
+    )
     flatten_mail_merge_fields(root)
 
     out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
@@ -2951,6 +3005,52 @@ def find_body_heading_index(
     return None, None
 
 
+def find_body_template_marker_index(
+    children: list[Any],
+    marker_variable_names: set[str],
+) -> tuple[int | None, str | None]:
+    """Find a direct body paragraph containing a configured image marker.
+
+    Searching from the end mirrors the established appendix-heading behaviour
+    and avoids a visually repeated marker inside a table of contents.
+    """
+    if not marker_variable_names:
+        return None, None
+    for idx in range(len(children) - 1, -1, -1):
+        block = children[idx]
+        if etree.QName(block).localname != "p":
+            continue
+        visible = block_text(block)
+        for match in VISIBLE_VARIABLE_RE.finditer(visible):
+            variable_name = normalize_placeholder_name(visible_variable_name(match))
+            if variable_name in marker_variable_names:
+                return idx, variable_name
+    return None, None
+
+
+def remove_template_markers_from_block(
+    block: etree._Element,
+    marker_variable_names: set[str],
+) -> None:
+    """Delete only the marker token while preserving any surrounding text/style."""
+    nodes, full_text = text_nodes_with_offsets(block)
+    for match in reversed(list(VISIBLE_VARIABLE_RE.finditer(full_text))):
+        variable_name = normalize_placeholder_name(visible_variable_name(match))
+        if variable_name not in marker_variable_names:
+            continue
+        target = select_visible_variable_text_node(nodes, match)
+        if target is None:
+            continue
+        replace_text_range_in_selected_node(
+            nodes,
+            match.start(),
+            match.end(),
+            "",
+            target,
+        )
+        nodes, full_text = text_nodes_with_offsets(block)
+
+
 def block_is_empty_insertion_spacer(block) -> bool:
     if etree.QName(block).localname != "p":
         return False
@@ -3101,6 +3201,83 @@ def insert_images_after_section_heading(
     return inserted
 
 
+def insert_images_after_dynamic_marker(
+    doc,
+    images: list[ImageSource],
+    marker_variable_names: set[str],
+    layout: str,
+    images_per_row: int,
+    images_per_page: int,
+    asset_max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+    log_label: str = "image",
+    portrait: bool = False,
+) -> tuple[bool, int]:
+    """Insert an image grid directly beneath a company-defined placeholder.
+
+    The marker is removed before inserting the grid, so a merged report never
+    leaves a literal ``<<صور_الاصول>>`` token behind.  ``False`` means there
+    was no marker and the caller should use the appendix-heading fallback.
+    """
+    if not marker_variable_names:
+        return False, 0
+    body = doc.element.body
+    children = list(body)
+    target_idx, marker_name = find_body_template_marker_index(
+        children,
+        marker_variable_names,
+    )
+    if target_idx is None:
+        return False, 0
+
+    target_block = children[target_idx]
+    section_metrics = first_section_metrics_at_or_after(children, target_idx)
+    if portrait:
+        section_metrics = ensure_portrait_metrics(section_metrics)
+    remove_template_markers_from_block(target_block, marker_variable_names)
+    if not images:
+        log(f"{log_label} image marker found: {marker_name!r}; no images to insert")
+        return True, 0
+    if block_is_empty_insertion_spacer(target_block):
+        body.remove(target_block)
+        insert_at = target_idx
+    else:
+        insert_at = remove_empty_spacers_after(body, target_idx)
+
+    inserted, _ = insert_image_grid_pages(
+        doc,
+        body,
+        insert_at,
+        images,
+        layout,
+        images_per_row,
+        images_per_page,
+        section_metrics,
+        asset_max_side_px,
+    )
+    log(f"{log_label} image marker found: {marker_name!r}; inserted {inserted} image(s)")
+    return True, inserted
+
+
+def insert_asset_images_after_dynamic_marker(
+    doc,
+    images: list[ImageSource],
+    marker_variable_names: set[str],
+    images_per_row: int,
+    images_per_page: int,
+    asset_max_side_px: int,
+) -> tuple[bool, int]:
+    return insert_images_after_dynamic_marker(
+        doc,
+        images,
+        marker_variable_names,
+        "asset_grid",
+        images_per_row,
+        images_per_page,
+        asset_max_side_px,
+        log_label="asset",
+    )
+
+
 def insert_client_images_after_section_heading(
     doc,
     images: list[ImageSource],
@@ -3150,6 +3327,9 @@ def apply_image_sections_docx_api(
     asset_images: list[ImageSource],
     valuation_images: list[ImageSource],
     client_images: list[ImageSource] | None = None,
+    asset_image_marker_variables: set[str] | None = None,
+    valuation_image_marker_variables: set[str] | None = None,
+    client_image_marker_variables: set[str] | None = None,
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
     client_images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
@@ -3163,35 +3343,74 @@ def apply_image_sections_docx_api(
     stats = {"asset": 0, "valuation": 0, "client": 0}
     # الأهم أولاً: حسابات القيمة + مستندات العميل قبل مئات صور الأصول،
     # حتى لا تفشل إضافتها بعد تضخّم المستند/تعارض معرّفات الرسم.
-    stats["valuation"] = insert_images_after_section_heading(
+    valuation_marker_found, valuation_marker_inserted = insert_images_after_dynamic_marker(
         doc,
-        "valuation",
         valuation_images,
+        valuation_image_marker_variables or set(),
         "valuation_pages",
+        1,
+        1,
+        log_label="valuation",
+    )
+    stats["valuation"] = (
+        valuation_marker_inserted
+        if valuation_marker_found
+        else insert_images_after_section_heading(
+            doc,
+            "valuation",
+            valuation_images,
+            "valuation_pages",
+        )
     )
     valuation_images.clear()
     gc.collect()
     log(f"valuation images inserted: {stats['valuation']}")
 
-    stats["client"] = insert_client_images_after_section_heading(
+    client_marker_found, client_marker_inserted = insert_images_after_dynamic_marker(
         doc,
         client_images or [],
+        client_image_marker_variables or set(),
+        "client_grid",
         client_images_per_row,
         client_images_per_page,
+        log_label="client",
+        portrait=True,
+    )
+    stats["client"] = (
+        client_marker_inserted
+        if client_marker_found
+        else insert_client_images_after_section_heading(
+            doc,
+            client_images or [],
+            client_images_per_row,
+            client_images_per_page,
+        )
     )
     if client_images is not None:
         client_images.clear()
     gc.collect()
     log(f"client images inserted: {stats['client']}")
 
-    stats["asset"] = insert_images_after_section_heading(
+    marker_found, marker_inserted = insert_asset_images_after_dynamic_marker(
         doc,
-        "asset",
         asset_images,
-        "asset_grid",
+        asset_image_marker_variables or set(),
         images_per_row,
         images_per_page,
         asset_max_side,
+    )
+    stats["asset"] = (
+        marker_inserted
+        if marker_found
+        else insert_images_after_section_heading(
+            doc,
+            "asset",
+            asset_images,
+            "asset_grid",
+            images_per_row,
+            images_per_page,
+            asset_max_side,
+        )
     )
     asset_images.clear()
     gc.collect()
@@ -3254,6 +3473,37 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         raise ValueError("templatePath or templateBase64 missing")
 
     text_values = payload.get("textValues") or {}
+    if not isinstance(text_values, dict):
+        text_values = {}
+    excluded_variable_names = {
+        normalize_placeholder_name(str(value))
+        for value in (payload.get("excludedVariableNames") or [])
+        if isinstance(value, str) and normalize_placeholder_name(value)
+    }
+    def marker_name_set(key: str, defaults: tuple[str, ...]) -> set[str]:
+        names = {
+            normalize_placeholder_name(str(value))
+            for value in (payload.get(key) or [])
+            if isinstance(value, str) and normalize_placeholder_name(value)
+        }
+        names.update(normalize_placeholder_name(name) for name in defaults)
+        return {name for name in names if name}
+
+    asset_image_marker_variables = marker_name_set(
+        "assetImageMarkerVariables",
+        DEFAULT_ASSET_IMAGE_MARKERS,
+    )
+    valuation_image_marker_variables = marker_name_set(
+        "valuationImageMarkerVariables",
+        DEFAULT_VALUATION_IMAGE_MARKERS,
+    )
+    client_image_marker_variables = marker_name_set(
+        "clientImageMarkerVariables",
+        DEFAULT_CLIENT_IMAGE_MARKERS,
+    )
+    excluded_variable_names.update(asset_image_marker_variables)
+    excluded_variable_names.update(valuation_image_marker_variables)
+    excluded_variable_names.update(client_image_marker_variables)
     report_preparers_present, report_preparers = collect_report_preparers(payload)
     asset_images = collect_image_sources(payload, "assetImagePaths", "assetImagesBase64")
     valuation_images = collect_image_sources(payload, "valuationImagePaths", "valuationImagesBase64")
@@ -3333,6 +3583,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
                 updated, found, filled = apply_visible_variable_values(
                     updated,
                     text_values,
+                    excluded_variable_names,
                 )
                 if fname.lower().startswith("word/header"):
                     updated, changed_wraps = normalize_header_floating_wraps(updated)
@@ -3436,16 +3687,26 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
     del in_buf
     gc.collect()
 
-    if asset_images or valuation_images or client_images:
+    if (
+        asset_images
+        or valuation_images
+        or client_images
+        or asset_image_marker_variables
+        or valuation_image_marker_variables
+        or client_image_marker_variables
+    ):
         result, img_stats = apply_image_sections_docx_api(
             result,
             asset_images,
             valuation_images,
-            client_images,
-            images_per_row,
-            images_per_page,
-            client_images_per_row,
-            client_images_per_page,
+            client_images=client_images,
+            asset_image_marker_variables=asset_image_marker_variables,
+            valuation_image_marker_variables=valuation_image_marker_variables,
+            client_image_marker_variables=client_image_marker_variables,
+            images_per_row=images_per_row,
+            images_per_page=images_per_page,
+            client_images_per_row=client_images_per_row,
+            client_images_per_page=client_images_per_page,
             output_path=output_path,
         )
     else:

@@ -1,4 +1,4 @@
-import type { ObjectId, WithId } from "mongodb";
+import type { Long, ObjectId, WithId } from "mongodb";
 import type { AssetDoc, AssetType } from "@/assets/types";
 
 export type MvColumnFormatKind =
@@ -82,7 +82,27 @@ export interface MvReportInsertedBlock {
 
 export type MvReportPageOrientationPreference = "portrait" | "landscape";
 
+export type MvReportCustomFieldType = "text" | "textarea" | "number" | "date";
+
+export interface MvReportCustomField {
+  id: string;
+  sectionId: string;
+  modelId?: string;
+  label: string;
+  type: MvReportCustomFieldType;
+  required: boolean;
+  value?: string;
+}
+
+export interface MvReportCustomSection {
+  id: string;
+  modelId?: string;
+  title: string;
+}
+
 export interface MvProjectReportData {
+  /** Company report-data model selected for this simplified project. */
+  reportDataModelId?: string;
   reportReference?: string;
   reportTitle?: string;
   valuationMethod?: string;
@@ -145,6 +165,10 @@ export interface MvProjectReportData {
   finalValueWords?: string;
   /** قالب إخراج التقرير المختار داخل خطوات المشروع البسيط. */
   reportTemplateId?: string;
+  /** قالب Word المختار لهذا المشروع من قوالب الشركة. */
+  wordTemplateId?: string;
+  /** قالب PowerPoint المختار لهذا المشروع من قوالب الشركة. */
+  pptxTemplateId?: string;
   /** مسودة: علامة مائية وإخفاء صور التوقيع في رأي القيمة */
   reportPresentationDraft?: boolean;
   /** HTML — مستندات مستلمة من العميل */
@@ -153,6 +177,10 @@ export interface MvProjectReportData {
   clientDocumentsImagesPerRow?: 1 | 2 | 3;
   /** عدد صور الأصول في صف مرفق Word (1..6). */
   wordAssetImagesPerRow?: number;
+  /** عدد صور الأصول في صف شريحة PowerPoint (1..6). */
+  pptxAssetImagesPerRow?: number;
+  /** عدد صور مرفقات العميل في صف شريحة PowerPoint (1..6). */
+  pptxClientImagesPerRow?: number;
   /** جودة صور Word كنسبة مئوية (60..100). */
   wordImageQuality?: number;
   /** HTML — شهادة التسجيل في بوابة «تقييم» */
@@ -174,6 +202,10 @@ export interface MvProjectReportData {
   reportHiddenAnchorIds?: string[];
   /** اتجاهات صفحات التقرير اليدوية، مفاتيحها anchor الصفحة أو معرف الصورة. */
   reportPageOrientations?: Record<string, MvReportPageOrientationPreference>;
+  /** حقول يضيفها المستخدم داخل أقسام بيانات التقرير. */
+  customFields?: MvReportCustomField[];
+  /** أقسام إضافية في نهاية صفحة بيانات التقرير. */
+  customSections?: MvReportCustomSection[];
 }
 
 export interface MvProjectLocation {
@@ -316,6 +348,10 @@ export interface PicAssetDoc {
   projectId: ObjectId;
   parent: ObjectId;
   name: string;
+  lable?: string | null;
+  client_code?: string | null;
+  employer?: string | null;
+  val_tech_id?: Long | null;
   createdAt: Date;
   updatedAt: Date;
   isAssetFolder: true;
@@ -335,6 +371,15 @@ export interface PicAssetDoc {
   images: unknown[];
   voiceNotes: ObjectId[] | unknown[];
   isDone: boolean;
+  assetDescription?: {
+    id: string;
+    category: string;
+    type: string;
+    name: string;
+  } | null;
+  /** مكان الأصل المستورد من Excel أو المحدد من قائمة أماكن الأصول. */
+  asset_location: string | null;
+  asset_source?: string | null;
 }
 
 /** وثيقة مجلد صور في ‎`assets`‎ */
@@ -344,7 +389,7 @@ export type PicAssetMongoDoc = AssetDoc;
 export type PicAssetPatch = Partial<{
   writtenDescription: string | null;
   condition: string | null;
-  /** ملاحظات نصية — تُكتب في ‎rawData/normalizedData‎ كما في ‎assets.service‎ */
+  /** ملاحظات نصية — تُكتب في الحقل العلوي ‎notes‎ فقط، دون المساس بـ ‎rawData‎ */
   notes: string | null;
   assetType: AssetType;
   subAssetType: string | null;
@@ -352,10 +397,20 @@ export type PicAssetPatch = Partial<{
   brand: string | null;
   code: string | null;
   model: string | null;
-  manufactureYear: number | null;
-  kilometersDriven: number | null;
+  manufactureYear: number | string | null;
+  kilometersDriven: number | string | null;
   isPresent: boolean;
   isDone: boolean;
+  assetDescription: {
+    id: string;
+    category: string;
+    type: string;
+    name: string;
+  } | null;
+  asset_location: string | null;
+  employer: string | null;
+  category: string | null;
+  type: string | null;
   /** معرّفات GridFS أو مصفوفة كائنات وسائط خارجية ‎(لإعادة الترتيب/الحذف)‎ */
   images: string[] | unknown[];
   voiceNotes: string[] | unknown[];

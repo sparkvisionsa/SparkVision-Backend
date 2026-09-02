@@ -318,6 +318,9 @@ export function emptyMvPhotoFieldsForImportedAssetRow(opts?: {
   | "condition"
   | "brand"
   | "code"
+  | "lable"
+  | "client_code"
+  | "employer"
   | "model"
   | "manufactureYear"
   | "kilometersDriven"
@@ -335,10 +338,13 @@ export function emptyMvPhotoFieldsForImportedAssetRow(opts?: {
     condition: null,
     brand: null,
     code: null,
+    lable: null,
+    client_code: null,
+    employer: null,
     model: null,
     manufactureYear: null,
     kilometersDriven: null,
-    isPresent: null,
+    isPresent: false,
     /** صفوف الاستيراد/الجدول ومجلدات المعاينة تبدأ غير مكتملة حتى يراجعها المستخدم. */
     isDone: false,
     createdBy: opts?.createdBy ?? null,

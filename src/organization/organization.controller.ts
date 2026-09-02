@@ -33,6 +33,22 @@ import {
   updateCompanyReportOnlySignatorySignature,
   updateCompanyUserByCompanyAdmin,
 } from "@/server/auth-tracking/service";
+import {
+  createAssetDescription,
+  createAssetDescriptionCategory,
+  createAssetDescriptionName,
+  createAssetDescriptionType,
+  deleteAssetDescription,
+  deleteAssetDescriptionCategory,
+  deleteAssetDescriptionName,
+  deleteAssetDescriptionType,
+  getCompanyAssetDescriptions,
+  updateAssetDescription,
+  updateAssetDescriptionCategory,
+  updateAssetDescriptionMainImage,
+  updateAssetDescriptionName,
+  updateAssetDescriptionType,
+} from "./asset-descriptions.service";
 
 @Controller()
 export class OrganizationController {
@@ -260,6 +276,161 @@ export class OrganizationController {
     @Param("signatoryId") signatoryId: string,
   ) {
     const result = await deleteCompanyReportOnlySignatory(req, signatoryId);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Get("company/asset-descriptions")
+  async listAssetDescriptions(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const result = await getCompanyAssetDescriptions(req);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Post("company/asset-descriptions/categories")
+  async createAssetDescriptionCategoryRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await createAssetDescriptionCategory(req, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/asset-descriptions/categories/:id")
+  async patchAssetDescriptionCategoryRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateAssetDescriptionCategory(req, id, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Delete("company/asset-descriptions/categories/:id")
+  async deleteAssetDescriptionCategoryRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const result = await deleteAssetDescriptionCategory(req, id);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Post("company/asset-descriptions/types")
+  async createAssetDescriptionTypeRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await createAssetDescriptionType(req, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/asset-descriptions/types/:id")
+  async patchAssetDescriptionTypeRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateAssetDescriptionType(req, id, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Delete("company/asset-descriptions/types/:id")
+  async deleteAssetDescriptionTypeRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const result = await deleteAssetDescriptionType(req, id);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Post("company/asset-descriptions/names")
+  async createAssetDescriptionNameRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await createAssetDescriptionName(req, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/asset-descriptions/names/:id")
+  async patchAssetDescriptionNameRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateAssetDescriptionName(req, id, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Delete("company/asset-descriptions/names/:id")
+  async deleteAssetDescriptionNameRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const result = await deleteAssetDescriptionName(req, id);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Post("company/asset-descriptions")
+  async createAssetDescriptionRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown,
+  ) {
+    const result = await createAssetDescription(req, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/asset-descriptions/:id")
+  async patchAssetDescriptionRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateAssetDescription(req, id, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/asset-descriptions/:id/main-image")
+  async patchAssetDescriptionMainImageRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await updateAssetDescriptionMainImage(req, id, body ?? req.body);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Delete("company/asset-descriptions/:id")
+  async deleteAssetDescriptionRoute(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+  ) {
+    const result = await deleteAssetDescription(req, id);
     applyContextCookies(res, result.context);
     return result.payload;
   }

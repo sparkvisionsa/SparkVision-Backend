@@ -176,6 +176,10 @@ export interface CompanyAiReportTemplate {
 }
 
 export interface CompanyReportWordTemplate {
+  /** Stable id selected by projects; never a GridFS id. */
+  id?: string;
+  /** Human-readable name shown in template selectors. */
+  name?: string;
   fileName?: string;
   fileUrl?: string | null;
   /** معرف ملف GridFS — يضمن توفر القالب على أي سيرفر حتى لو اختفى مجلد uploads */
@@ -183,6 +187,85 @@ export interface CompanyReportWordTemplate {
   uploadedAt?: string;
   sizeBytes?: number;
   bookmarkNames?: string[];
+  /** Dashboard-controlled links between the scanned Word variables and system data. */
+  variableMappings?: CompanyReportTemplateVariableMapping[];
+  /** Variables intentionally left untouched when the template is merged. */
+  excludedVariableNames?: string[];
+}
+
+/**
+ * قالب PowerPoint النهائي المحفوظ للشركة. يُحفظ الملف نفسه على القرص وGridFS
+ * بينما تبقى أسماء المتغيرات بيانات وصفية خفيفة تُستخدم في لوحة الربط.
+ */
+export interface CompanyReportPptxTemplate {
+  /** Stable id selected by projects; never a GridFS id. */
+  id?: string;
+  /** Human-readable name shown in template selectors. */
+  name?: string;
+  fileName?: string;
+  fileUrl?: string | null;
+  /** معرف ملف GridFS؛ منفصل عن bucket Word حتى لا يستبدل أحد القالبين الآخر. */
+  gridFsFileId?: string | null;
+  uploadedAt?: string;
+  sizeBytes?: number;
+  /** أسماء المتغيرات المستخرجة من النصوص في الشرائح، بدون << >> أو « ». */
+  variableNames?: string[];
+  /** Alias aligned with the existing Word dashboard contract. */
+  bookmarkNames?: string[];
+  /** Dashboard-controlled links between the scanned PowerPoint variables and system data. */
+  variableMappings?: CompanyReportTemplateVariableMapping[];
+  /** Variables intentionally left untouched when the template is merged. */
+  excludedVariableNames?: string[];
+}
+
+export type CompanyReportTemplateKind = "word" | "pptx";
+
+/** ربط متغير ظاهر في قالب Word أو PowerPoint بمصدر بيانات مرن داخل النظام. */
+export interface CompanyReportTemplateVariableMapping {
+  /** Stable dashboard row ID, independent from a variable name that may be edited. */
+  id: string;
+  /** الاسم الداخلي للمتغير كما ظهر عند فحص القالب. */
+  variable: string;
+  /** System-field key or special image token, for example `reportData.reportTitle`. */
+  sourceKey?: string;
+  /** A manually supplied value, used when no sourceKey is selected. */
+  staticValue?: string;
+}
+
+/** تحفظ الربوط بشكل مستقل لكل نوع ملف، لأن اسم متغير واحد قد يعني شيئين مختلفين. */
+export interface CompanyReportTemplateVariableMappings {
+  word?: CompanyReportTemplateVariableMapping[];
+  pptx?: CompanyReportTemplateVariableMapping[];
+}
+
+/** المتغيرات التي اختارت الشركة عدم دمجها في كل نوع قالب. */
+export interface CompanyReportTemplateExcludedVariables {
+  word?: string[];
+  pptx?: string[];
+}
+
+/** A company-owned layout for the simplified project's report-data fields. */
+export interface CompanyReportDataModelField {
+  id: string;
+  label: string;
+  /** Existing system key or a safe `field:<id>` custom-field key. */
+  sourceKey: string;
+  type?: "text" | "textarea" | "number" | "date";
+  required?: boolean;
+  system?: boolean;
+}
+
+export interface CompanyReportDataModelSection {
+  id: string;
+  title: string;
+  fields: CompanyReportDataModelField[];
+}
+
+export interface CompanyReportDataModel {
+  id: string;
+  name: string;
+  isDefault?: boolean;
+  sections: CompanyReportDataModelSection[];
 }
 
 /** قوالب التقرير النهائي الافتراضية على مستوى الشركة. */
@@ -194,7 +277,16 @@ export interface CompanyReportDefaults {
   customSections?: CompanyReportCustomSection[];
   letterhead?: CompanyReportLetterheadTemplate;
   aiTemplates?: CompanyAiReportTemplate[];
+  /** Canonical multi-template collections. */
+  wordTemplates?: CompanyReportWordTemplate[];
+  pptxTemplates?: CompanyReportPptxTemplate[];
+  /** Compatibility mirrors for clients created before multi-template support. */
   wordTemplate?: CompanyReportWordTemplate | null;
+  pptxTemplate?: CompanyReportPptxTemplate | null;
+  variableMappings?: CompanyReportTemplateVariableMappings;
+  excludedVariables?: CompanyReportTemplateExcludedVariables;
+  /** Models offered before entering report data in a simplified project. */
+  reportDataModels?: CompanyReportDataModel[];
 }
 
 /**
@@ -206,7 +298,8 @@ export interface CompanyDoc {
   valueTechProductIds: ValueTechProductId[];
   /** مسؤول الشركة — نفس `users._id`؛ يوجد أيضاً صف عضوية `company_admin` في `user_company_memberships`. */
   adminUserId?: ObjectId;
-  /** شعار الشركة كـ data URL (يفضّل PNG). */
+  /** السجل التجاري للشركة — يُعرض في تذييل التقرير بجانب اسم الشركة. */
+  commercialRegistration?: string | null;
   logoDataUrl?: string | null;
   /**
    * @deprecated لم يعد يُستخدم كمصدر؛ القائمة تُبنى ديناميكياً من الأعضاء + reportOnlySignatories.

@@ -39,6 +39,9 @@ import type {
   MvProjectReportData,
   MvProjectReportType,
   MvProjectWorkflowStatus,
+  MvReportCustomField,
+  MvReportCustomFieldType,
+  MvReportCustomSection,
   MvReportEditableSection,
   MvReportInsertedBlock,
   MvReportInsertedBlockKind,
@@ -79,6 +82,8 @@ import {
 } from "./sheet-rows.util";
 import { mvProjectSharesCompany } from "./mv-project-scope.util";
 import { ASSETS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/collections";
+import { reserveValTechIds } from "@/assets/asset-sequence";
+import { isAppAssetSource, resolveAssetSource } from "@/assets/asset-source";
 import type { AssetDoc } from "@/assets/types";
 import { sanitizeTextInput } from "@/assets/asset-import.utils";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
@@ -636,6 +641,64 @@ function sanitizeReportAnchorIds(value: unknown): string[] {
   return out;
 }
 
+const MV_REPORT_CUSTOM_FIELD_TYPES = new Set<MvReportCustomFieldType>([
+  "text",
+  "textarea",
+  "number",
+  "date",
+]);
+
+function sanitizeReportCustomFields(value: unknown): MvReportCustomField[] {
+  if (!Array.isArray(value)) return [];
+  const fields: MvReportCustomField[] = [];
+  for (const [index, item] of value.slice(0, 80).entries()) {
+    const data =
+      item && typeof item === "object" && !Array.isArray(item)
+        ? (item as Record<string, unknown>)
+        : {};
+    const label = sanitizeOptionalText(data.label, 180);
+    const sectionId = sanitizeOptionalText(data.sectionId, 120);
+    if (!label || !sectionId) continue;
+    const type = MV_REPORT_CUSTOM_FIELD_TYPES.has(data.type as MvReportCustomFieldType)
+      ? (data.type as MvReportCustomFieldType)
+      : "text";
+    fields.push({
+      id: sanitizeOptionalText(data.id, 120) || `custom-field-${index + 1}`,
+      sectionId,
+      ...(sanitizeOptionalText(data.modelId, 120)
+        ? { modelId: sanitizeOptionalText(data.modelId, 120) }
+        : {}),
+      label,
+      type,
+      required: data.required === true,
+      value: sanitizeOptionalText(data.value, 4000),
+    });
+  }
+  return fields;
+}
+
+function sanitizeReportCustomSections(value: unknown): MvReportCustomSection[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 30)
+    .map((item, index) => {
+      const data =
+        item && typeof item === "object" && !Array.isArray(item)
+          ? (item as Record<string, unknown>)
+          : {};
+      const title = sanitizeOptionalText(data.title, 180);
+      if (!title) return null;
+      return {
+        id: sanitizeOptionalText(data.id, 120) || `custom-section-${index + 1}`,
+        ...(sanitizeOptionalText(data.modelId, 120)
+          ? { modelId: sanitizeOptionalText(data.modelId, 120) }
+          : {}),
+        title,
+      } satisfies MvReportCustomSection;
+    })
+    .filter((item): item is MvReportCustomSection => item != null);
+}
+
 function sanitizeReportPageOrientations(value: unknown): Record<string, "portrait" | "landscape"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, "portrait" | "landscape"> = {};
@@ -729,12 +792,15 @@ function hasMeaningfulSanitizedReportData(data: MvProjectReportData): boolean {
   if (Array.isArray(data.reportEditableSections) && data.reportEditableSections.length > 0) return true;
   if (Array.isArray(data.reportInsertedBlocks) && data.reportInsertedBlocks.length > 0) return true;
   if (Array.isArray(data.reportHiddenAnchorIds) && data.reportHiddenAnchorIds.length > 0) return true;
+  if (Array.isArray(data.customFields) && data.customFields.length > 0) return true;
+  if (Array.isArray(data.customSections) && data.customSections.length > 0) return true;
   return false;
 }
 
 function sanitizeReportData(raw: unknown): MvProjectReportData {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   return {
+    reportDataModelId: sanitizeOptionalText(data.reportDataModelId, 120),
     reportReference: sanitizeOptionalText(data.reportReference, 120),
     reportTitle: sanitizeOptionalText(data.reportTitle, 220),
     valuationMethod: sanitizeOptionalText(data.valuationMethod, 120),
@@ -795,6 +861,8 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     finalValue: sanitizeFinalValue(data.finalValue),
     finalValueWords: sanitizeOptionalText(data.finalValueWords, 500),
     reportTemplateId: sanitizeOptionalText(data.reportTemplateId, 120),
+    wordTemplateId: sanitizeOptionalText(data.wordTemplateId, 120),
+    pptxTemplateId: sanitizeOptionalText(data.pptxTemplateId, 120),
     reportPresentationDraft: data.reportPresentationDraft !== false,
     receivedClientDocumentsHtml: sanitizeOptionalText(data.receivedClientDocumentsHtml, 50_000),
     clientDocumentsImagesPerRow: (() => {
@@ -809,6 +877,14 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
       const n = Math.trunc(Number(data.wordImageQuality));
       return Number.isFinite(n) ? Math.max(60, Math.min(100, n)) : 90;
     })(),
+    pptxAssetImagesPerRow: (() => {
+      const n = Math.trunc(Number(data.pptxAssetImagesPerRow));
+      return Number.isFinite(n) ? Math.max(1, Math.min(6, n)) : 3;
+    })(),
+    pptxClientImagesPerRow: (() => {
+      const n = Math.trunc(Number(data.pptxClientImagesPerRow));
+      return Number.isFinite(n) ? Math.max(1, Math.min(6, n)) : 3;
+    })(),
     sceRegistrationCertificateHtml: sanitizeOptionalText(data.sceRegistrationCertificateHtml, 50_000),
     reportTextOverrides: sanitizeReportTextOverrides(data.reportTextOverrides),
     reportIntroExtraHtml: sanitizeOptionalText(data.reportIntroExtraHtml, 50_000),
@@ -820,6 +896,8 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
     reportInsertedBlocks: sanitizeReportInsertedBlocks(data.reportInsertedBlocks),
     reportHiddenAnchorIds: sanitizeReportAnchorIds(data.reportHiddenAnchorIds),
     reportPageOrientations: sanitizeReportPageOrientations(data.reportPageOrientations),
+    customFields: sanitizeReportCustomFields(data.customFields),
+    customSections: sanitizeReportCustomSections(data.customSections),
   };
 }
 
@@ -833,6 +911,7 @@ function pickReportDataProgressSummary(raw: unknown): MvProjectReportData | unde
   };
 
   const summary: MvProjectReportData = {
+    reportDataModelId: pickText("reportDataModelId", 120),
     valuationMethod: pickText("valuationMethod", 120),
     reportReference: pickText("reportReference", 120),
     reportTitle: pickText("reportTitle", 220),
@@ -1188,6 +1267,58 @@ function mongoPicAssetImagesCount(fieldPath: string = "$images"): Record<string,
   };
 }
 
+/**
+ * عدّ صور الأصول لملخص المشروع (شاشة التقرير النهائي).
+ * الصور الحية تعيش في GridFS (`scope: asset-images`) بعد النقل من مجلدات Pic،
+ * بينما `assets.images` قد تكون فارغة — لذلك نأخذ الأكبر بين العدّين بعد إزالة التكرار.
+ */
+async function countProjectAssetImagesForSummary(db: Db, projectId: ObjectId): Promise<number> {
+  const picImageCountExpr = {
+    $cond: [
+      { $gte: [{ $ifNull: ["$imageCount", -1] }, 0] },
+      { $max: [0, { $floor: "$imageCount" }] },
+      mongoPicAssetImagesCount("$images"),
+    ],
+  };
+  const [picAgg, gridFsAgg] = await Promise.all([
+    db
+      .collection<AssetDoc>(ASSETS_COLLECTION)
+      .aggregate<{ imageCount?: number }>([
+        { $match: { projectId, ...MV_PHOTO_FOLDER_FILTER } },
+        {
+          $group: {
+            _id: null,
+            imageCount: { $sum: picImageCountExpr },
+          },
+        },
+      ])
+      .toArray()
+      .catch(() => [] as { imageCount?: number }[]),
+    db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .aggregate<{ imageCount?: number }>(
+        [
+          {
+            $match: {
+              "metadata.projectId": projectId,
+              "metadata.scope": "asset-images",
+            },
+          },
+          { $set: { __mvDedupeKey: assetImageDedupeKeyMongoExpr() } },
+          { $group: { _id: "$__mvDedupeKey" } },
+          { $count: "imageCount" },
+        ],
+        { allowDiskUse: true },
+      )
+      .toArray()
+      .catch(() => [] as { imageCount?: number }[]),
+  ]);
+  return Math.max(
+    toSafeNonNegativeInt(picAgg[0]?.imageCount),
+    toSafeNonNegativeInt(gridFsAgg[0]?.imageCount),
+  );
+}
+
 function emptyPicAssetImagesObject(): Record<string, unknown> {
   return {
     plate: null,
@@ -1434,30 +1565,77 @@ function isRootSubProject(
   return p === undefined || p === null;
 }
 
-/** مطابقة صف ‎mv‎ مع مجلد الصور في ‎assets‎ عبر ‎(parent, name)‎ */
+/** الهوية الأصلية بعد التوليد: ‎lable‎ ثابت. ‎name‎ احتياط للوثائق القديمة بلا ‎lable‎. */
+function picAssetLabel(pic: { lable?: unknown; name?: unknown }): string {
+  const label = typeof pic.lable === "string" ? pic.lable.trim() : "";
+  if (label) return label;
+  return typeof pic.name === "string" ? pic.name.trim() : "";
+}
+
+/** اسم الأصل للعرض والتحديث: ‎assets.name‎ فقط، مع احتياط ‎lable‎ للوثائق القديمة. */
+function picAssetDisplayName(pic: { name?: unknown; lable?: unknown }): string {
+  const name = typeof pic.name === "string" ? pic.name.trim() : "";
+  if (name) return name;
+  return typeof pic.lable === "string" ? pic.lable.trim() : "";
+}
+
+/** لا يُستبدل ‎lable‎ بعد التوليد. إن كان فارغاً يُثبَّت مرة واحدة من الاسم الحالي. */
+function picAssetLableFreezePatch(pic: { lable?: unknown; name?: unknown }): { lable: string } | Record<string, never> {
+  const existing = typeof pic.lable === "string" ? pic.lable.trim() : "";
+  if (existing) return {};
+  const frozen = typeof pic.name === "string" ? pic.name.trim() : "";
+  return frozen ? { lable: frozen } : {};
+}
+
+/** إعادة التوليد تملأ ‎name‎/‎lable‎ فقط إن كانا فارغين — لا تُستبدل القيم الموجودة. */
+function generatedAssetIdentityPatch(
+  doc: { name?: unknown; lable?: unknown },
+  folder: string,
+): { name?: string; lable?: string } {
+  const existingLable = typeof doc.lable === "string" ? doc.lable.trim() : "";
+  const existingName = typeof doc.name === "string" ? doc.name.trim() : "";
+  const patch: { name?: string; lable?: string } = {};
+  if (!existingLable) patch.lable = folder;
+  if (!existingName) patch.name = folder;
+  return patch;
+}
+
+function picAssetLabelFilter(label: string): Filter<AssetDoc> {
+  return {
+    $or: [
+      { lable: label },
+      { lable: null, name: label },
+      { lable: { $exists: false }, name: label },
+    ],
+  } as Filter<AssetDoc>;
+}
+
+/** مطابقة صف ‎mv‎ مع مجلد الصور في ‎assets‎ عبر ‎(parent, lable)‎. */
 function picMatchKeyForMvSub(sub: MvSubProjectMongoDoc): string | null {
   const p = getParentIdFromDoc(sub);
   if (p == null) return null;
   return `${p.toString()}\u001f${normalizeSubProjectName(sub.name)}`;
 }
 
-function picMatchKeyForPicDoc(pic: { parent?: ObjectId | null; name?: string | null }): string {
+function picMatchKeyForPicDoc(pic: { parent?: ObjectId | null; lable?: string | null; name?: string | null }): string {
   const par = pic.parent;
-  const nm = pic.name ?? "";
+  const nm = picAssetLabel(pic);
   if (par == null) {
     return `__\u001f${normalizeSubProjectName(nm)}`;
   }
   return `${par.toString()}\u001f${normalizeSubProjectName(nm)}`;
 }
 
-function buildPicAssetDocument(
+async function buildPicAssetDocument(
+  db: Db,
   projectId: ObjectId,
   parentFolderId: ObjectId,
-  name: string,
+  lable: string,
   now: Date,
   createdBy: ObjectId | null,
-): AssetDoc {
+): Promise<AssetDoc> {
   const id = new ObjectId();
+  const [valTechId] = await reserveValTechIds(db, 1);
   return {
     _id: id,
     assetId: id.toString(),
@@ -1469,7 +1647,11 @@ function buildPicAssetDocument(
     updatedAt: now,
     status: "pending_review",
     parent: parentFolderId,
-    name,
+    name: lable,
+    lable,
+    client_code: null,
+    employer: null,
+    val_tech_id: valTechId!,
     isAssetFolder: true,
     writtenDescription: null,
     condition: null,
@@ -1480,12 +1662,17 @@ function buildPicAssetDocument(
     model: null,
     manufactureYear: null,
     kilometersDriven: null,
-    isPresent: true,
+    isPresent: false,
     createdBy,
     images: emptyPicAssetImagesObject(),
     voiceNotes: [],
     isDone: false,
     createdAt: now,
+    assetDescription: null,
+    category: null,
+    type: null,
+    asset_location: null,
+    asset_source: resolveAssetSource({ sheetName: null, rawData: {} }),
   };
 }
 
@@ -1522,12 +1709,12 @@ async function backfillMissingPicAssets(
     const has = await pa.findOne({
       projectId,
       parent: parentRef,
-      name: sub.name,
       ...MV_PHOTO_FOLDER_FILTER,
+      ...picAssetLabelFilter(sub.name),
     });
     if (has) continue;
     await pa.insertOne(
-      buildPicAssetDocument(projectId, parentRef, sub.name, now, createdBy),
+      await buildPicAssetDocument(db, projectId, parentRef, sub.name, now, createdBy),
     );
   }
 }
@@ -2071,10 +2258,10 @@ function serializeMvSubProject(
 }
 
 /**
- * شكل الوثيقة عند قراءة الملاحظات: الحقل العلوي ‎`notes`‎ يبقى افتراضياً ‎""‎
- * منذ الاستيراد، بينما تحديثات المستخدم تُكتب داخل ‎`rawData.notes`‎ و
- * ‎`normalizedData.notes`‎ (انظر ‎`buildUpdateDocument`‎ في ‎assets.service‎).
- * ‎`hasNotes`‎ يُستخدم كمؤشّر «هذا الأصل عليه ملاحظة» عند الإمكان.
+ * شكل الوثيقة عند قراءة الملاحظات: تحديثات المستخدم تُكتب في الحقل العلوي
+ * ‎`notes`‎ فقط. ‎`rawData`‎ تبقى لقطة إكسل العميل ولا تُعدَّل بعد الاستيراد.
+ * عند الوثائق القديمة يُقرأ المحتوى من ‎normalizedData.notes‎ ثم ‎rawData.notes‎
+ * إن كان الحقل العلوي فارغاً. ‎`hasNotes`‎ مؤشّر وجود ملاحظة عند الإمكان.
  */
 type PicAssetNotesSource = {
   notes?: unknown;
@@ -2159,8 +2346,211 @@ function resolvePicAssetQuantity(doc: {
   return pick(doc.rawData?.quantity);
 }
 
+function serializePicAssetDescription(value: unknown): {
+  id: string;
+  category: string;
+  type: string;
+  name: string;
+} | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const category = typeof o.category === "string" ? o.category.trim() : "";
+  const type = typeof o.type === "string" ? o.type.trim() : "";
+  const name = typeof o.name === "string" ? o.name.trim() : "";
+  if (!category && !type && !name) return null;
+  return {
+    id: typeof o.id === "string" ? o.id.trim() : "",
+    category,
+    type,
+    name,
+  };
+}
+
+function sanitizePicAssetDescriptionPatch(value: unknown): {
+  id: string;
+  category: string;
+  type: string;
+  name: string;
+} | null {
+  if (value === null) return null;
+  const parsed = serializePicAssetDescription(value);
+  if (!parsed || !parsed.category || !parsed.type || !parsed.name) {
+    throw new BadRequestException("assetDescription must include category, type, and name");
+  }
+  return parsed;
+}
+
+function readPicAssetDescription(pic: PicAssetMongoDoc) {
+  const raw = Object.prototype.hasOwnProperty.call(pic, "asset_description")
+    ? (pic as { asset_description?: unknown }).asset_description
+    : (pic as { assetDescription?: unknown }).assetDescription;
+  return serializePicAssetDescription(raw);
+}
+
+/**
+ * يكتب ‎asset_description‎ ككائن كامل حتى لا يفشل MongoDB
+ * عندما يكون الحقل ‎null‎ ولا يقبل مسار ‎asset_description.category‎.
+ */
+function mergePicAssetDescriptionFields(
+  pic: PicAssetMongoDoc,
+  patch: { category?: string | null; type?: string | null },
+): {
+  category: string | null;
+  type: string | null;
+  asset_description: { id: string; category: string; type: string; name: string } | null;
+} {
+  const existing = readPicAssetDescription(pic);
+  const category =
+    patch.category !== undefined
+      ? patch.category
+      : serializePicAssetPlainText((pic as { category?: unknown }).category) ?? existing?.category ?? null;
+  const type =
+    patch.type !== undefined
+      ? patch.type
+      : serializePicAssetPlainText((pic as { type?: unknown }).type) ?? existing?.type ?? null;
+  const name = existing?.name ?? "";
+  const id = existing?.id ?? "";
+  if (!category && !type && !name && !id) {
+    return { category, type, asset_description: null };
+  }
+  return {
+    category,
+    type,
+    asset_description: {
+      id,
+      category: category ?? "",
+      type: type ?? "",
+      name,
+    },
+  };
+}
+
+function sanitizePicAssetLocationPatch(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new BadRequestException("asset_location must be a string or null");
+  }
+  const location = value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  return location || null;
+}
+
+function sanitizeClientCodeValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "number" && Number.isFinite(value)
+        ? String(value)
+        : typeof value === "boolean"
+          ? String(value)
+          : "";
+  const code = text.replace(/\u0000/g, "").replace(/\s+/g, " ").trim().slice(0, 240);
+  return code || null;
+}
+
+function sanitizeEmployerValue(value: unknown): string | null {
+  return sanitizeClientCodeValue(value);
+}
+
+/**
+ * تُبقي الصورة الرئيسة ‎images.main‎ منفصلة عند إرسال الأصل للواجهة. تحتاج شاشة
+ * تصدير Excel هذه الصورة تحديداً حتى لا تضطر لتحميل كامل مصفوفة الوسائط.
+ */
+function serializePicAssetMainImage(imagesRaw: unknown, summaryMainImageRaw?: unknown) {
+  const mainImageRaw =
+    isPicAssetCategorizedImagesObject(imagesRaw) && imagesRaw.main != null
+      ? imagesRaw.main
+      : summaryMainImageRaw;
+  if (mainImageRaw == null) return null;
+  return serializePicAssetImages({ main: mainImageRaw })[0] ?? null;
+}
+
+function serializePicAssetLocation(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const location = value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  return location || null;
+}
+
+function serializePicAssetPlainText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\u0000/g, "").replace(/\s+/g, " ").trim().slice(0, 240);
+  return text || null;
+}
+
+/** أصول التطبيق تُترك كما كُتبت عند الإنشاء — لا يُعاد حساب ‎asset_source‎. */
+function assetSourceWritePatch(doc: { sheetName?: unknown; rawData?: unknown; asset_source?: unknown }) {
+  if (isAppAssetSource(doc.asset_source)) return {};
+  return { asset_source: resolveAssetSource(doc) };
+}
+
+/**
+ * حقول النظام المستخرجة من أعمدة إكسل تُكتب في جذر الوثيقة فقط.
+ * ‎assets.rawData‎ تبقى لقطة صف العميل ولا تُحدَّث بعد الاستيراد.
+ */
+function importedExcelMappedRootFields(fields: {
+  assetLocation: string | null;
+  clientCode: string | null;
+  employer: string | null;
+}) {
+  return {
+    asset_location: fields.assetLocation,
+    client_code: fields.clientCode,
+    code: null as null,
+    employer: fields.employer,
+  };
+}
+
+function serializePicAssetRawData(value: unknown): Record<string, string | number | boolean | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [key, cell] of Object.entries(value as Record<string, unknown>)) {
+    const field = key.replace(/\u0000/g, "").trim();
+    if (!field) continue;
+    if (cell == null) {
+      out[field] = null;
+      continue;
+    }
+    if (typeof cell === "string") {
+      out[field] = cell.replace(/\u0000/g, "");
+      continue;
+    }
+    if (typeof cell === "number" && Number.isFinite(cell)) {
+      out[field] = cell;
+      continue;
+    }
+    if (typeof cell === "boolean") {
+      out[field] = cell;
+      continue;
+    }
+    out[field] = String(cell);
+  }
+  return out;
+}
+
+/** ترسل القيمة كسلسلة كي لا تفقد الواجهة دقة BSON Int64. */
+function serializeValTechId(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : null;
+  if (
+    typeof value === "object" &&
+    "toString" in value &&
+    typeof (value as { toString?: unknown }).toString === "function"
+  ) {
+    const text = String(value).trim();
+    return /^-?\d+$/.test(text) ? text : null;
+  }
+  return null;
+}
+
 function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; projectId: ObjectId }) {
   const parentRaw = (pic as { parent?: ObjectId | null }).parent;
+  const imagesRaw = (pic as { images?: unknown }).images;
+  const summaryMainImageRaw = (pic as { mainImage?: unknown }).mainImage;
+  const assetDescriptionRaw = Object.prototype.hasOwnProperty.call(pic, "asset_description")
+    ? (pic as { asset_description?: unknown }).asset_description
+    : (pic as { assetDescription?: unknown }).assetDescription;
+  const assetDescription = serializePicAssetDescription(assetDescriptionRaw);
   const createdSrc =
     (pic as { createdAt?: unknown }).createdAt ?? pic.importedAt ?? pic.updatedAt;
   const oid = (pic as { _id?: ObjectId | null })._id ?? idFallback?._id;
@@ -2172,7 +2562,15 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
     _id: oid.toString(),
     projectId: proj.toString(),
     parent: parentRaw != null ? parentRaw.toString() : "",
-    name: pic.name ?? "",
+    name: serializePicAssetPlainText(picAssetDisplayName(pic)),
+    lable: serializePicAssetPlainText((pic as { lable?: unknown }).lable),
+    client_code: typeof pic.client_code === "string" ? pic.client_code : null,
+    employer:
+      sanitizeEmployerValue((pic as { employer?: unknown }).employer) ??
+      sanitizeEmployerValue(
+        (pic as { normalizedData?: Record<string, unknown> }).normalizedData?.employer,
+      ),
+    val_tech_id: serializeValTechId(pic.val_tech_id),
     importId: pic.importId instanceof ObjectId ? pic.importId.toString() : null,
     sheetName: typeof pic.sheetName === "string" && pic.sheetName.trim() ? pic.sheetName : null,
     createdAt: mvProjectDateToIso(createdSrc),
@@ -2181,19 +2579,15 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
     writtenDescription: pic.writtenDescription,
     condition: pic.condition,
     /*
-     * يُحلّ ‎`notes`‎ بنفس منطق ‎resolveAssetFieldValue‎ في ‎assets.service‎:
-     * تحديث الملاحظات عبر ‎`updateAsset`‎ يكتبها داخل ‎`rawData.notes`‎ و
-     * ‎`normalizedData.notes`‎ بينما يبقى الحقل العلوي ‎`doc.notes = ""`‎ من
-     * زمن الاستيراد. كما نعتمد على ‎`hasNotes`‎ كمؤشّر «يوجد ملاحظة» إن وُجد،
-     * ولكن المحتوى نفسه يأتي من أيّ من المواقع الثلاثة (الأعلى ثم
-     * ‎normalizedData‎ ثم ‎rawData‎). يُعاد ‎null‎ عند انعدام المحتوى.
+     * يُحلّ ‎`notes`‎ من الحقل العلوي أولاً. الوثائق القديمة قد تحتفظ بالمحتوى
+     * في ‎normalizedData.notes‎ أو ‎rawData.notes‎ — للقراءة فقط، بلا كتابة.
      */
     notes: resolvePicAssetNotes(pic as PicAssetNotesSource),
     assetType: normalizeAssetTypeForApi((pic as { assetType?: unknown }).assetType),
     subAssetType: resolvePicAssetSubAssetType(pic),
     quantity: coerceNumberishField(resolvePicAssetQuantity(pic)),
     brand: pic.brand,
-    code: pic.code,
+    code: pic.code ?? null,
     model: pic.model,
     manufactureYear: coerceNumberishField((pic as { manufactureYear?: unknown }).manufactureYear),
     kilometersDriven: coerceNumberishField((pic as { kilometersDriven?: unknown }).kilometersDriven),
@@ -2204,9 +2598,29 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
         : pic.createdBy != null
           ? String(pic.createdBy)
           : null,
-    images: serializePicAssetImages((pic as { images?: unknown }).images),
+    images: serializePicAssetImages(imagesRaw),
+    mainImage: serializePicAssetMainImage(imagesRaw, summaryMainImageRaw),
     voiceNotes: serializePicAssetVoiceNotes((pic as { voiceNotes?: unknown }).voiceNotes),
     isDone: pic.isDone === true,
+    // الوصف المعروض في مودال بيانات الأصول مصدره الحالي هو ‎assets.asset_description‎.
+    assetDescription,
+    category:
+      serializePicAssetPlainText((pic as { category?: unknown }).category) ??
+      assetDescription?.category ??
+      null,
+    type:
+      serializePicAssetPlainText((pic as { type?: unknown }).type) ??
+      assetDescription?.type ??
+      null,
+    // مكان الأصل من الحقل العلوي ‎asset_location‎. الوثائق القديمة قد تحتفظ به في ‎normalizedData‎ فقط.
+    asset_location: serializePicAssetLocation(
+      (pic as { asset_location?: unknown }).asset_location ??
+        (pic as { normalizedData?: Record<string, unknown> }).normalizedData?.asset_location ??
+        null,
+    ),
+    newAssetLocation: serializePicAssetLocation((pic as { newAssetLocation?: unknown }).newAssetLocation),
+    asset_source: resolveAssetSource(pic),
+    rawData: serializePicAssetRawData((pic as { rawData?: unknown }).rawData),
   };
 }
 
@@ -2334,6 +2748,44 @@ function sanitizeGeneratedFolderName(raw: unknown): string | null {
   if (!normalized) return null;
   const cleaned = normalized.replace(/[\\/:*?"<>|]+/g, "-").trim();
   return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * مفاتيح أعمدة Excel قد تصل من الواجهة باسم العرض أو بصيغة rawData.<key>.
+ * نطبّعها قبل القراءة لضمان مطابقة الأعمدة العربية حتى مع اختلاف الهمزات/المسافات.
+ */
+function normalizeImportedColumnKey(raw: unknown): string {
+  return sanitizeTextInput(String(raw ?? ""))
+    .normalize("NFKC")
+    .toLocaleLowerCase("ar")
+    .replace(/^rawdata\./, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/[ة]/g, "ه")
+    .replace(/[ى]/g, "ي")
+    .replace(/[\s_.-]+/g, "");
+}
+
+function readImportedAssetCell(doc: AssetDoc, requestedKey: string): unknown {
+  const directKey = sanitizeTextInput(requestedKey).replace(/^rawData\./i, "");
+  const sources = [doc.rawData, doc.normalizedData];
+  let emptyValue: unknown = undefined;
+  for (const source of sources) {
+    if (!source) continue;
+    if (Object.prototype.hasOwnProperty.call(source, directKey)) {
+      const value = source[directKey];
+      if (value !== null && value !== "") return value;
+      emptyValue = value;
+      continue;
+    }
+    const wanted = normalizeImportedColumnKey(directKey);
+    for (const [key, value] of Object.entries(source)) {
+      if (normalizeImportedColumnKey(key) !== wanted) continue;
+      if (value !== null && value !== "") return value;
+      emptyValue = value;
+      break;
+    }
+  }
+  return emptyValue;
 }
 
 function sanitizeUploadedFileName(raw: unknown): string {
@@ -3857,8 +4309,8 @@ export class MachineValuationService implements OnModuleInit {
       const hasPic = await photoAssets.findOne({
         projectId: d.projectId,
         parent: p0,
-        name: d.name,
         ...MV_PHOTO_FOLDER_FILTER,
+        ...picAssetLabelFilter(d.name),
       });
       if (hasPic) {
         await sp.updateOne(
@@ -3902,13 +4354,17 @@ export class MachineValuationService implements OnModuleInit {
         model: (d as { model?: string | null }).model ?? null,
         manufactureYear: (d as { manufactureYear?: number | null }).manufactureYear ?? null,
         kilometersDriven: (d as { kilometersDriven?: number | null }).kilometersDriven ?? null,
-        isPresent: (d as { isPresent?: boolean }).isPresent !== false,
+        isPresent: (d as { isPresent?: boolean }).isPresent === true,
         createdBy: tryCoerceToObjectId((d as { createdBy?: unknown }).createdBy) ?? null,
         images: (d as { images?: ObjectId[] }).images ?? [],
         voiceNotes: (d as { voiceNotes?: ObjectId[] }).voiceNotes ?? [],
         isDone: (d as { isDone?: boolean }).isDone === true,
+        asset_location: serializePicAssetLocation(
+          (d as { asset_location?: unknown }).asset_location,
+        ),
       };
-      const shell = buildPicAssetDocument(
+      const shell = await buildPicAssetDocument(
+        db,
         pad.projectId,
         pad.parent,
         pad.name,
@@ -3931,6 +4387,7 @@ export class MachineValuationService implements OnModuleInit {
         images: pad.images,
         voiceNotes: pad.voiceNotes,
         isDone: pad.isDone,
+        asset_location: pad.asset_location,
         createdAt: pad.createdAt,
         importedAt: pad.createdAt,
         updatedAt: pad.updatedAt,
@@ -4029,7 +4486,7 @@ export class MachineValuationService implements OnModuleInit {
       .filter((p) => p.parent != null)
       .map((p) => ({
         _id: p._id.toString(),
-        name: p.name ?? "",
+        name: picAssetDisplayName(p),
         parent: p.parent!.toString(),
       }));
     const combined = [...fromMv, ...fromItems, ...fromPics];
@@ -4103,16 +4560,21 @@ export class MachineValuationService implements OnModuleInit {
       .find({
         projectId,
         parent: photosParentId,
-        name: { $in: uniqueNames },
         ...MV_PHOTO_FOLDER_FILTER,
+        $or: [
+          { lable: { $in: uniqueNames } },
+          { lable: null, name: { $in: uniqueNames } },
+          { lable: { $exists: false }, name: { $in: uniqueNames } },
+        ],
       })
       .toArray();
-    const existingNames = new Set(existing.map((d) => normalizeSubProjectName(d.name)));
+    const existingNames = new Set(existing.map((d) => normalizeSubProjectName(picAssetLabel(d))));
     const toCreate = uniqueNames.filter((n) => !existingNames.has(n));
     const now = new Date();
     const created: PicAssetMongoDoc[] = [];
     for (const name of toCreate) {
-      const ins = buildPicAssetDocument(
+      const ins = await buildPicAssetDocument(
+        db,
         projectId,
         photosParentId,
         name,
@@ -5551,21 +6013,9 @@ export class MachineValuationService implements OnModuleInit {
 
     /** مسار خفيف لشاشة بيانات التقرير: بدون شجرة مجلدات وبدون مساحات صور ثقيلة. */
     if (picAssetMode === "report") {
-      const [creatorOid, assetImageAgg] = await Promise.all([
+      const [creatorOid, assetImageCount] = await Promise.all([
         Promise.resolve(tryCoerceToObjectId(project.userId)),
-        db
-          .collection<AssetDoc>(ASSETS_COLLECTION)
-          .aggregate<{ imageCount?: number }>([
-            { $match: { projectId: _id, ...MV_PHOTO_FOLDER_FILTER } },
-            {
-              $group: {
-                _id: null,
-                imageCount: { $sum: mongoPicAssetImagesCount("$images") },
-              },
-            },
-          ])
-          .toArray()
-          .catch(() => [] as { imageCount?: number }[]),
+        countProjectAssetImagesForSummary(db, _id),
       ]);
       const creator = creatorOid
         ? await getAuthCollections(db).users.findOne(
@@ -5584,8 +6034,6 @@ export class MachineValuationService implements OnModuleInit {
       )
         ? (project.clientDocumentsWorkspace as { images: unknown[] }).images.length
         : 0;
-      const assetImageCount = toSafeNonNegativeInt(assetImageAgg[0]?.imageCount);
-
       return {
         project: {
           _id: project._id.toString(),
@@ -5670,6 +6118,13 @@ export class MachineValuationService implements OnModuleInit {
                 $addFields: {
                   imageCount: mongoPicAssetImagesCount("$images"),
                   voiceNoteCount: mongoSafeArraySize("$voiceNotes"),
+                  mainImage: {
+                    $cond: [
+                      { $eq: [{ $type: "$images" }, "object"] },
+                      "$images.main",
+                      null,
+                    ],
+                  },
                 },
               },
               { $project: { images: 0, voiceNotes: 0 } },
@@ -5716,7 +6171,7 @@ export class MachineValuationService implements OnModuleInit {
         _id: (p._id as ObjectId).toString(),
         projectId: (p.projectId as ObjectId).toString(),
         parent: p.parent != null ? p.parent.toString() : "",
-        name: p.name ?? "",
+        name: picAssetDisplayName(p),
         createdAt: mvProjectDateToIso(
           (p as { createdAt?: unknown }).createdAt ?? p.importedAt ?? p.updatedAt,
         ),
@@ -5745,7 +6200,7 @@ export class MachineValuationService implements OnModuleInit {
         .filter((p) => p.parent != null)
         .map((p) => ({
           _id: p._id.toString(),
-          name: p.name ?? "",
+          name: picAssetDisplayName(p),
           parent: p.parent!.toString(),
         }));
       const allowed = new Set(
@@ -6476,7 +6931,16 @@ export class MachineValuationService implements OnModuleInit {
     const pairClauses: Record<string, unknown>[] = [];
     for (const row of baseById.values()) {
       const parent = getParentIdFromDoc(row);
-      if (parent && row.name) pairClauses.push({ parent, name: row.name });
+      if (parent && row.name) {
+        pairClauses.push({
+          parent,
+          $or: [
+            { lable: row.name },
+            { lable: null, name: row.name },
+            { lable: { $exists: false }, name: row.name },
+          ],
+        });
+      }
     }
     const pairKey = (parent: unknown, name: unknown) => `${String(parent ?? "")}\u0000${String(name ?? "")}`;
     const requestedPairKeys = new Set(
@@ -6484,7 +6948,7 @@ export class MachineValuationService implements OnModuleInit {
     );
     const pairedPics = pairClauses.length > 0
       ? inspectorPicSnapshot
-        ? inspectorPicSnapshot.filter((pic) => requestedPairKeys.has(pairKey(pic.parent, pic.name)))
+        ? inspectorPicSnapshot.filter((pic) => requestedPairKeys.has(pairKey(pic.parent, picAssetLabel(pic))))
         : await db
             .collection<AssetDoc>(ASSETS_COLLECTION)
             .find({
@@ -6495,7 +6959,7 @@ export class MachineValuationService implements OnModuleInit {
             .toArray()
       : [];
     const picByPair = new Map(
-      pairedPics.map((pic) => [pairKey(pic.parent, pic.name), pic as PicAssetMongoDoc]),
+      pairedPics.map((pic) => [pairKey(pic.parent, picAssetLabel(pic)), pic as PicAssetMongoDoc]),
     );
     const picOnlyById = new Map(
       picOnlyRows.map((pic) => [pic._id.toString(), pic as PicAssetMongoDoc]),
@@ -6523,7 +6987,7 @@ export class MachineValuationService implements OnModuleInit {
         _id: picOnly._id.toString(),
         projectId: picOnly.projectId?.toString?.() ?? pid.toString(),
         parent: picOnly.parent != null ? String(picOnly.parent) : "",
-        name: picOnly.name ?? "",
+        name: picAssetDisplayName(picOnly),
         createdAt:
           created instanceof Date && !Number.isNaN(created.getTime())
             ? created.toISOString()
@@ -6554,8 +7018,8 @@ export class MachineValuationService implements OnModuleInit {
           ? await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
               projectId: pid,
               parent: pFolderG,
-              name: sub.name,
               ...MV_PHOTO_FOLDER_FILTER,
+              ...picAssetLabelFilter(sub.name),
             })
           : null;
       const idFb = { _id: sid, projectId: pid };
@@ -6574,8 +7038,8 @@ export class MachineValuationService implements OnModuleInit {
           ? await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
               projectId: pid,
               parent: pFolderG,
-              name: itemSub.name,
               ...MV_PHOTO_FOLDER_FILTER,
+              ...picAssetLabelFilter(itemSub.name),
             })
           : null;
       const idFb = { _id: sid, projectId: pid };
@@ -6600,7 +7064,7 @@ export class MachineValuationService implements OnModuleInit {
       _id: picOnly._id.toString(),
       projectId: picOnly.projectId.toString(),
       parent: parentId,
-      name: picOnly.name ?? "",
+        name: picAssetDisplayName(picOnly),
       createdAt:
         poCreated instanceof Date && !Number.isNaN(poCreated.getTime())
           ? poCreated.toISOString()
@@ -6641,9 +7105,9 @@ export class MachineValuationService implements OnModuleInit {
       db.collection<AssetDoc>(ASSETS_COLLECTION).findOne({
         projectId,
         parent: parentId,
-        name,
         ...idClause,
         ...MV_PHOTO_FOLDER_FILTER,
+        ...picAssetLabelFilter(name),
       }),
     ]);
     if (item || sub || pic) {
@@ -6798,7 +7262,9 @@ export class MachineValuationService implements OnModuleInit {
       throw new BadRequestException("هذا العنصر ليس داخل صور الأصول.");
     }
 
-    const nextName = hasName ? normalizeSubProjectName(String(body.name ?? "")) : normalizeSubProjectName(node.name);
+    const nextName = hasName
+      ? normalizeSubProjectName(String(body.name ?? ""))
+      : normalizeSubProjectName(pic ? picAssetDisplayName(pic) : node.name);
     if (!nextName) throw new BadRequestException("اسم المجلد أو الأصل مطلوب.");
 
     const rawParent =
@@ -6829,8 +7295,8 @@ export class MachineValuationService implements OnModuleInit {
         ? ((await pa.findOne({
             projectId: pid,
             parent: currentParent,
-            name: node.name,
             ...MV_PHOTO_FOLDER_FILTER,
+            ...picAssetLabelFilter(picAssetLabel(node)),
           })) as PicAssetMongoDoc | null)
         : null;
     const excludeIds = [sid];
@@ -6841,7 +7307,7 @@ export class MachineValuationService implements OnModuleInit {
     if (pic) {
       const updated = (await pa.findOneAndUpdate(
         { _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-        { $set: { name: nextName, parent: nextParent, updatedAt: now } },
+        { $set: { name: nextName, ...picAssetLableFreezePatch(pic), parent: nextParent, updatedAt: now } },
         { returnDocument: "after" },
       )) as PicAssetMongoDoc | null;
       if (!updated) throw new NotFoundException("Sub-project not found");
@@ -6869,7 +7335,7 @@ export class MachineValuationService implements OnModuleInit {
     if (tiedPic?._id) {
       await pa.updateOne(
         { _id: tiedPic._id, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-        { $set: { name: nextName, parent: nextParent, updatedAt: now } },
+        { $set: { name: nextName, ...picAssetLableFreezePatch(tiedPic), parent: nextParent, updatedAt: now } },
       );
       if (hasName) {
         await this.refreshPicAssetFileFolderMetadata(db, pid, tiedPic._id, nextName);
@@ -6915,6 +7381,11 @@ export class MachineValuationService implements OnModuleInit {
         "kilometersDriven",
         "isPresent",
         "isDone",
+        "assetDescription",
+        "asset_location",
+        "employer",
+        "category",
+        "type",
         "images",
         "voiceNotes",
       ].some((key) => Object.prototype.hasOwnProperty.call(body, key));
@@ -6949,13 +7420,14 @@ export class MachineValuationService implements OnModuleInit {
         (await pa.findOne({
           projectId: pid,
           parent: pFolder,
-          name: sub.name,
           ...MV_PHOTO_FOLDER_FILTER,
+          ...picAssetLabelFilter(sub.name),
         })) ?? null;
       if (!pic) {
         const now0 = new Date();
         const insr = await pa.insertOne(
-          buildPicAssetDocument(
+          await buildPicAssetDocument(
+            db,
             pid,
             pFolder,
             sub.name,
@@ -6990,9 +7462,13 @@ export class MachineValuationService implements OnModuleInit {
       }
       const notesText = b.notes === null ? "" : b.notes.trim();
       $set.notes = notesText;
-      $set["rawData.notes"] = notesText;
-      $set["normalizedData.notes"] = notesText;
       $set.hasNotes = notesText.length > 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(b, "name") && (b as { name?: unknown }).name !== undefined) {
+      const nextName = normalizeSubProjectName(String((b as { name?: unknown }).name ?? ""));
+      if (!nextName) throw new BadRequestException("اسم المجلد أو الأصل مطلوب.");
+      $set.name = nextName;
+      Object.assign($set, picAssetLableFreezePatch(pic));
     }
     if (b.assetType !== undefined) {
       if (typeof b.assetType !== "string" || !ASSET_TYPE_SET.has(b.assetType)) {
@@ -7006,8 +7482,6 @@ export class MachineValuationService implements OnModuleInit {
       }
       const subText = b.subAssetType === null ? "" : b.subAssetType.trim();
       $set.subAssetType = subText || null;
-      $set["rawData.subAssetType"] = subText;
-      $set["normalizedData.subAssetType"] = subText;
     }
     if (b.quantity !== undefined) {
       if (b.quantity !== null && typeof b.quantity !== "string" && typeof b.quantity !== "number") {
@@ -7015,8 +7489,6 @@ export class MachineValuationService implements OnModuleInit {
       }
       const q = coerceNumberishField(b.quantity);
       $set.quantity = q;
-      $set["rawData.quantity"] = q;
-      $set["normalizedData.quantity"] = q;
     }
     for (const key of ["brand", "code", "model"] as const) {
       if (b[key] !== undefined) {
@@ -7028,19 +7500,24 @@ export class MachineValuationService implements OnModuleInit {
       }
     }
     if (b.manufactureYear !== undefined) {
-      if (b.manufactureYear !== null && (typeof b.manufactureYear !== "number" || !Number.isFinite(b.manufactureYear))) {
-        throw new BadRequestException("manufactureYear must be a finite number or null");
+      if (
+        b.manufactureYear !== null &&
+        typeof b.manufactureYear !== "number" &&
+        typeof b.manufactureYear !== "string"
+      ) {
+        throw new BadRequestException("manufactureYear must be a finite number, string, or null");
       }
-      $set.manufactureYear = b.manufactureYear;
+      $set.manufactureYear = coerceNumberishField(b.manufactureYear);
     }
     if (b.kilometersDriven !== undefined) {
       if (
         b.kilometersDriven !== null &&
-        (typeof b.kilometersDriven !== "number" || !Number.isFinite(b.kilometersDriven))
+        typeof b.kilometersDriven !== "number" &&
+        typeof b.kilometersDriven !== "string"
       ) {
-        throw new BadRequestException("kilometersDriven must be a finite number or null");
+        throw new BadRequestException("kilometersDriven must be a finite number, string, or null");
       }
-      $set.kilometersDriven = b.kilometersDriven;
+      $set.kilometersDriven = coerceNumberishField(b.kilometersDriven);
     }
     if (b.isPresent !== undefined) {
       if (typeof b.isPresent !== "boolean") {
@@ -7053,6 +7530,30 @@ export class MachineValuationService implements OnModuleInit {
         throw new BadRequestException("isDone must be a boolean");
       }
       $set.isDone = b.isDone;
+    }
+    if (b.assetDescription !== undefined) {
+      const parsed = sanitizePicAssetDescriptionPatch(b.assetDescription);
+      $set.asset_description = parsed;
+      $set.category = parsed?.category ?? null;
+      $set.type = parsed?.type ?? null;
+    }
+    if (b.category !== undefined || b.type !== undefined) {
+      const merged = mergePicAssetDescriptionFields(pic, {
+        category: b.category !== undefined ? serializePicAssetPlainText(b.category) : undefined,
+        type: b.type !== undefined ? serializePicAssetPlainText(b.type) : undefined,
+      });
+      $set.category = merged.category;
+      $set.type = merged.type;
+      $set.asset_description = merged.asset_description;
+      $set.assetDescription = merged.asset_description;
+    }
+    if (b.asset_location !== undefined) {
+      const location = sanitizePicAssetLocationPatch(b.asset_location);
+      $set.asset_location = location;
+    }
+    if (b.employer !== undefined) {
+      const employer = sanitizeEmployerValue(b.employer);
+      $set.employer = employer;
     }
     if (b.images !== undefined) {
       $set.images = normalizePicAssetMediaArrayForPatch(
@@ -7069,6 +7570,17 @@ export class MachineValuationService implements OnModuleInit {
 
     if (Object.keys($set).length === 0) {
       throw new BadRequestException("No valid fields to update");
+    }
+    /** ‎rawData‎ لقطة إكسل العميل — أي تحديث لبيانات الأصل يبقى في الجذر فقط. */
+    const frozenLable =
+      typeof (pic as { lable?: unknown }).lable === "string" ? String((pic as { lable?: unknown }).lable).trim() : "";
+    for (const key of Object.keys($set)) {
+      if (key === "rawData" || key.startsWith("rawData.")) {
+        delete $set[key];
+      }
+      if (key === "lable" && frozenLable) {
+        delete $set[key];
+      }
     }
     $set.isAssetFolder = true;
     $set.updatedAt = now;
@@ -7287,8 +7799,12 @@ export class MachineValuationService implements OnModuleInit {
       .find({
         projectId: pid,
         parent: photosRoot._id,
-        name: { $in: queryNames },
         ...MV_PHOTO_FOLDER_FILTER,
+        $or: [
+          { lable: { $in: queryNames } },
+          { lable: null, name: { $in: queryNames } },
+          { lable: { $exists: false }, name: { $in: queryNames } },
+        ],
       })
       .toArray();
 
@@ -7305,7 +7821,7 @@ export class MachineValuationService implements OnModuleInit {
           _id: p._id.toString(),
           projectId: p.projectId.toString(),
           parent: p.parent!.toString(),
-          name: p.name ?? "",
+          name: picAssetDisplayName(p),
           createdAt: (p.createdAt ?? p.importedAt ?? p.updatedAt).toISOString(),
           updatedAt: p.updatedAt.toISOString(),
           picAsset: serializePicAsset(p),
@@ -7321,15 +7837,49 @@ export class MachineValuationService implements OnModuleInit {
   async generateInspectionFoldersFromAssetImport(
     projectId: string,
     ctx: MvAccessContext,
-    body: { columnKey: string; importId: string; sheetName: string },
+    body: {
+      columnKey?: string;
+      locationColumnKey?: string;
+      clientCodeColumnKey?: string;
+      codeColumnKey?: string;
+      employerColumnKey?: string;
+      importId: string;
+      sheetName: string;
+    },
   ) {
     const db = await getMongoDb();
     const pid = toId(projectId);
     await this.loadProjectForAccess(db, pid, ctx);
 
     const columnKey = sanitizeTextInput(body.columnKey ?? "");
-    if (!columnKey || columnKey.includes(".") || columnKey.includes("$")) {
+    if (columnKey && (columnKey.includes(".") || columnKey.includes("$"))) {
       throw new BadRequestException("مفتاح العمود غير صالح.");
+    }
+    const locationColumnKey = sanitizeTextInput(body.locationColumnKey ?? "");
+    if (
+      locationColumnKey &&
+      (locationColumnKey.includes(".") ||
+        locationColumnKey.includes("$"))
+    ) {
+      throw new BadRequestException("اختر عمود مكان الأصل.");
+    }
+    const clientCodeColumnKey = sanitizeTextInput(
+      body.clientCodeColumnKey || body.codeColumnKey || "",
+    );
+    if (
+      clientCodeColumnKey &&
+      (clientCodeColumnKey.includes(".") ||
+        clientCodeColumnKey.includes("$"))
+    ) {
+      throw new BadRequestException("اختر عمود كود العميل.");
+    }
+    const employerColumnKey = sanitizeTextInput(body.employerColumnKey ?? "");
+    if (
+      employerColumnKey &&
+      (employerColumnKey.includes(".") ||
+        employerColumnKey.includes("$"))
+    ) {
+      throw new BadRequestException("اختر عمود الموظف.");
     }
 
     const importIdRaw = sanitizeTextInput(body.importId ?? "");
@@ -7339,6 +7889,9 @@ export class MachineValuationService implements OnModuleInit {
     }
     if (!sheetName) {
       throw new BadRequestException("اسم الورقة مطلوب.");
+    }
+    if (columnKey && (!clientCodeColumnKey || !employerColumnKey)) {
+      throw new BadRequestException("اختر عمود كود العميل وعمود الموظف.");
     }
 
     await ensureAssetsCollectionsInitialized(db);
@@ -7352,6 +7905,76 @@ export class MachineValuationService implements OnModuleInit {
     };
 
     const coll = db.collection<AssetDoc>(ASSETS_COLLECTION);
+    /**
+     * تحديث أماكن أصول صور موجودة مسبقاً فقط، بدون إعادة تسمية أو إنشاء مجلدات.
+     * يبقى الربط صفاً بصف عبر importId + sheetName.
+     */
+    if (!columnKey) {
+      if (!locationColumnKey || !clientCodeColumnKey || !employerColumnKey) {
+        throw new BadRequestException("اختر عمود مكان الأصل وكود العميل والموظف.");
+      }
+      const bulkOps: AnyBulkWriteOperation<AssetDoc>[] = [];
+      const BATCH = 500;
+      let updatedLocationCount = 0;
+      const flushBulk = async () => {
+        if (bulkOps.length === 0) return;
+        const result = await coll.bulkWrite(bulkOps.splice(0, bulkOps.length), {
+          ordered: false,
+        });
+        updatedLocationCount += result.modifiedCount;
+      };
+
+      for await (const doc of coll.find({ ...rowFilter, isAssetFolder: true })) {
+        const locationCell = readImportedAssetCell(doc, locationColumnKey);
+        const assetLocation = sanitizePicAssetLocationPatch(
+          locationCell === undefined || locationCell === null ? null : String(locationCell),
+        );
+        const clientCodeCell = readImportedAssetCell(doc, clientCodeColumnKey);
+        const clientCode = sanitizeClientCodeValue(clientCodeCell);
+        const employer = sanitizeEmployerValue(readImportedAssetCell(doc, employerColumnKey));
+        if (
+          serializePicAssetLocation(doc.asset_location) === assetLocation &&
+          sanitizeClientCodeValue(doc.client_code) === clientCode &&
+          sanitizeEmployerValue(doc.employer) === employer &&
+          doc.code === null
+        ) {
+          continue;
+        }
+
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: doc._id, projectId: pid, isAssetFolder: true },
+            update: {
+              $set: {
+                ...importedExcelMappedRootFields({
+                  assetLocation,
+                  clientCode,
+                  employer,
+                }),
+                ...assetSourceWritePatch(doc),
+                updatedAt: new Date(),
+              },
+            },
+          },
+        });
+        if (bulkOps.length >= BATCH) await flushBulk();
+      }
+      await flushBulk();
+
+      return {
+        photosFolderId: "",
+        parentFolderId: "",
+        parentFolderName: sheetName,
+        columnKey: null,
+        totalValues: updatedLocationCount,
+        createdCount: 0,
+        existingCount: 0,
+        updatedLocationCount,
+        locationOnly: true,
+        folders: [],
+      };
+    }
+
     const photosRoot = await this.ensurePhotosRootFolder(db, pid);
     const createdBy = tryParseObjectId(ctx.userId ?? undefined) ?? null;
     const now = new Date();
@@ -7382,20 +8005,56 @@ export class MachineValuationService implements OnModuleInit {
     };
 
     for await (const doc of coll.find(rowFilter)) {
-      const rawVal = doc.rawData?.[columnKey];
-      const normVal = doc.normalizedData?.[columnKey];
-      const cell = rawVal !== undefined && rawVal !== null && rawVal !== "" ? rawVal : normVal;
+      const cell = readImportedAssetCell(doc, columnKey);
       const folder = sanitizeGeneratedFolderName(cell);
       if (!folder) continue;
+      const locationCell = locationColumnKey ? readImportedAssetCell(doc, locationColumnKey) : null;
+      const assetLocation = sanitizePicAssetLocationPatch(
+        locationCell === undefined || locationCell === null ? null : String(locationCell),
+      );
+      const clientCode = sanitizeClientCodeValue(
+        clientCodeColumnKey ? readImportedAssetCell(doc, clientCodeColumnKey) : null,
+      );
+      const employer = sanitizeEmployerValue(
+        employerColumnKey ? readImportedAssetCell(doc, employerColumnKey) : null,
+      );
 
       folderNames.add(folder);
 
-      const normDocName = normalizeSubProjectName(doc.name ?? "");
+      const normDocName = normalizeSubProjectName(picAssetLabel(doc));
       const normFolder = normalizeSubProjectName(folder);
+      const identityPatch = generatedAssetIdentityPatch(doc, folder);
       const currentParentIsSheet = doc.parent?.equals(sheetFolderId) === true;
       const currentParentIsLegacyRoot = doc.parent?.equals(photosRoot._id) === true;
       if (doc.isAssetFolder === true && normDocName === normFolder && (currentParentIsSheet || currentParentIsLegacyRoot)) {
         if (currentParentIsSheet) {
+          if (
+            serializePicAssetLocation(doc.asset_location) !== assetLocation ||
+            sanitizeClientCodeValue(doc.client_code) !== clientCode ||
+            sanitizeEmployerValue(doc.employer) !== employer ||
+            doc.code !== null ||
+            Object.keys(identityPatch).length > 0
+          ) {
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: doc._id, projectId: pid },
+                update: {
+                  $set: {
+                    ...identityPatch,
+                    ...importedExcelMappedRootFields({
+                      assetLocation,
+                      clientCode,
+                      employer,
+                    }),
+                    ...assetSourceWritePatch(doc),
+                    updatedAt: now,
+                  },
+                },
+              },
+            });
+            if (bulkOps.length >= BATCH) await flushBulk();
+            continue;
+          }
           unchangedRows += 1;
           continue;
         }
@@ -7403,7 +8062,19 @@ export class MachineValuationService implements OnModuleInit {
         bulkOps.push({
           updateOne: {
             filter: { _id: doc._id, projectId: pid },
-            update: { $set: { parent: sheetFolderId, updatedAt: now } },
+            update: {
+              $set: {
+                parent: sheetFolderId,
+                ...identityPatch,
+                ...importedExcelMappedRootFields({
+                  assetLocation,
+                  clientCode,
+                  employer,
+                }),
+                ...assetSourceWritePatch(doc),
+                updatedAt: now,
+              },
+            },
           },
         });
         if (bulkOps.length >= BATCH) await flushBulk();
@@ -7415,18 +8086,24 @@ export class MachineValuationService implements OnModuleInit {
           filter: { _id: doc._id, projectId: pid },
           update: {
             $set: {
-              name: folder,
+              ...generatedAssetIdentityPatch(doc, folder),
               isAssetFolder: true,
               parent: sheetFolderId,
+              ...importedExcelMappedRootFields({
+                assetLocation,
+                clientCode,
+                employer,
+              }),
+              ...assetSourceWritePatch(doc),
               updatedAt: now,
-              isPresent: true,
+              isPresent: false,
               isDone: false,
               createdBy: doc.createdBy ?? createdBy,
               createdAt: doc.createdAt ?? now,
               images: doc.images ?? [],
               voiceNotes: doc.voiceNotes ?? [],
             },
-            $unset: { assetName: "", "normalizedData.assetName": "" },
+            $unset: { assetName: "", "normalizedData.assetName": "", system_code: "" },
           },
         },
       });
@@ -7450,10 +8127,18 @@ export class MachineValuationService implements OnModuleInit {
     if (queryNames.length > 0) {
       await coll.deleteMany({
         projectId: pid,
-        $or: [{ parent: photosRoot._id }, { parent: sheetFolderId }],
         ...MV_PHOTO_FOLDER_FILTER,
         importId: { $exists: false },
-        name: { $in: queryNames },
+        $and: [
+          { $or: [{ parent: photosRoot._id }, { parent: sheetFolderId }] },
+          {
+            $or: [
+              { lable: { $in: queryNames } },
+              { lable: null, name: { $in: queryNames } },
+              { lable: { $exists: false }, name: { $in: queryNames } },
+            ],
+          },
+        ],
         $expr: { $eq: [{ $size: { $objectToArray: { $ifNull: ["$rawData", {}] } } }, 0] },
       });
     }
@@ -7464,8 +8149,12 @@ export class MachineValuationService implements OnModuleInit {
         importId: importOid,
         sheetName,
         parent: sheetFolderId,
-        name: { $in: queryNames },
         ...MV_PHOTO_FOLDER_FILTER,
+        $or: [
+          { lable: { $in: queryNames } },
+          { lable: null, name: { $in: queryNames } },
+          { lable: { $exists: false }, name: { $in: queryNames } },
+        ],
       })
       .toArray();
 
@@ -7483,7 +8172,7 @@ export class MachineValuationService implements OnModuleInit {
           _id: p._id.toString(),
           projectId: p.projectId.toString(),
           parent: p.parent!.toString(),
-          name: p.name ?? "",
+          name: picAssetDisplayName(p),
           createdAt: (p.createdAt ?? p.importedAt ?? p.updatedAt).toISOString(),
           updatedAt: p.updatedAt.toISOString(),
           picAsset: serializePicAsset(p),
@@ -7876,7 +8565,10 @@ export class MachineValuationService implements OnModuleInit {
         picPathCache.set(key, null);
         return null;
       }
-      const out = [...parentSegments, uniquePicNameById.get(key) ?? sanitizeZipPathPart(pic.name, "أصل")];
+      const out = [
+        ...parentSegments,
+        uniquePicNameById.get(key) ?? sanitizeZipPathPart(picAssetLabel(pic), "أصل"),
+      ];
       picPathCache.set(key, out);
       return out;
     };

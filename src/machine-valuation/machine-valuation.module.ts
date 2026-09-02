@@ -5,6 +5,7 @@ import { FileParserService } from "./file-parser.service";
 import { DigitalOceanSpacesService } from "./digitalocean-spaces.service";
 import { MvRealtimeService } from "./mv-realtime.service";
 import { WordTemplateMergeService } from "./word-template-merge.service";
+import { PptxTemplateMergeService } from "./pptx-template-merge.service";
 
 @Module({
   controllers: [MachineValuationController],
@@ -14,6 +15,7 @@ import { WordTemplateMergeService } from "./word-template-merge.service";
     DigitalOceanSpacesService,
     MvRealtimeService,
     WordTemplateMergeService,
+    PptxTemplateMergeService,
   ],
 })
 export class MachineValuationModule {}

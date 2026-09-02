@@ -8,53 +8,16 @@ import { createHash, randomUUID } from "crypto";
 import { ObjectId } from "mongodb";
 import sharp from "sharp";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
+import { loadOwnedCompanyWordTemplateBufferFromGridFs } from "@/server/auth-tracking/service";
 import { getMongoDb } from "@/server/mongodb";
 import { MachineValuationService } from "./machine-valuation.service";
 import type { MvAccessContext, MvReportTeamMember } from "./types";
-import { convertDocxToPdf, isLibreOfficeAvailable } from "./docx-to-pdf";
-
-type PendingPdfExport = {
-  projectId: string;
-  filePath: string;
-  fileName: string;
-  expiresAt: number;
-};
-
-const pendingPdfExports = new Map<string, PendingPdfExport>();
-const PDF_EXPORT_TTL_MS = 10 * 60_000;
-
-function cleanupExpiredPdfExports() {
-  const now = Date.now();
-  for (const [token, row] of pendingPdfExports.entries()) {
-    if (row.expiresAt > now) continue;
-    pendingPdfExports.delete(token);
-    fs.rm(row.filePath, { force: true }, () => undefined);
-  }
-}
-
-function storePendingPdfExport(opts: {
-  projectId: string;
-  sourcePdfPath: string;
-  fileName: string;
-}): string {
-  cleanupExpiredPdfExports();
-  const token = randomUUID();
-  const persistPath = path.join(os.tmpdir(), `mv-merge-pdf-${token}.pdf`);
-  try {
-    // Conversion output and pending exports normally share the OS temp volume.
-    // Rename is atomic/O(1), while copying a large image-heavy PDF can add seconds.
-    fs.renameSync(opts.sourcePdfPath, persistPath);
-  } catch {
-    fs.copyFileSync(opts.sourcePdfPath, persistPath);
-  }
-  pendingPdfExports.set(token, {
-    projectId: opts.projectId,
-    filePath: persistPath,
-    fileName: opts.fileName,
-    expiresAt: Date.now() + PDF_EXPORT_TTL_MS,
-  });
-  return token;
-}
+import {
+  convertDocxToPdf,
+  isDocxPdfConversionAvailable,
+  machineValuationPdfTimeoutMs,
+} from "./docx-to-pdf";
+import { storePendingPdfExport, takePendingPdfExport } from "./pending-pdf-export";
 
 type MergeImageLayout = {
   imagesPerRow: number;
@@ -69,6 +32,12 @@ type DiskMergeManifest = {
   templatePath: string;
   outputPath: string;
   textValues: Record<string, string>;
+  /** Variables intentionally left untouched for this company template. */
+  excludedVariableNames?: string[];
+  /** Company-defined placeholders used as image insertion anchors. */
+  assetImageMarkerVariables?: string[];
+  valuationImageMarkerVariables?: string[];
+  clientImageMarkerVariables?: string[];
   assetImagePaths: string[];
   valuationImagePaths: string[];
   clientImagePaths: string[];
@@ -89,6 +58,29 @@ type ImageSource =
   | { kind: "url"; url: string }
   | { kind: "fileId"; fileId: string }
   | { kind: "buffer"; buffer: Buffer };
+
+type StoredTemplateVariableMapping = {
+  variable: string;
+  sourceKey: string;
+  staticValue?: string;
+};
+
+type StoredCompanyDocumentTemplate = {
+  id?: string;
+  fileName?: string;
+  fileUrl?: string | null;
+  gridFsFileId?: string | null;
+  variableMappings?: unknown;
+  excludedVariableNames?: unknown;
+};
+
+type CompanyTemplateConfiguration = {
+  /** The owning company is part of the storage boundary, not browser input. */
+  companyId: string | null;
+  template: StoredCompanyDocumentTemplate | null;
+  mappings: StoredTemplateVariableMapping[];
+  excludedVariableNames: string[];
+};
 
 function sanitizeImageLayout(value: unknown): MergeImageLayout {
   const input =
@@ -617,38 +609,6 @@ function bufferFromStream(stream: NodeJS.ReadableStream): Promise<Buffer> {
   });
 }
 
-const BUNDLED_WORD_TEMPLATE_FILE_NAME = "تقرير تقييم.docx";
-
-function bundledWordTemplateCandidates(): string[] {
-  const cwd = process.cwd();
-  const candidates = [
-    // المصدر المحلي الوحيد أثناء التطوير.
-    path.resolve(cwd, "..", "Spark-Vision", "public", "files", BUNDLED_WORD_TEMPLATE_FILE_NAME),
-    path.resolve(cwd, "Spark-Vision", "public", "files", BUNDLED_WORD_TEMPLATE_FILE_NAME),
-    path.resolve(
-      __dirname,
-      "..",
-      "..",
-      "..",
-      "Spark-Vision",
-      "public",
-      "files",
-      BUNDLED_WORD_TEMPLATE_FILE_NAME,
-    ),
-    // نسخة النشر التي ينسخها Docker إلى /app/assets.
-    path.resolve(cwd, "assets", BUNDLED_WORD_TEMPLATE_FILE_NAME),
-    path.resolve(__dirname, "..", "..", "assets", BUNDLED_WORD_TEMPLATE_FILE_NAME),
-  ];
-  return [...new Set(candidates)];
-}
-
-function findBundledWordTemplateOnDisk(): string | null {
-  for (const candidate of bundledWordTemplateCandidates()) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
 function formatDateAr(value?: unknown): string {
   if (value == null) return "";
   const raw = typeof value === "string" ? value.trim() : "";
@@ -729,19 +689,126 @@ const WORD_TEMPLATE_VARIABLE_KEYS = [
 
 type WordTemplateVariableKey = (typeof WORD_TEMPLATE_VARIABLE_KEYS)[number];
 
-const WORD_TEMPLATE_VARIABLE_KEY_SET = new Set<string>(WORD_TEMPLATE_VARIABLE_KEYS);
-
-function sanitizeVariableOverrides(
-  input: unknown,
-): Partial<Record<WordTemplateVariableKey, string>> {
+/**
+ * Keep arbitrary template values as well as the legacy built-in keys.  A
+ * company can legitimately use a placeholder such as `<<branchManager>>`;
+ * filtering that key against a fixed whitelist makes custom
+ * company templates impossible to merge.
+ */
+function sanitizeVariableOverrides(input: unknown): Record<string, string> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
-  const out: Partial<Record<WordTemplateVariableKey, string>> = {};
-  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-    if (!WORD_TEMPLATE_VARIABLE_KEY_SET.has(key)) continue;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>).slice(0, 300)) {
+    const safeKey = normalizeTemplateVariableName(key);
+    if (!safeKey) continue;
     if (value != null && typeof value !== "string" && typeof value !== "number") continue;
-    out[key as WordTemplateVariableKey] = sanitizeForXml(String(value ?? "")).slice(0, 50_000);
+    out[safeKey] = sanitizeForXml(String(value ?? "")).slice(0, 50_000);
   }
   return out;
+}
+
+function buildClientIdentity(reportData: Record<string, unknown>): string {
+  return [
+    String(reportData.clientLegalType || "").trim(),
+    String(reportData.clientRepresentativeName || "").trim(),
+    String(reportData.clientRepresentativeRole || "").trim(),
+    String(reportData.intendedUsers || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" — ");
+}
+
+function normalizeTemplateVariableName(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+    .trim()
+    .slice(0, 180);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readStoredTemplateMappings(value: unknown): StoredTemplateVariableMapping[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const mappings: StoredTemplateVariableMapping[] = [];
+  for (const row of value.slice(0, 300)) {
+    const item = asRecord(row);
+    if (!item) continue;
+    const variable = normalizeTemplateVariableName(item.variable);
+    const sourceKey = normalizeTemplateVariableName(item.sourceKey ?? item.source);
+    if (!variable || !sourceKey || seen.has(variable)) continue;
+    seen.add(variable);
+    const staticValue =
+      typeof item.staticValue === "string" || typeof item.staticValue === "number"
+        ? sanitizeForXml(String(item.staticValue)).slice(0, 50_000)
+        : undefined;
+    mappings.push({ variable, sourceKey, ...(staticValue !== undefined ? { staticValue } : {}) });
+  }
+  return mappings;
+}
+
+function readExcludedTemplateVariableNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value
+      .slice(0, 300)
+      .map(normalizeTemplateVariableName)
+      .filter(Boolean),
+  )];
+}
+
+const IMAGE_MARKER_SOURCE_KEYS = new Set(["images.asset", "images.valuation", "images.client"]);
+
+function dynamicTemplateValues(
+  baseValues: Record<string, string>,
+  mappings: readonly StoredTemplateVariableMapping[],
+): {
+  textValues: Record<string, string>;
+  assetImageMarkerVariables: string[];
+  valuationImageMarkerVariables: string[];
+  clientImageMarkerVariables: string[];
+} {
+  const values = { ...baseValues };
+  const assetImageMarkerVariables: string[] = [];
+  const valuationImageMarkerVariables: string[] = [];
+  const clientImageMarkerVariables: string[] = [];
+  for (const mapping of mappings) {
+    // Keep marker text intact until the DOCX worker has measured its
+    // actual position and inserted the matching image grid beneath it.
+    if (IMAGE_MARKER_SOURCE_KEYS.has(mapping.sourceKey)) {
+      delete values[mapping.variable];
+      if (mapping.sourceKey === "images.asset") {
+        assetImageMarkerVariables.push(mapping.variable);
+      } else if (mapping.sourceKey === "images.valuation") {
+        valuationImageMarkerVariables.push(mapping.variable);
+      } else {
+        clientImageMarkerVariables.push(mapping.variable);
+      }
+      continue;
+    }
+    // `field:<name>` safely selects an existing flattened report value (for
+    // example a reportTextOverrides key); no arbitrary object path is read.
+    const fieldKey = mapping.sourceKey.startsWith("field:")
+      ? normalizeTemplateVariableName(mapping.sourceKey.slice("field:".length))
+      : mapping.sourceKey;
+    const value =
+      mapping.sourceKey === "static"
+        ? mapping.staticValue ?? ""
+        : Object.prototype.hasOwnProperty.call(baseValues, fieldKey)
+          ? baseValues[fieldKey] ?? ""
+          : mapping.staticValue ?? "";
+    values[mapping.variable] = sanitizeForXml(value).slice(0, 50_000);
+  }
+  return {
+    textValues: values,
+    assetImageMarkerVariables: [...new Set(assetImageMarkerVariables)],
+    valuationImageMarkerVariables: [...new Set(valuationImageMarkerVariables)],
+    clientImageMarkerVariables: [...new Set(clientImageMarkerVariables)],
+  };
 }
 
 function buildTextValues(
@@ -780,8 +847,67 @@ function buildTextValues(
     const val = raw[key];
     out[key] = sanitizeForXml(val);
   }
+  const numericDisplayNumber =
+    typeof displayNumber === "number" && Number.isFinite(displayNumber)
+      ? String(displayNumber)
+      : "";
+  const finalValueAmount = formatFinalValueAmount(reportData.finalValue);
+  // This catalog deliberately includes more fields than any one company template.
+  // It is the stable server-side source list used by per-company mappings.
+  Object.assign(out, {
+    projectName: sanitizeForXml(projectName),
+    displayNumber: numericDisplayNumber,
+    clientId: sanitizeForXml(String(reportData.clientId || "")),
+    clientEmail: sanitizeForXml(String(reportData.clientEmail || "")),
+    clientPhone: sanitizeForXml(String(reportData.clientPhone || "")),
+    clientLegalType: sanitizeForXml(String(reportData.clientLegalType || "")),
+    clientIdentity: sanitizeForXml(buildClientIdentity(reportData)),
+    intendedUse: sanitizeForXml(String(reportData.intendedUse || "")),
+    assetDetailedDescription: sanitizeForXml(String(reportData.assetDetailedDescription || "")),
+    reportTypeLabel: sanitizeForXml(String(reportData.reportTypeLabel || "")),
+    standardsVersion: sanitizeForXml(String(reportData.standardsVersion || "")),
+    currencyLabel: sanitizeForXml(String(reportData.currencyLabel || "")),
+    valuePremise: sanitizeForXml(String(reportData.valuePremise || "")),
+    finalValue: finalValueAmount,
+    finalValueAmount,
+    finalValueWords: sanitizeForXml(String(reportData.finalValueWords || "")),
+    valuationFirmName: sanitizeForXml(String(reportData.valuationFirmName || "")),
+    valuationFirmLicense: sanitizeForXml(String(reportData.valuationFirmLicense || "")),
+    valuationFirmAddress: sanitizeForXml(String(reportData.valuationFirmAddress || "")),
+    leadValuerName: sanitizeForXml(String(reportData.leadValuerName || "")),
+    leadValuerTitle: sanitizeForXml(String(reportData.leadValuerTitle || "")),
+    leadValuerMembershipNo: sanitizeForXml(String(reportData.leadValuerMembershipNo || "")),
+    scopeOfWorkDetails: sanitizeForXml(String(reportData.scopeOfWorkDetails || "")),
+    useRestriction: sanitizeForXml(String(reportData.useRestriction || "")),
+    externalSpecialistUse: sanitizeForXml(String(reportData.externalSpecialistUse || "")),
+    esgConsiderations: sanitizeForXml(String(reportData.esgConsiderations || "")),
+    informationSources: sanitizeForXml(String(reportData.informationSources || "")),
+    methodologyRationale: sanitizeForXml(String(reportData.methodologyRationale || "")),
+    costApproachDetails: sanitizeForXml(String(reportData.costApproachDetails || "")),
+    importantAssumptions: sanitizeForXml(String(reportData.importantAssumptions || "")),
+    generalAssumptions: sanitizeForXml(String(reportData.generalAssumptions || "")),
+    specialAssumptions: sanitizeForXml(String(reportData.specialAssumptions || "")),
+  });
+  // Company report-data models store their extra values with stable field IDs.
+  // Expose those IDs in the flat catalog so a mapping `field:<id>` works for
+  // both old manually-added fields and model-defined fields.
+  const customFieldValues: Record<string, string> = {};
+  if (Array.isArray(reportData.customFields)) {
+    for (const rawField of reportData.customFields.slice(0, 120)) {
+      if (!rawField || typeof rawField !== "object") continue;
+      const field = rawField as Record<string, unknown>;
+      const key = normalizeTemplateVariableName(field.id);
+      if (!key || Object.prototype.hasOwnProperty.call(out, key)) continue;
+      const value = field.value;
+      customFieldValues[key] =
+        typeof value === "string" || typeof value === "number"
+          ? sanitizeForXml(String(value)).slice(0, 50_000)
+          : "";
+    }
+  }
   return {
     ...out,
+    ...customFieldValues,
     ...sanitizeVariableOverrides(reportData.reportTextOverrides),
   };
 }
@@ -807,6 +933,32 @@ function asObjectId(value: unknown): ObjectId | null {
   if (value instanceof ObjectId) return value;
   const text = cleanReportText(value, 100);
   return ObjectId.isValid(text) ? new ObjectId(text) : null;
+}
+
+function companyTemplateFilePath(
+  fileUrl: unknown,
+  extension: ".docx" | ".pptx",
+  companyId: string | null,
+): string | null {
+  if (typeof fileUrl !== "string" || !fileUrl.trim() || !companyId) return null;
+  const raw = fileUrl.trim().replace(/\\/g, "/");
+  const lowercase = raw.toLowerCase();
+  if (!lowercase.endsWith(extension)) return null;
+
+  const resolveInside = (root: string, relative: string): string | null => {
+    const base = path.resolve(root);
+    const candidate = path.resolve(base, relative.replace(/^[/\\]+/, ""));
+    return candidate === base || candidate.startsWith(`${base}${path.sep}`) ? candidate : null;
+  };
+
+  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safeCompanyId) return null;
+  const companyPrefix = `/uploads/company-report-templates/${safeCompanyId}/`;
+  if (!raw.startsWith(companyPrefix)) return null;
+  return resolveInside(
+    path.join(process.cwd(), "uploads", "company-report-templates", safeCompanyId),
+    raw.slice(companyPrefix.length),
+  );
 }
 
 function readStoredReportTeam(value: unknown): MvReportTeamMember[] {
@@ -836,6 +988,118 @@ export class WordTemplateMergeService {
   private readonly logger = new Logger(WordTemplateMergeService.name);
 
   constructor(private readonly mvService: MachineValuationService) {}
+
+  /**
+   * Load only the configuration stored for the project's company.  The merge
+   * endpoint accepts a catalogue id only as a selector; file references and
+   * mappings always come from the owning company's stored configuration.
+   */
+  private async resolveCompanyWordTemplateConfiguration(
+    projectCompanyId: unknown,
+    ctx: MvAccessContext,
+    requestedTemplateId?: string,
+  ): Promise<CompanyTemplateConfiguration> {
+    const companyId = asObjectId(projectCompanyId ?? ctx.companyId);
+    if (!companyId) {
+      return { companyId: null, template: null, mappings: [], excludedVariableNames: [] };
+    }
+    try {
+      const db = await getMongoDb();
+      const { companies } = getAuthCollections(db);
+      const company = await companies.findOne({ _id: companyId });
+      const reportDefaults = asRecord((company as unknown as Record<string, unknown> | null)?.reportDefaults);
+      const topLevelMappings = asRecord(reportDefaults?.variableMappings)?.word;
+      const topLevelExclusions = asRecord(reportDefaults?.excludedVariables)?.word;
+      const templateRows = Array.isArray(reportDefaults?.wordTemplates)
+        ? reportDefaults.wordTemplates.map(asRecord).filter((row): row is Record<string, unknown> => row != null)
+        : [];
+      const legacyTemplate = asRecord(reportDefaults?.wordTemplate);
+      const templateData = requestedTemplateId
+        ? templateRows.find((row) => cleanReportText(row.id, 120) === requestedTemplateId) ??
+          (templateRows.length === 0 && legacyTemplate && (
+            cleanReportText(legacyTemplate.id, 120) === requestedTemplateId ||
+            (!cleanReportText(legacyTemplate.id, 120) && requestedTemplateId === "word-template-1")
+          )
+            ? legacyTemplate
+            : null)
+        : templateRows[0] ?? legacyTemplate;
+      if (!templateData) {
+        return {
+          companyId: companyId.toString(),
+          template: null,
+          mappings: readStoredTemplateMappings(topLevelMappings),
+          excludedVariableNames: readExcludedTemplateVariableNames(topLevelExclusions),
+        };
+      }
+      const template: StoredCompanyDocumentTemplate = {
+        id: typeof templateData.id === "string" ? templateData.id : undefined,
+        fileName: typeof templateData.fileName === "string" ? templateData.fileName : undefined,
+        fileUrl: typeof templateData.fileUrl === "string" ? templateData.fileUrl : null,
+        gridFsFileId: typeof templateData.gridFsFileId === "string" ? templateData.gridFsFileId : null,
+        variableMappings: templateData.variableMappings,
+        excludedVariableNames: templateData.excludedVariableNames,
+      };
+      // Tolerate the short-lived pre-release storage shape while companies are
+      // being migrated.  The canonical shape is template.variableMappings.
+      return {
+        companyId: companyId.toString(),
+        template,
+        mappings: readStoredTemplateMappings(template.variableMappings ?? topLevelMappings),
+        excludedVariableNames: readExcludedTemplateVariableNames(
+          template.excludedVariableNames ?? topLevelExclusions,
+        ),
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Could not load company Word template configuration: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return {
+        companyId: companyId.toString(),
+        template: null,
+        mappings: [],
+        excludedVariableNames: [],
+      };
+    }
+  }
+
+  private async loadTemplateBufferFromGridFs(
+    fileId: string,
+    companyId: string | null,
+  ): Promise<Buffer | null> {
+    if (!companyId) return null;
+    try {
+      return await loadOwnedCompanyWordTemplateBufferFromGridFs(fileId, companyId);
+    } catch (error) {
+      this.logger.warn(
+        `Could not load company template from GridFS: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private async loadConfiguredWordTemplate(
+    config: CompanyTemplateConfiguration,
+  ): Promise<Buffer | null> {
+    const stored = config.template;
+    if (stored?.gridFsFileId) {
+      const buffer = await this.loadTemplateBufferFromGridFs(stored.gridFsFileId, config.companyId);
+      if (buffer?.subarray(0, 2).toString("utf8") === "PK") return buffer;
+    }
+    const storedPath = companyTemplateFilePath(stored?.fileUrl, ".docx", config.companyId);
+    if (storedPath && fs.existsSync(storedPath)) {
+      try {
+        const buffer = await fs.promises.readFile(storedPath);
+        if (buffer.subarray(0, 2).toString("utf8") === "PK") return buffer;
+      } catch (error) {
+        this.logger.warn(`Could not read company Word template ${storedPath}: ${String(error)}`);
+      }
+    }
+    return null;
+  }
 
   private async resolveReportPreparers(
     reportData: Record<string, unknown>,
@@ -999,6 +1263,8 @@ export class WordTemplateMergeService {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
+      /** Selects one of the owning company's saved Word templates. */
+      templateId?: string;
       /** عند true: يُرجع ZIP يحتوي Word + PDF محوّل من نفس الملف. */
       alsoPdf?: boolean;
       /** تجاهل نسخة الواجهة واقرأ أحدث بيانات وصور المشروع من قاعدة البيانات. */
@@ -1017,14 +1283,24 @@ export class WordTemplateMergeService {
     const project = loaded.project;
     const useStoredProjectState = body.useStoredProjectState === true;
     const reportData = (project.reportData ?? {}) as Record<string, unknown>;
-    const sourceTemplatePath = findBundledWordTemplateOnDisk();
-    if (!sourceTemplatePath) {
+    const requestedTemplateId = cleanReportText(body.templateId, 120) ||
+      cleanReportText(reportData.wordTemplateId, 120);
+    const companyTemplateConfig = await this.resolveCompanyWordTemplateConfiguration(
+      project.companyId,
+      ctx,
+      requestedTemplateId || undefined,
+    );
+    let templateBuffer = await this.loadConfiguredWordTemplate(companyTemplateConfig);
+    if (!templateBuffer) {
       throw new BadRequestException(
-        "لم يُعثر على قالب Word الأساسي «تقرير تقييم.docx» في Spark-Vision/public/files أو assets على السيرفر.",
+        companyTemplateConfig.template
+          ? "تعذر قراءة قالب Word المحفوظ لهذه الشركة. أعد رفع القالب من بيانات إعداد التقرير النهائي ثم أعد المحاولة."
+          : requestedTemplateId
+            ? "قالب Word المحدد لم يعد متاحاً لهذه الشركة. اختر قالباً آخر من صفحة التقرير النهائي."
+          : "لم يتم إعداد قالب Word لهذه الشركة بعد. ارفع قالب Word من بيانات إعداد التقرير النهائي ثم أعد المحاولة.",
       );
     }
-    let templateBuffer: Buffer | null = await fs.promises.readFile(sourceTemplatePath);
-    this.logger.debug(`Using bundled Word template: ${sourceTemplatePath}`);
+    this.logger.debug(`Using the saved company Word template for ${projectId}.`);
 
     const assetSources = await this.resolveImageSources({
       projectId,
@@ -1110,7 +1386,11 @@ export class WordTemplateMergeService {
       const requestTextValues = useStoredProjectState
         ? {}
         : sanitizeVariableOverrides(body.textValues);
-      const textValues = { ...storedTextValues, ...requestTextValues };
+      const configuredValues = dynamicTemplateValues(
+        { ...storedTextValues, ...requestTextValues },
+        companyTemplateConfig.mappings,
+      );
+      const textValues = configuredValues.textValues;
       // منع مسح عناوين الفهرس/المتن عندما تصل قيمة فارغة من الواجهة
       if (!String(textValues.assetSingularPlural || "").trim()) {
         textValues.assetSingularPlural =
@@ -1125,6 +1405,10 @@ export class WordTemplateMergeService {
         templatePath,
         outputPath,
         textValues,
+        excludedVariableNames: companyTemplateConfig.excludedVariableNames,
+        assetImageMarkerVariables: configuredValues.assetImageMarkerVariables,
+        valuationImageMarkerVariables: configuredValues.valuationImageMarkerVariables,
+        clientImageMarkerVariables: configuredValues.clientImageMarkerVariables,
         assetImagePaths,
         valuationImagePaths,
         clientImagePaths,
@@ -1190,9 +1474,13 @@ export class WordTemplateMergeService {
       const wantPdf = body.alsoPdf === true;
       if (wantPdf) {
         try {
+          const pdfStartedAt = Date.now();
           const pdfPath = await convertDocxToPdf(mergeResult.outputPath, workDir, {
-            timeoutMs: Math.min(15 * 60_000, Math.max(180_000, imageCount * 1200)),
+            timeoutMs: machineValuationPdfTimeoutMs(imageCount),
           });
+          this.logger.log(
+            `Word→PDF conversion completed for ${projectId} in ${Date.now() - pdfStartedAt}ms`,
+          );
           const pdfToken = storePendingPdfExport({
             projectId,
             sourcePdfPath: pdfPath,
@@ -1222,7 +1510,7 @@ export class WordTemplateMergeService {
       } else {
         res.setHeader(
           "X-Word-Merge-Pdf-Available",
-          isLibreOfficeAvailable() ? "1" : "0",
+          isDocxPdfConversionAvailable() ? "1" : "0",
         );
       }
 
@@ -1248,13 +1536,11 @@ export class WordTemplateMergeService {
     token: string,
     res: Response,
   ): Promise<void> {
-    cleanupExpiredPdfExports();
-    const row = pendingPdfExports.get(token);
-    if (!row || row.projectId !== projectId) {
+    const row = takePendingPdfExport(projectId, token);
+    if (!row) {
       throw new NotFoundException("انتهت صلاحية ملف PDF أو الرمز غير صالح. أعد تنزيل التقرير.");
     }
     if (!fs.existsSync(row.filePath)) {
-      pendingPdfExports.delete(token);
       throw new NotFoundException("تعذر العثور على ملف PDF. أعد تنزيل التقرير.");
     }
     const fileStat = await fs.promises.stat(row.filePath);
@@ -1267,7 +1553,6 @@ export class WordTemplateMergeService {
     try {
       await pipeFileToResponse(row.filePath, res);
     } finally {
-      pendingPdfExports.delete(token);
       fs.rm(row.filePath, { force: true }, () => undefined);
     }
   }

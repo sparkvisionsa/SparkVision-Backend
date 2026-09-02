@@ -1,4 +1,4 @@
-import type { ObjectId } from "mongodb";
+import type { Long, ObjectId } from "mongodb";
 
 /**
  * حقول مجلد معاينة الصور (MV) — تُخزَّن في مجموعة `assets` بجانب صفوف استيراد Excel.
@@ -10,13 +10,65 @@ export interface MvPhotoFolderAssetFields {
   createdAt?: Date | null;
   /** مجلد أب في شجرة صور المعاينة */
   parent?: ObjectId | null;
-  /** اسم المجلد (يطابق اسم مجلد mv_subprojects تحت 2.صور المعاينة) */
+  /** اسم الأصل للعرض والتحديث — يُقرأ ويُحدَّث في ‎assets.name‎ فقط. */
   name?: string | null;
+  /**
+   * الاسم الأصلي عند إنشاء/توليد الأصل من Excel.
+   * يبقى ثابتاً بعد التوليد ولا يُحدَّث مع اسم الأصل.
+   * الإملاء ‎`lable`‎ مقصود للتوافق مع حقل قاعدة البيانات المطلوب.
+   */
+  lable?: string | null;
+  /** كود العميل كما يُقرأ من عمود Excel المختار. */
+  client_code?: string | null;
+  /** اسم الموظف كما يُقرأ من عمود Excel المختار عند إنشاء مجلدات صور الأصول. */
+  employer?: string | null;
+  /**
+   * تسلسل الأصل على مستوى مجموعة ‎assets‎.
+   * BSON Int64 يحافظ على الدقة بخلاف JavaScript number بعد ‎2^53 - 1‎.
+   */
+  val_tech_id?: Long | null;
   writtenDescription?: string | null;
   /** نوع فرعي عند ‎assetType === "other"‎ (مثل ‎sofa‎) — من التطبيق أو ‎rawData‎ */
   subAssetType?: string | null;
   /** الكمية — لأصول ‎other‎ */
   quantity?: number | string | null;
+  /**
+   * وصف الأصل المختار من قائمة إعدادات الشركة (فئة + نوع + اسم).
+   * يُحفظ ككائن مدمج حتى يبقى العرض دقيقاً إن تغيّرت القائمة لاحقاً.
+   */
+  assetDescription?: {
+    id?: string | null;
+    category?: string | null;
+    type?: string | null;
+    name?: string | null;
+  } | null;
+  /** الوصف المختار من كولكشن ‎asset_description‎. */
+  asset_description?: {
+    id?: string | null;
+    category?: string | null;
+    type?: string | null;
+    name?: string | null;
+  } | null;
+  /** فئة الأصل كما تُحفظ في الحقل العلوي ‎assets.category‎. */
+  category?: string | null;
+  /** نوع الأصل كما يُحفظ في الحقل العلوي ‎assets.type‎. */
+  type?: string | null;
+  /**
+   * مكان الأصل داخل موقع المعاينة (مثل مبنى/دور/قاعة).
+   * يحفظ كنص حتى يبقى متوافقاً مع قيمة عمود Excel ويدعم خيارات القائمة الحرة.
+   */
+  asset_location?: string | null;
+  /**
+   * مصدر الأصل: ‎تطبيق‎ يُحفظ عند إنشاء الأصل من التطبيق ولا يُعاد حسابه.
+   * ‎عميل‎ إن وُجد ‎sheetName‎، و‎نظام‎ في غير ذلك.
+   */
+  asset_source?: string | null;
+  /** المكان الحالي للأصل عند نقله من موقعه الأصلي. */
+  newAssetLocation?: string | null;
+  /**
+   * رمز داخلي للأصل. القيمة الافتراضية ‎null‎ — لا يُملأ من Excel.
+   * كود العميل يُحفظ في ‎client_code‎.
+   */
   code?: string | null;
   /** طراز/وصف نموذجي لمعاينة الصور — منفصل عن حقول الأنواع الأخرى */
   model?: string | null;

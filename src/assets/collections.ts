@@ -57,6 +57,83 @@ export async function ensureAssetsCollectionsInitialized(db: Db) {
       createIndexSafely(assets, { projectId: 1, assetId: 1 }, { unique: true }),
       createIndexSafely(assets, { projectId: 1, parent: 1, name: 1 }),
       createIndexSafely(assets, { projectId: 1, isAssetFolder: 1, parent: 1, name: 1 }),
+      createIndexSafely(assets, { projectId: 1, parent: 1, lable: 1 }),
+      createIndexSafely(assets, { projectId: 1, isAssetFolder: 1, parent: 1, lable: 1 }),
+      createIndexSafely(assets, { val_tech_id: 1 }, { unique: true, sparse: true }),
+      assets.updateMany(
+        {
+          $and: [
+            { $or: [{ client_code: { $exists: false } }, { client_code: null }] },
+            { code: { $type: "string" } },
+          ],
+        } as Filter<AssetDoc>,
+        [{ $set: { client_code: "$code", code: null } }],
+      ),
+      assets.updateMany(
+        { system_code: { $exists: true } } as Filter<AssetDoc>,
+        { $unset: { system_code: "" }, $set: { code: null } },
+      ),
+      /**
+       * يملأ ‎name‎ من ‎lable‎ فقط عندما يكون ‎name‎ فارغاً.
+       * بعد التوليد يبقى ‎lable‎ ثابتاً، وتحديثات اسم الأصل تذهب إلى ‎name‎.
+       */
+      assets.updateMany(
+        {
+          $and: [
+            { lable: { $type: "string" } },
+            { $or: [{ name: null }, { name: { $exists: false } }, { name: "" }] },
+          ],
+        } as Filter<AssetDoc>,
+        [{ $set: { name: "$lable" } }],
+      ),
+      assets.updateMany(
+        {},
+        [
+          {
+            $set: {
+              category: {
+                $ifNull: [
+                  { $cond: [{ $eq: ["$category", ""] }, null, "$category"] },
+                  { $ifNull: ["$asset_description.category", "$assetDescription.category"] },
+                ],
+              },
+              type: {
+                $ifNull: [
+                  { $cond: [{ $eq: ["$type", ""] }, null, "$type"] },
+                  { $ifNull: ["$asset_description.type", "$assetDescription.type"] },
+                ],
+              },
+            },
+          },
+        ],
+      ),
+      /**
+       * أصول ‎تطبيق‎ اكتملت عند الإنشاء — لا تُمس ولا يُفحص هيكلها.
+       * الباقي: ‎sheetName‎ ⇒ عميل، وإلا نظام.
+       */
+      assets.updateMany(
+        {
+          asset_source: { $nin: ["تطبيق", "app"] },
+        } as Filter<AssetDoc>,
+        [
+          {
+            $set: {
+              asset_source: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: [{ $type: "$sheetName" }, "string"] },
+                      { $gt: [{ $strLenCP: { $trim: { input: "$sheetName" } } }, 0] },
+                    ],
+                  },
+                  "عميل",
+                  "نظام",
+                ],
+              },
+            },
+          },
+        ],
+      ),
       createIndexSafely(imports, { projectId: 1, importedAt: -1 }),
       createIndexSafely(
         columnConfigs,

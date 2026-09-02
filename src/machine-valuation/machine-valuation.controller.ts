@@ -25,6 +25,7 @@ import { MachineValuationService } from "./machine-valuation.service";
 import { FileParserService } from "./file-parser.service";
 import { MvRealtimeService, type MvRealtimeEventType } from "./mv-realtime.service";
 import { WordTemplateMergeService } from "./word-template-merge.service";
+import { PptxTemplateMergeService } from "./pptx-template-merge.service";
 import {
   ASSET_IMPORT_MAX_FILE_BYTES,
   VALUATION_EXCEL_MAX_FILE_BYTES,
@@ -64,6 +65,7 @@ export class MachineValuationController {
     private readonly fileParser: FileParserService,
     private readonly mvRealtime: MvRealtimeService,
     private readonly wordTemplateMerge: WordTemplateMergeService,
+    private readonly pptxTemplateMerge: PptxTemplateMergeService,
   ) {}
 
   private publishRealtime(projectId: string, type: MvRealtimeEventType, reason: string) {
@@ -519,12 +521,24 @@ export class MachineValuationController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Param("pid") pid: string,
-    @Body() body: { columnKey?: string; importId?: string; sheetName?: string },
+    @Body()
+    body: {
+      columnKey?: string;
+      locationColumnKey?: string;
+      clientCodeColumnKey?: string;
+      codeColumnKey?: string;
+      employerColumnKey?: string;
+      importId?: string;
+      sheetName?: string;
+    },
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     const result = await this.mvService.generateInspectionFoldersFromAssetImport(pid, toMvAccess(context), {
       columnKey: body?.columnKey ?? "",
+      locationColumnKey: body?.locationColumnKey ?? "",
+      clientCodeColumnKey: body?.clientCodeColumnKey || body?.codeColumnKey || "",
+      employerColumnKey: body?.employerColumnKey ?? "",
       importId: body?.importId ?? "",
       sheetName: body?.sheetName ?? "",
     });
@@ -935,6 +949,7 @@ export class MachineValuationController {
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
       textValues?: Record<string, string>;
+      templateId?: string;
       alsoPdf?: boolean;
       useStoredProjectState?: boolean;
       imageLayout?: {
@@ -951,6 +966,32 @@ export class MachineValuationController {
     return this.wordTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body, res);
   }
 
+  /**
+   * Server-side PowerPoint merge.  It intentionally reads the saved report
+   * fields and the included project asset images instead of trusting a browser
+   * cache, just like the saved-state Word export path.
+   */
+  @Post("projects/:pid/pptx-template/merge")
+  async mergePptxTemplate(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param("pid") projectId: string,
+    @Body()
+    body: {
+      templateId?: string;
+      useStoredProjectState?: boolean;
+      alsoPdf?: boolean;
+      imageLayout?: {
+        assetImagesPerRow?: number;
+        clientImagesPerRow?: number;
+      };
+    },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.pptxTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body ?? {}, res);
+  }
+
   @Get("projects/:pid/word-template/pdf/:token")
   async downloadMergedWordPdf(
     @Req() req: Request,
@@ -963,6 +1004,19 @@ export class MachineValuationController {
     // تأكيد صلاحية الوصول للمشروع قبل تنزيل PDF المؤقت
     await this.mvService.getProject(projectId, toMvAccess(context), { picAssetMode: "report" });
     return this.wordTemplateMerge.respondWithPendingPdf(projectId, token, res);
+  }
+
+  @Get("projects/:pid/pptx-template/pdf/:token")
+  async downloadMergedPptxPdf(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Param("pid") projectId: string,
+    @Param("token") token: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    await this.mvService.getProject(projectId, toMvAccess(context), { picAssetMode: "report" });
+    return this.pptxTemplateMerge.respondWithPendingPdf(projectId, token, res);
   }
 
   @Get("projects/:pid/files/:fid/download")

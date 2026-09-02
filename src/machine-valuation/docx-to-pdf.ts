@@ -4,8 +4,10 @@ import * as os from "os";
 import * as path from "path";
 
 /** فلتر PDF في LibreOffice بدون تصغير دقة الصور المضمّنة. */
-const LO_PDF_FILTER =
+const LO_WRITER_PDF_FILTER =
   'pdf:writer_pdf_Export:{"ReduceImageResolution":{"type":"boolean","value":"false"},"Quality":{"type":"long","value":"100"},"MaxImageResolution":{"type":"long","value":"600"},"UseTaggedPDF":{"type":"boolean","value":"false"},"ExportFormFields":{"type":"boolean","value":"false"}}';
+const LO_IMPRESS_PDF_FILTER =
+  'pdf:impress_pdf_Export:{"ReduceImageResolution":{"type":"boolean","value":"false"},"Quality":{"type":"long","value":"100"},"MaxImageResolution":{"type":"long","value":"600"},"UseTaggedPDF":{"type":"boolean","value":"false"}}';
 
 function whichCommand(cmd: string): string | null {
   try {
@@ -58,21 +60,76 @@ function candidateSofficeBins(): string[] {
   ];
 }
 
+function officeProgramRoots(): string[] {
+  const localAppData = process.env.LOCALAPPDATA || "";
+  return [
+    "C:\\Program Files\\Microsoft Office\\root\\Office16",
+    "C:\\Program Files (x86)\\Microsoft Office\\root\\Office16",
+    "C:\\Program Files\\Microsoft Office\\root\\Office15",
+    "C:\\Program Files (x86)\\Microsoft Office\\root\\Office15",
+    "C:\\Program Files\\Microsoft Office\\Office16",
+    "C:\\Program Files (x86)\\Microsoft Office\\Office16",
+    "C:\\Program Files\\Microsoft Office\\Office15",
+    "C:\\Program Files (x86)\\Microsoft Office\\Office15",
+    localAppData ? path.join(localAppData, "Microsoft\\WindowsApps") : "",
+  ].filter(Boolean);
+}
+
 function candidateWinWordBins(): string[] {
   return [
     process.env.WINWORD_PATH || "",
-    "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-    "C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
-    "C:\\Program Files\\Microsoft Office\\Office16\\WINWORD.EXE",
-    "C:\\Program Files (x86)\\Microsoft Office\\Office16\\WINWORD.EXE",
+    ...officeProgramRoots().map((root) => path.join(root, "WINWORD.EXE")),
   ].filter((v) => v.trim().length > 0);
+}
+
+function candidatePowerPointBins(): string[] {
+  return [
+    process.env.POWERPNT_PATH || "",
+    process.env.POWERPOINT_PATH || "",
+    ...officeProgramRoots().map((root) => path.join(root, "POWERPNT.EXE")),
+  ].filter((v) => v.trim().length > 0);
+}
+
+function preferredPdfRenderer(): "office" | "libreoffice" {
+  const raw = process.env.MV_WORD_PDF_RENDERER?.trim().toLowerCase();
+  if (raw === "libreoffice" || raw === "lo") return "libreoffice";
+  return "office";
+}
+
+function canCreateComObject(progId: string): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `try { $app = New-Object -ComObject ${progId}; if ($app) { try { $app.Quit() } catch {}; exit 0 }; exit 1 } catch { exit 1 }`,
+      ],
+      { encoding: "utf8", windowsHide: true, timeout: 25_000 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 let cachedSoffice: string | null | undefined;
 
+type CommandResult = {
+  code: number | null;
+  stderr: string;
+  stdout: string;
+  timedOut?: boolean;
+};
+
 /** يعيد مسار LibreOffice إن وُجد، وإلا null. */
 export function resolveSofficeBinary(): string | null {
-  if (cachedSoffice !== undefined) return cachedSoffice;
+  if (cachedSoffice && fs.existsSync(cachedSoffice)) return cachedSoffice;
+  cachedSoffice = undefined;
 
   for (const candidate of candidateSofficeBins()) {
     if (candidate.includes("/") || candidate.includes("\\")) {
@@ -93,20 +150,34 @@ export function resolveSofficeBinary(): string | null {
   return null;
 }
 
+let cachedWordAvailable: boolean | undefined;
+let cachedPowerPointAvailable: boolean | undefined;
+
 export function isMicrosoftWordAvailable(): boolean {
   if (process.platform !== "win32") return false;
-  return candidateWinWordBins().some((p) => fs.existsSync(p));
+  if (cachedWordAvailable !== undefined) return cachedWordAvailable;
+  cachedWordAvailable =
+    candidateWinWordBins().some((p) => fs.existsSync(p)) || canCreateComObject("Word.Application");
+  return cachedWordAvailable;
+}
+
+export function isMicrosoftPowerPointAvailable(): boolean {
+  if (process.platform !== "win32") return false;
+  if (cachedPowerPointAvailable !== undefined) return cachedPowerPointAvailable;
+  cachedPowerPointAvailable =
+    candidatePowerPointBins().some((p) => fs.existsSync(p)) ||
+    canCreateComObject("PowerPoint.Application");
+  return cachedPowerPointAvailable;
 }
 
 function runCommand(
   bin: string,
   args: string[],
   opts: { cwd: string; timeoutMs: number },
-): Promise<{ code: number | null; stderr: string; stdout: string }> {
+): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
       cwd: opts.cwd,
-      timeout: opts.timeoutMs,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       env: {
@@ -116,23 +187,59 @@ function runCommand(
     });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
+    let settled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      callback();
+    };
+
     child.stdout.on("data", (d: Buffer) => out.push(d));
     child.stderr.on("data", (d: Buffer) => err.push(d));
-    child.on("error", (error) => reject(error));
+    child.on("error", (error) => settle(() => reject(error)));
     child.on("close", (code) => {
-      resolve({
-        code,
-        stdout: Buffer.concat(out).toString("utf8"),
-        stderr: Buffer.concat(err).toString("utf8"),
-      });
+      settle(() =>
+        resolve({
+          code,
+          stdout: Buffer.concat(out).toString("utf8"),
+          stderr: Buffer.concat(err).toString("utf8"),
+        }),
+      );
     });
+    timeoutHandle = setTimeout(() => {
+      try {
+        child.kill();
+        if (process.platform === "win32" && child.pid) {
+          const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          killer.on("error", () => undefined);
+        }
+      } finally {
+        settle(() =>
+          resolve({
+            code: null,
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr:
+              Buffer.concat(err).toString("utf8") +
+              "\nCommand timed out after " +
+              opts.timeoutMs +
+              "ms.",
+            timedOut: true,
+          }),
+        );
+      }
+    }, opts.timeoutMs);
   });
 }
 
 async function convertViaLibreOffice(
-  docxPath: string,
+  sourcePath: string,
   outDir: string,
-  opts?: { timeoutMs?: number },
+  opts: { timeoutMs?: number; pdfFilter: string; sourceLabel: string },
 ): Promise<string> {
   const soffice = resolveSofficeBinary();
   if (!soffice) {
@@ -140,8 +247,8 @@ async function convertViaLibreOffice(
   }
 
   await fs.promises.mkdir(outDir, { recursive: true });
-  const timeoutMs = opts?.timeoutMs ?? 10 * 60_000;
-  const absDocx = path.resolve(docxPath);
+  const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
+  const absSource = path.resolve(sourcePath);
   const absOut = path.resolve(outDir);
 
   const userProfile = await fs.promises.mkdtemp(path.join(os.tmpdir(), "lo-profile-"));
@@ -156,10 +263,10 @@ async function convertViaLibreOffice(
         "--nofirststartwizard",
         `-env:UserInstallation=${profileUri}`,
         "--convert-to",
-        LO_PDF_FILTER,
+        opts.pdfFilter,
         "--outdir",
         absOut,
-        absDocx,
+        absSource,
       ],
       [
         "--headless",
@@ -172,17 +279,17 @@ async function convertViaLibreOffice(
         "pdf",
         "--outdir",
         absOut,
-        absDocx,
+        absSource,
       ],
     ];
 
-    let lastError = "تعذر تحويل Word إلى PDF عبر LibreOffice";
+    let lastError = "تعذر تحويل " + opts.sourceLabel + " إلى PDF عبر LibreOffice";
     for (const args of attempts) {
       try {
         const result = await runCommand(soffice, args, { cwd: absOut, timeoutMs });
         const expectedPdf = path.join(
           absOut,
-          `${path.basename(absDocx, path.extname(absDocx))}.pdf`,
+          `${path.basename(absSource, path.extname(absSource))}.pdf`,
         );
         if (fs.existsSync(expectedPdf) && fs.statSync(expectedPdf).size > 100) {
           return expectedPdf;
@@ -195,6 +302,11 @@ async function convertViaLibreOffice(
           .filter((row) => row.size > 100)
           .sort((a, b) => b.mtime - a.mtime)[0];
         if (newest) return newest.p;
+
+        if (result.timedOut) {
+          lastError = `LibreOffice timed out after ${timeoutMs}ms`;
+          break;
+        }
 
         lastError =
           result.stderr.trim() ||
@@ -215,7 +327,7 @@ async function convertViaLibreOffice(
 }
 
 /**
- * تحويل عبر Microsoft Word COM — أفضل مطابقة للملف الناتج على Windows.
+ * تحويل عبر Microsoft Word COM — يحافظ على تخطيط الصفحات والصور كما في Word.
  */
 async function convertViaWordCom(
   docxPath: string,
@@ -245,56 +357,21 @@ try {
   $word = New-Object -ComObject Word.Application
   $word.Visible = $false
   $word.DisplayAlerts = 0
-  $doc = $word.Documents.Open($docx, $false, $false)
-
-  # حدّث الفهرس بعد أن أصلح عامل الدمج العلامات المرجعية، ثم احذف الصفحات
-  # الفارغة فعلياً فقط. التنفيذ عكسياً يمنع تغيّر أرقام الصفحات أثناء الحذف.
-  try {
-    for ($i = 1; $i -le $doc.Fields.Count; $i++) {
-      $field = $doc.Fields.Item($i)
-      $insideToc = $false
-      for ($j = 1; $j -le $doc.TablesOfContents.Count; $j++) {
-        $tocRange = $doc.TablesOfContents.Item($j).Range
-        if ($field.Code.Start -ge $tocRange.Start -and $field.Code.End -le $tocRange.End) {
-          $insideToc = $true
-          break
-        }
-      }
-      if (-not $insideToc) { $field.Update() | Out-Null }
-    }
-  } catch {}
-  $doc.Repaginate()
-  for ($pass = 0; $pass -lt 2; $pass++) {
-    $pageCount = $doc.ComputeStatistics(2)
-    $removed = 0
-    for ($page = $pageCount; $page -ge 1; $page--) {
-      $start = $doc.GoTo(1, 1, $page).Start
-      if ($page -lt $pageCount) {
-        $end = $doc.GoTo(1, 1, $page + 1).Start
-      } else {
-        $end = $doc.Content.End
-      }
-      $range = $doc.Range($start, $end)
-      $printable = ($range.Text -replace '[\s\x00-\x1F\x7F]', '')
-      $shapeCount = 0
-      try { $shapeCount = $range.InlineShapes.Count } catch {}
-      try { $shapeCount += $range.ShapeRange.Count } catch {}
-      if ($printable.Length -eq 0 -and $range.Tables.Count -eq 0 -and $shapeCount -eq 0) {
-        $range.Delete() | Out-Null
-        $removed++
-      }
-    }
-    if ($removed -eq 0) { break }
-    $doc.Repaginate()
-  }
+  try { $word.ScreenUpdating = $false } catch {}
+  # ConfirmConversions=false, ReadOnly=true, AddToRecent=false — لا نعدّل ملف الدمج
+  $doc = $word.Documents.Open($docx, $false, $true, $false)
+  try { $word.ActiveDocument.ActiveWindow.View.Type = 3 } catch {}
+  try { $doc.ActiveWindow.View.Type = 3 } catch {}
+  try { $doc.Repaginate() } catch {}
   try {
     for ($i = 1; $i -le $doc.TablesOfContents.Count; $i++) {
       $doc.TablesOfContents.Item($i).UpdatePageNumbers() | Out-Null
     }
   } catch {}
-  $doc.Save()
 
-  # 17 = PDF، OptimizeFor=0 للطباعة، وRange=0 لكل المستند.
+  # 17=wdExportFormatPDF, OptimizeFor=0 Print, Range=0 All, Item=0 Content,
+  # IncludeDocProps=true, KeepIRM=true, CreateBookmarks=1 Heading,
+  # DocStructureTags=true, BitmapMissingFonts=true
   $doc.ExportAsFixedFormat($pdf, 17, $false, 0, 0, 1, 1, 0, $true, $true, 1, $true, $true, $false)
   if (-not (Test-Path -LiteralPath $pdf)) { throw 'Word PDF export did not create a file' }
   $len = (Get-Item -LiteralPath $pdf).Length
@@ -333,19 +410,15 @@ try {
   }
 }
 
-/**
- * يحوّل DOCX إلى PDF بأعلى جودة متاحة:
- * 1) Microsoft Word COM على Windows (نفس محرّك Word → تطابق أفضل)
- * 2) LibreOffice إن وُجد
- */
 export async function convertDocxToPdf(
   docxPath: string,
   outDir: string,
   opts?: { timeoutMs?: number },
 ): Promise<string> {
   const errors: string[] = [];
+  const preferOffice = preferredPdfRenderer() === "office";
 
-  if (process.platform === "win32" && isMicrosoftWordAvailable()) {
+  if (preferOffice && isMicrosoftWordAvailable()) {
     try {
       return await convertViaWordCom(docxPath, outDir, opts);
     } catch (err) {
@@ -353,13 +426,18 @@ export async function convertDocxToPdf(
     }
   }
 
-  if (resolveSofficeBinary()) {
+  const allowLibreOfficeFallback = !preferOffice || process.platform !== "win32";
+  if (allowLibreOfficeFallback && resolveSofficeBinary()) {
     try {
-      return await convertViaLibreOffice(docxPath, outDir, opts);
+      return await convertViaLibreOffice(docxPath, outDir, {
+        timeoutMs: opts?.timeoutMs,
+        pdfFilter: LO_WRITER_PDF_FILTER,
+        sourceLabel: "Word",
+      });
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
     }
-  } else {
+  } else if (!preferOffice) {
     errors.push(
       process.platform === "win32"
         ? "LibreOffice غير متوفر"
@@ -367,8 +445,7 @@ export async function convertDocxToPdf(
     );
   }
 
-  // محاولة أخيرة عبر COM حتى لو لم يُعثر على مسار WINWORD الثابت
-  if (process.platform === "win32" && !isMicrosoftWordAvailable()) {
+  if (!preferOffice && isMicrosoftWordAvailable()) {
     try {
       return await convertViaWordCom(docxPath, outDir, opts);
     } catch (err) {
@@ -376,9 +453,144 @@ export async function convertDocxToPdf(
     }
   }
 
+  if (process.platform === "win32" && !isMicrosoftWordAvailable()) {
+    errors.push("Microsoft Word غير متوفر على هذا الجهاز. ثبّت Microsoft Office ثم أعد تشغيل الخادم.");
+  }
+
   throw new Error(
     `تعذر تحويل Word إلى PDF. ${errors.filter(Boolean).join(" | ")}`.slice(0, 700),
   );
+}
+
+async function convertViaPowerPointCom(
+  pptxPath: string,
+  outDir: string,
+  opts?: { timeoutMs?: number },
+): Promise<string> {
+  if (process.platform !== "win32") {
+    throw new Error("Microsoft PowerPoint COM is available on Windows only");
+  }
+
+  await fs.promises.mkdir(outDir, { recursive: true });
+  const absPptx = path.resolve(pptxPath);
+  const absPdf = path.join(
+    path.resolve(outDir),
+    path.basename(absPptx, path.extname(absPptx)) + ".pdf",
+  );
+  if (fs.existsSync(absPdf)) {
+    await fs.promises.unlink(absPdf).catch(() => undefined);
+  }
+
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$pptx = " + JSON.stringify(absPptx),
+    "$pdf = " + JSON.stringify(absPdf),
+    "$powerPoint = $null",
+    "$presentation = $null",
+    "try {",
+    "  $powerPoint = New-Object -ComObject PowerPoint.Application",
+    "  try { $powerPoint.DisplayAlerts = 1 } catch {}",
+    "  $presentation = $powerPoint.Presentations.Open($pptx, $true, $false, $false)",
+    "  try {",
+    "    # 2=ppFixedFormatTypePDF, 2=ppFixedFormatIntentPrint",
+    "    $presentation.ExportAsFixedFormat($pdf, 2, 2, $false, 1, 1, $false, $null, 1, '', $true, $true, $true, $true, $false, $null)",
+    "  } catch {",
+    "    $presentation.SaveAs($pdf, 32)",
+    "  }",
+    "  if (-not (Test-Path -LiteralPath $pdf)) { throw 'PowerPoint PDF export did not create a file' }",
+    '  $len = (Get-Item -LiteralPath $pdf).Length',
+    '  if ($len -lt 200) { throw "PDF too small ($len bytes)" }',
+    "  Write-Output 'OK'",
+    "} finally {",
+    "  if ($presentation -ne $null) {",
+    "    try { $presentation.Close() } catch {}",
+    "    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) | Out-Null } catch {}",
+    "  }",
+    "  if ($powerPoint -ne $null) {",
+    "    try { $powerPoint.Quit() } catch {}",
+    "    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($powerPoint) | Out-Null } catch {}",
+    "  }",
+    "  [GC]::Collect()",
+    "  [GC]::WaitForPendingFinalizers()",
+    "}",
+  ].join("\r\n");
+
+  const scriptPath = path.join(outDir, "pptx-pdf-" + Date.now() + ".ps1");
+  await fs.promises.writeFile(scriptPath, "\uFEFF" + script, "utf8");
+  try {
+    const result = await runCommand(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+      { cwd: outDir, timeoutMs: opts?.timeoutMs ?? 10 * 60_000 },
+    );
+    if (!fs.existsSync(absPdf) || fs.statSync(absPdf).size < 200) {
+      throw new Error(
+        (result.stderr || result.stdout || "PowerPoint COM PDF export failed").slice(0, 500),
+      );
+    }
+    return absPdf;
+  } finally {
+    fs.rm(scriptPath, { force: true }, () => undefined);
+  }
+}
+
+export async function convertPptxToPdf(
+  pptxPath: string,
+  outDir: string,
+  opts?: { timeoutMs?: number },
+): Promise<string> {
+  const errors: string[] = [];
+  const preferOffice = preferredPdfRenderer() === "office";
+
+  if (preferOffice && isMicrosoftPowerPointAvailable()) {
+    try {
+      return await convertViaPowerPointCom(pptxPath, outDir, opts);
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const allowLibreOfficeFallback = !preferOffice || process.platform !== "win32";
+  if (allowLibreOfficeFallback && resolveSofficeBinary()) {
+    try {
+      return await convertViaLibreOffice(pptxPath, outDir, {
+        timeoutMs: opts?.timeoutMs,
+        pdfFilter: LO_IMPRESS_PDF_FILTER,
+        sourceLabel: "PowerPoint",
+      });
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (!preferOffice && isMicrosoftPowerPointAvailable()) {
+    try {
+      return await convertViaPowerPointCom(pptxPath, outDir, opts);
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (process.platform === "win32" && !isMicrosoftPowerPointAvailable()) {
+    errors.push("Microsoft PowerPoint غير متوفر على هذا الجهاز. ثبّت Microsoft Office ثم أعد تشغيل الخادم.");
+  }
+
+  throw new Error(
+    ("تعذر تحويل PowerPoint إلى PDF. " + errors.filter(Boolean).join(" | ")).slice(0, 700),
+  );
+}
+
+export function isDocxPdfConversionAvailable(): boolean {
+  return resolveSofficeBinary() != null || isMicrosoftWordAvailable();
+}
+
+export function isPptxPdfConversionAvailable(): boolean {
+  return resolveSofficeBinary() != null || isMicrosoftPowerPointAvailable();
+}
+
+export function machineValuationPdfTimeoutMs(imageCount: number): number {
+  const normalizedImageCount = Math.max(0, Math.floor(imageCount));
+  return Math.min(15 * 60_000, Math.max(180_000, 60_000 + normalizedImageCount * 1500));
 }
 
 /** توافق مع الاستدعاءات السابقة */
@@ -391,5 +603,5 @@ export async function convertDocxToPdfWithLibreOffice(
 }
 
 export function isLibreOfficeAvailable(): boolean {
-  return resolveSofficeBinary() != null || isMicrosoftWordAvailable();
+  return isDocxPdfConversionAvailable();
 }

@@ -6,3 +6,6 @@ coverage/
 !.env.example
 dist/
 pdf-worker/.venv/
+# Company report templates are tenant data stored at runtime (GridFS is the
+# canonical store); never add local cache copies to source control.
+/uploads/company-report-templates/

@@ -25,6 +25,8 @@ import {
   sanitizeCustomColumnKey,
 } from "./asset-field-definitions";
 import { AssetProjectAccessService } from "./asset-project-access.service";
+import { reserveValTechIds } from "./asset-sequence";
+import { resolveAssetSource } from "./asset-source";
 import {
   emptyMvPhotoFieldsForImportedAssetRow,
   isProbablyNumericText,
@@ -1498,6 +1500,7 @@ export class AssetsService {
 
     const importedAt = new Date();
     const assetObjectId = new ObjectId();
+    const [valTechId] = await reserveValTechIds(db, 1);
     const normalizedData: AssetNormalizedData = {};
     const rawData: AssetRawData = {};
     const manualCols =
@@ -1518,7 +1521,8 @@ export class AssetsService {
       assetType: "other",
       rawData,
       normalizedData,
-      name: `صف ${nextRowIndex}`,
+      name: null,
+      val_tech_id: valTechId!,
       ...(resolvedSheetName ? { sheetName: resolvedSheetName } : {}),
       rowIndex: nextRowIndex,
       importedAt,
@@ -1529,6 +1533,10 @@ export class AssetsService {
       ...emptyMvPhotoFieldsForImportedAssetRow({
         createdBy: user._id,
         createdAt: importedAt,
+      }),
+      asset_source: resolveAssetSource({
+        sheetName: resolvedSheetName,
+        rawData,
       }),
     };
 

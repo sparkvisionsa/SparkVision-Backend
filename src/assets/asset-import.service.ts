@@ -23,6 +23,8 @@ import {
   SUPPORTED_MIME_TYPES,
 } from "./asset-import.constants";
 import { AssetImportCacheService } from "./asset-import-cache.service";
+import { reserveValTechIds } from "./asset-sequence";
+import { resolveAssetSource } from "./asset-source";
 import {
   createImportSummary,
   ensureUniqueHeader,
@@ -53,18 +55,27 @@ function primitiveToDisplayLabel(value: AssetPrimitive): string {
   return "";
 }
 
-/** اسم العرض للصف — أول عمود غير فارغ؛ يُستبدل لاحقاً بعمود «مجلدات المعاينة» عند توليد المجلدات. */
-function resolveImportSheetRowName(
-  rawData: AssetRawData,
-  headers: string[],
-  sheetName: string,
-  rowIndex: number,
-): string {
-  for (const header of headers) {
-    const label = primitiveToDisplayLabel(rawData[header] ?? null);
-    if (label) return label.slice(0, 500);
-  }
-  return `${sheetName} · صف ${rowIndex}`.slice(0, 500);
+/**
+ * يتعرف على عمود مكان الأصل بالعربية أو الإنجليزية، مع الإبقاء على اسم العمود
+ * الأصلي داخل rawData كما ورد في ملف Excel.
+ */
+function resolveImportedAssetLocation(rawData: AssetRawData): string | null {
+  const locationHeader = Object.keys(rawData).find((header) => {
+    const normalized = sanitizeTextInput(header)
+      .toLocaleLowerCase("ar")
+      .replace(/[أإآ]/g, "ا")
+      .replace(/[\s_-]+/g, "");
+    return [
+      "مكانالاصل",
+      "موقعالاصل",
+      "المكان",
+      "الموقع",
+      "assetlocation",
+    ].includes(normalized);
+  });
+  if (!locationHeader) return null;
+  const value = primitiveToDisplayLabel(rawData[locationHeader] ?? null);
+  return value ? value.slice(0, 160) : null;
 }
 
 @Injectable()
@@ -148,12 +159,7 @@ export class AssetImportService {
       });
 
       parsedSheet.rows.forEach((row) => {
-        const rowName = resolveImportSheetRowName(
-          row.rawData,
-          parsedSheet.headers,
-          parsedSheet.name,
-          row.rowIndex,
-        );
+        const assetLocation = resolveImportedAssetLocation(row.rawData);
         const assetObjectId = new ObjectId();
 
         assetDocs.push({
@@ -163,8 +169,11 @@ export class AssetImportService {
           projectId: projectObjectId,
           assetType,
           rawData: row.rawData,
-          normalizedData: {},
-          name: rowName,
+          normalizedData: {
+            asset_location: assetLocation,
+          },
+          /** يُملأ ‎name‎ و‎lable‎ معاً عند توليد مجلد الصور؛ بعدها يبقى ‎lable‎ ثابتاً. */
+          name: null,
           sheetName: parsedSheet.name,
           rowIndex: row.rowIndex,
           importedAt,
@@ -175,6 +184,11 @@ export class AssetImportService {
           ...emptyMvPhotoFieldsForImportedAssetRow({
             createdBy: input.user._id,
             createdAt: importedAt,
+          }),
+          asset_location: assetLocation,
+          asset_source: resolveAssetSource({
+            sheetName: parsedSheet.name,
+            rawData: row.rawData,
           }),
         });
 
@@ -191,6 +205,10 @@ export class AssetImportService {
 
     if (assetDocs.length > 0) {
       try {
+        const valTechIds = await reserveValTechIds(db, assetDocs.length);
+        assetDocs.forEach((asset, index) => {
+          asset.val_tech_id = valTechIds[index]!;
+        });
         for (let offset = 0; offset < assetDocs.length; offset += ASSET_IMPORT_INSERT_BATCH_SIZE) {
           const batch = assetDocs.slice(offset, offset + ASSET_IMPORT_INSERT_BATCH_SIZE);
           await db.collection<AssetDoc>(ASSETS_COLLECTION).insertMany(batch, {

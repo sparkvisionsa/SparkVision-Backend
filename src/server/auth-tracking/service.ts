@@ -1,8 +1,9 @@
 import type { Db, Filter } from "mongodb";
 import { GridFSBucket, ObjectId } from "mongodb";
 import type { Request } from "express";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { getMongoDb } from "@/server/mongodb";
 import {
@@ -37,12 +38,20 @@ import type {
   CompanyAiReportTemplate,
   CompanyReportCustomGroup,
   CompanyReportCustomSection,
+  CompanyReportDataModel,
+  CompanyReportDataModelField,
+  CompanyReportDataModelSection,
   CompanyMongoDoc,
   CompanyMembershipRole,
   CompanyReportDefaults,
   CompanyReportLetterheadTemplate,
   CompanyReportOnlySignatory,
+  CompanyReportPptxTemplate,
   CompanyReportSignatoryRow,
+  CompanyReportTemplateExcludedVariables,
+  CompanyReportTemplateKind,
+  CompanyReportTemplateVariableMapping,
+  CompanyReportTemplateVariableMappings,
   CompanyReportWordTemplate,
   GuestAccessStatus,
   PublicUser,
@@ -1761,55 +1770,11 @@ const REPORT_DEFAULTS_IMAGE_FILE_MAX_BYTES = 8 * 1024 * 1024;
 const REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS = 2_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS = 40_000_000;
 const REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES = 25 * 1024 * 1024;
-const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME = "تقرير تقييم.docx";
-/** القالب السابق — يُقبل كمسار بديل كي تنتقل الشركات القديمة إلى القالب الجديد تلقائياً. */
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME =
-  "mv-word-template.docx";
-/** الاسم العربي الأقدم — يُقبل للتوافق مع البيانات المخزنة سابقاً. */
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME =
-  "نموذج تقرير الاسناد والتصفية انفاذ.docx";
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME}`;
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME}`;
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_URL = `/files/${PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME}`;
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAMES = [
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_FILE_NAME,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_FILE_NAME,
-] as const;
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS = new Set([
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_LEGACY_URL,
-  PRO_OPTION_BUNDLED_WORD_TEMPLATE_OLDER_URL,
-]);
-export const PRO_OPTION_BUNDLED_WORD_TEMPLATE: CompanyReportWordTemplate = {
-  fileName: PRO_OPTION_BUNDLED_WORD_TEMPLATE_FILE_NAME,
-  fileUrl: PRO_OPTION_BUNDLED_WORD_TEMPLATE_URL,
-  uploadedAt: "2026-07-27T00:00:00.000Z",
-  sizeBytes: 792_172,
-  bookmarkNames: [
-    "عنوان_التقرير",
-    "العميل",
-    "تاريخ_إصدار_التقرير",
-    "الرقم_المرجعي",
-    "الغرض_من_التقييم",
-    "اساس_القيمة",
-    "تاريخ_التقييم",
-    "تاريخ_الاتفاقية",
-    "تاريخ_المعاينة",
-    "أصلأصول",
-    "نشاط_الشركة",
-    "ممثل_العميل",
-    "صفتة",
-    "هوية_المستخدمين_الأخرين",
-    "الأصل_المعنية_الأصل_محل_التقييم",
-    "أساس_القيمة_المستخدم",
-    "فرضية_القيمة",
-    "المدينة",
-    "رابط_قوقل_ماب",
-    "رأي_القيمة_رقما_وكتابتا",
-  ],
-};
+const REPORT_DEFAULTS_PPTX_TEMPLATE_DATA_URL_MAX_CHARS = 56_000_000;
+const REPORT_DEFAULTS_PPTX_TEMPLATE_FILE_MAX_BYTES = 35 * 1024 * 1024;
+/** Shared relative URL prefix for company-owned report-template files. */
+export const COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX = "/uploads/company-report-templates/";
+const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX;
 const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
   "coverImageDataUrl",
   "pageImageDataUrl",
@@ -1849,9 +1814,8 @@ function sanitizeReportDefaultsImageReference(value: unknown): string | null {
 function isReportDefaultsWordTemplateUrl(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    ((value.trim().startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX) &&
-      value.trim().toLowerCase().endsWith(".docx")) ||
-      PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(value.trim()))
+    value.trim().startsWith(COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX) &&
+    value.trim().toLowerCase().endsWith(".docx")
   );
 }
 
@@ -1864,6 +1828,30 @@ function parseReportDefaultsWordTemplateDataUrl(value: string): Buffer | null {
   if (
     buffer.byteLength <= 0 ||
     buffer.byteLength > REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES ||
+    buffer.subarray(0, 2).toString("utf8") !== "PK"
+  ) {
+    return null;
+  }
+  return buffer;
+}
+
+function isReportDefaultsPptxTemplateUrl(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().startsWith(COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX) &&
+    value.trim().toLowerCase().endsWith(".pptx")
+  );
+}
+
+function parseReportDefaultsPptxTemplateDataUrl(value: string): Buffer | null {
+  const match = value.match(
+    /^data:(application\/vnd\.openxmlformats-officedocument\.presentationml\.presentation|application\/vnd\.ms-powerpoint|application\/octet-stream|application\/zip);base64,([a-z0-9+/=\s]+)$/i,
+  );
+  if (!match) return null;
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (
+    buffer.byteLength <= 0 ||
+    buffer.byteLength > REPORT_DEFAULTS_PPTX_TEMPLATE_FILE_MAX_BYTES ||
     buffer.subarray(0, 2).toString("utf8") !== "PK"
   ) {
     return null;
@@ -1917,42 +1905,192 @@ async function persistCompanyReportLetterheadImage(
 
 const COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET = "company_report_templates";
 
-async function saveCompanyWordTemplateToGridFs(
-  companyId: string,
+const COMPANY_PPTX_TEMPLATE_GRIDFS_BUCKET = "company_report_pptx_templates";
+
+type CompanyReportTemplateStorageKind = "word" | "pptx";
+
+type CompanyReportTemplateStorageConfig = {
+  bucketName: string;
+  scope: string;
+  extension: ".docx" | ".pptx";
+  contentType: string;
+  fallbackFileName: string;
+};
+
+const COMPANY_REPORT_TEMPLATE_STORAGE: Record<
+  CompanyReportTemplateStorageKind,
+  CompanyReportTemplateStorageConfig
+> = {
+  word: {
+    bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET,
+    scope: "company-word-template",
+    extension: ".docx",
+    contentType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    fallbackFileName: "word-template.docx",
+  },
+  pptx: {
+    bucketName: COMPANY_PPTX_TEMPLATE_GRIDFS_BUCKET,
+    scope: "company-pptx-template",
+    extension: ".pptx",
+    contentType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    fallbackFileName: "pptx-template.pptx",
+  },
+};
+
+type CompanyReportTemplateStoredBlob = {
+  id: ObjectId;
+  fileName: string;
+  byteLength?: number;
+  sha256?: string;
+};
+
+type PendingCompanyReportTemplateLocalWrite = {
+  kind: CompanyReportTemplateStorageKind;
+  companyId: string;
+  gridFsFileId: string;
+  generatedFileName: string;
+  buffer: Buffer;
+};
+
+type CompanyReportTemplateStorageContext = {
+  /** New GridFS objects to discard only if the MongoDB update does not commit. */
+  uploadedBlobs: Array<{
+    kind: CompanyReportTemplateStorageKind;
+    companyId: string;
+    gridFsFileId: string;
+  }>;
+  /** Non-authoritative local mirrors are written after MongoDB commits. */
+  pendingLocalWrites: PendingCompanyReportTemplateLocalWrite[];
+};
+
+function safeCompanyReportTemplateCompanyId(companyId: unknown): string {
+  const safe = String(companyId ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!safe) {
+    throw new HttpError(400, "invalid_payload", "A valid company is required for report template storage.");
+  }
+  return safe;
+}
+
+function companyReportTemplateDirectory(companyId: unknown): string {
+  return join(
+    process.cwd(),
+    "uploads",
+    "company-report-templates",
+    safeCompanyReportTemplateCompanyId(companyId),
+  );
+}
+
+function companyReportTemplateUploadUrl(companyId: unknown, generatedFileName: string): string {
+  return `${COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX}${safeCompanyReportTemplateCompanyId(companyId)}/${generatedFileName}`;
+}
+
+/**
+ * Browser-provided URLs are accepted only when they are the current company's
+ * own generated mirror. They never authorize reading another company's file.
+ */
+function ownCompanyReportTemplateLocalPath(
+  companyId: unknown,
+  fileUrl: unknown,
+  extension: ".docx" | ".pptx",
+): { fileUrl: string; filePath: string } | null {
+  if (typeof fileUrl !== "string") return null;
+  const raw = fileUrl.trim().replace(/\\/g, "/");
+  const safeCompanyId = safeCompanyReportTemplateCompanyId(companyId);
+  const prefix = `${COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX}${safeCompanyId}/`;
+  if (!raw.startsWith(prefix)) return null;
+
+  const encodedFileName = raw.slice(prefix.length);
+  if (!encodedFileName || encodedFileName.includes("/") || encodedFileName.includes("?") || encodedFileName.includes("#")) {
+    return null;
+  }
+  let fileName = "";
+  try {
+    fileName = decodeURIComponent(encodedFileName);
+  } catch {
+    return null;
+  }
+  if (
+    !fileName ||
+    !/^[a-zA-Z0-9._-]+$/.test(fileName) ||
+    !fileName.toLowerCase().endsWith(extension)
+  ) {
+    return null;
+  }
+  return {
+    fileUrl: raw,
+    filePath: join(companyReportTemplateDirectory(safeCompanyId), fileName),
+  };
+}
+
+function reportTemplateSha256(buffer: Buffer): string {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function isValidCompanyReportTemplateBuffer(buffer: Buffer, maxBytes: number): boolean {
+  return (
+    buffer.byteLength > 0 &&
+    buffer.byteLength <= maxBytes &&
+    buffer.subarray(0, 2).toString("utf8") === "PK"
+  );
+}
+
+async function findOwnedCompanyReportTemplateBlob(
+  kind: CompanyReportTemplateStorageKind,
+  companyId: unknown,
+  gridFsFileId: string,
+): Promise<CompanyReportTemplateStoredBlob | null> {
+  const oid = tryParseObjectId(gridFsFileId.trim());
+  if (!oid) return null;
+  const config = COMPANY_REPORT_TEMPLATE_STORAGE[kind];
+  const safeCompanyId = safeCompanyReportTemplateCompanyId(companyId);
+  const db = await getMongoDb();
+  const raw = (await db.collection(`${config.bucketName}.files`).findOne(
+    {
+      _id: oid,
+      "metadata.companyId": safeCompanyId,
+      "metadata.scope": config.scope,
+    },
+    { projection: { _id: 1, filename: 1, length: 1, metadata: 1 } },
+  )) as unknown as {
+    _id: ObjectId;
+    filename?: unknown;
+    length?: unknown;
+    metadata?: Record<string, unknown>;
+  } | null;
+  if (!raw) return null;
+  return {
+    id: raw._id,
+    fileName: typeof raw.filename === "string" ? raw.filename : config.fallbackFileName,
+    byteLength: typeof raw.length === "number" && Number.isFinite(raw.length) ? raw.length : undefined,
+    sha256: typeof raw.metadata?.sha256 === "string" ? raw.metadata.sha256 : undefined,
+  };
+}
+
+async function saveCompanyReportTemplateToGridFs(
+  kind: CompanyReportTemplateStorageKind,
+  companyId: unknown,
   fileName: string,
   buffer: Buffer,
 ): Promise<string> {
+  const config = COMPANY_REPORT_TEMPLATE_STORAGE[kind];
+  const safeCompanyId = safeCompanyReportTemplateCompanyId(companyId);
   const db = await getMongoDb();
-  const bucket = new GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
-  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const bucket = new GridFSBucket(db, { bucketName: config.bucketName });
 
-  // احذف النسخ السابقة لنفس الشركة لتجنّب تراكم القوالب
-  try {
-    const old = await db
-      .collection(`${COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET}.files`)
-      .find({ "metadata.companyId": safeCompanyId })
-      .project({ _id: 1 })
-      .toArray();
-    for (const doc of old) {
-      try {
-        await bucket.delete(doc._id as ObjectId);
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore cleanup failures */
-  }
-
+  // Upload first. The prior revision remains intact until the company record
+  // points to this id, so failures can never empty a company's durable store.
   return new Promise<string>((resolve, reject) => {
-    const upload = bucket.openUploadStream(fileName || "word-template.docx", {
+    const upload = bucket.openUploadStream(fileName || config.fallbackFileName, {
       metadata: {
         companyId: safeCompanyId,
-        scope: "company-word-template",
+        scope: config.scope,
         uploadedAt: new Date().toISOString(),
+        sha256: reportTemplateSha256(buffer),
+        sizeBytes: buffer.byteLength,
       },
-      contentType:
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      contentType: config.contentType,
     });
     upload.on("error", reject);
     upload.on("finish", () => resolve(String(upload.id)));
@@ -1960,15 +2098,36 @@ async function saveCompanyWordTemplateToGridFs(
   });
 }
 
-export async function loadCompanyWordTemplateBufferFromGridFs(
+async function deleteOwnedCompanyReportTemplateBlob(
+  kind: CompanyReportTemplateStorageKind,
+  companyId: unknown,
+  gridFsFileId: string | null | undefined,
+): Promise<void> {
+  if (!gridFsFileId) return;
+  const owned = await findOwnedCompanyReportTemplateBlob(kind, companyId, gridFsFileId);
+  if (!owned) return;
+  const db = await getMongoDb();
+  const bucket = new GridFSBucket(db, {
+    bucketName: COMPANY_REPORT_TEMPLATE_STORAGE[kind].bucketName,
+  });
+  await bucket.delete(owned.id);
+}
+
+async function loadOwnedCompanyReportTemplateBufferFromGridFs(
+  kind: CompanyReportTemplateStorageKind,
   gridFsFileId: string,
+  expectedCompanyId: string,
 ): Promise<Buffer | null> {
   const oid = tryParseObjectId(gridFsFileId.trim());
   if (!oid) return null;
-  const db = await getMongoDb();
-  const bucket = new GridFSBucket(db, { bucketName: COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET });
+  const config = COMPANY_REPORT_TEMPLATE_STORAGE[kind];
   try {
-    const stream = bucket.openDownloadStream(oid);
+    const db = await getMongoDb();
+    const blob = await findOwnedCompanyReportTemplateBlob(kind, expectedCompanyId, gridFsFileId);
+    if (!blob) return null;
+
+    const bucket = new GridFSBucket(db, { bucketName: config.bucketName });
+    const stream = bucket.openDownloadStream(blob.id);
     const chunks: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
       stream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
@@ -1976,81 +2135,332 @@ export async function loadCompanyWordTemplateBufferFromGridFs(
       stream.on("end", () => resolve());
     });
     const buffer = Buffer.concat(chunks);
-    return buffer.byteLength > 0 ? buffer : null;
+    if (!buffer.byteLength || (blob.byteLength != null && buffer.byteLength !== blob.byteLength)) {
+      return null;
+    }
+    if (blob.sha256 && reportTemplateSha256(buffer) !== blob.sha256) return null;
+    return buffer;
   } catch {
     return null;
   }
 }
 
-async function persistCompanyReportWordTemplate(
-  companyId: string,
+/** GridFS is durable and the company id is always checked before reading. */
+export async function loadOwnedCompanyWordTemplateBufferFromGridFs(
+  gridFsFileId: string,
+  expectedCompanyId: string,
+): Promise<Buffer | null> {
+  return loadOwnedCompanyReportTemplateBufferFromGridFs("word", gridFsFileId, expectedCompanyId);
+}
+
+/** GridFS is durable and the company id is always checked before reading. */
+export async function loadOwnedCompanyPptxTemplateBufferFromGridFs(
+  gridFsFileId: string,
+  expectedCompanyId: string,
+): Promise<Buffer | null> {
+  return loadOwnedCompanyReportTemplateBufferFromGridFs("pptx", gridFsFileId, expectedCompanyId);
+}
+
+/** Normalizes the inner name emitted by the DOCX/PPTX scanners. */
+function sanitizeReportTemplateVariableName(value: unknown, max = 160): string {
+  let normalized = sanitizeReportDefaultsText(value, max)
+    .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+    .trim();
+  if (
+    (normalized.startsWith("<<") && normalized.endsWith(">>")) ||
+    (normalized.startsWith(">>") && normalized.endsWith("<<"))
+  ) {
+    normalized = normalized.slice(2, -2).trim();
+  } else if (
+    (normalized.startsWith("«") && normalized.endsWith("»")) ||
+    (normalized.startsWith("»") && normalized.endsWith("«"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized.slice(0, max);
+}
+
+function reportTemplateVariableIdentity(value: string): string {
+  return value.replace(/[\u200e\u200f\u202a-\u202e]/g, "").trim().toLocaleLowerCase();
+}
+
+function sanitizeReportTemplateVariableNames(value: unknown, maxItems = 300): string[] {
+  if (!Array.isArray(value)) return [];
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value.slice(0, maxItems)) {
+    const variable = sanitizeReportTemplateVariableName(item);
+    const identity = reportTemplateVariableIdentity(variable);
+    if (!variable || seen.has(identity)) continue;
+    seen.add(identity);
+    output.push(variable);
+  }
+  return output;
+}
+
+function sanitizeCompanyReportTemplateVariableMappingList(
   value: unknown,
-): Promise<Record<string, unknown> | null> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const data = value as Record<string, unknown>;
-  const fileName =
-    sanitizeReportDefaultsText(data.fileName, 240).replace(/[\\/:*?"<>|]+/g, "-") || "word-template.docx";
-  const uploadedAt = sanitizeReportDefaultsText(data.uploadedAt, 40) || new Date().toISOString();
-  const bookmarkNames = Array.isArray(data.bookmarkNames)
-    ? data.bookmarkNames
-        .slice(0, 300)
-        .map((name) => sanitizeReportDefaultsText(name, 120))
-        .filter(Boolean)
-    : [];
-  const fileDataUrl = typeof data.fileDataUrl === "string" ? data.fileDataUrl.trim() : "";
-  const existingGridFsId =
-    typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
-      ? data.gridFsFileId.trim()
-      : "";
+  kind: CompanyReportTemplateKind,
+): CompanyReportTemplateVariableMapping[] {
+  if (!Array.isArray(value)) return [];
+  const output: CompanyReportTemplateVariableMapping[] = [];
+  const seenVariables = new Set<string>();
+  const usedIds = new Set<string>();
 
-  if (!fileDataUrl) {
-    if (!isReportDefaultsWordTemplateUrl(data.fileUrl)) return null;
-    return {
-      fileName,
-      fileUrl: data.fileUrl.trim().slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS),
-      uploadedAt,
-      sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
-      bookmarkNames,
-      ...(existingGridFsId ? { gridFsFileId: existingGridFsId } : {}),
-    };
+  for (const [index, raw] of value.slice(0, 300).entries()) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const data = raw as Record<string, unknown>;
+    const variable = sanitizeReportTemplateVariableName(
+      data.variable ?? data.variableName ?? data.placeholder,
+    );
+    const variableIdentity = reportTemplateVariableIdentity(variable);
+    if (!variable || seenVariables.has(variableIdentity)) continue;
+
+    let id = sanitizeReportDefaultsText(data.id, 120);
+    if (!id || usedIds.has(id)) id = `${kind}-variable-${index + 1}`;
+    while (usedIds.has(id)) id = `${kind}-variable-${randomId()}`;
+
+    const sourceKey = sanitizeReportDefaultsText(
+      data.sourceKey ?? data.source ?? data.field,
+      240,
+    );
+    const hasStaticValue = ["staticValue", "fallbackValue", "value"].some((key) =>
+      Object.prototype.hasOwnProperty.call(data, key),
+    );
+    const staticValue = sanitizeReportDefaultsText(
+      data.staticValue ?? data.fallbackValue ?? data.value,
+      50_000,
+    );
+    usedIds.add(id);
+    seenVariables.add(variableIdentity);
+    output.push({
+      id,
+      variable,
+      sourceKey: sourceKey || "",
+      ...(hasStaticValue ? { staticValue } : {}),
+    });
   }
+  return output;
+}
 
-  if (fileDataUrl.length > REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS) {
-    throw new HttpError(400, "invalid_payload", "Word template is too large.");
-  }
-
-  const buffer = parseReportDefaultsWordTemplateDataUrl(fileDataUrl);
-  if (!buffer) {
-    throw new HttpError(400, "invalid_payload", "Word template must be a valid .docx file no larger than 25MB.");
-  }
-
-  const safeCompanyId = companyId.replace(/[^a-zA-Z0-9_-]/g, "");
-  const dir = join(process.cwd(), "uploads", "company-report-templates", safeCompanyId);
-  await mkdir(dir, { recursive: true });
-  const filename = `word-template-${Date.now()}-${randomId()}.docx`;
-  await writeFile(join(dir, filename), buffer);
-
-  let gridFsFileId = existingGridFsId;
-  try {
-    gridFsFileId = await saveCompanyWordTemplateToGridFs(companyId, fileName, buffer);
-  } catch {
-    /* القرص المحلي يبقى متاحًا؛ GridFS اختياري للتسامح مع فشل التخزين السحابي/المحلي */
-  }
-
+function sanitizeCompanyReportTemplateVariableMappings(
+  value: unknown,
+): CompanyReportTemplateVariableMappings {
+  const data = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
   return {
-    fileName,
-    fileUrl: `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`,
-    uploadedAt,
-    sizeBytes: buffer.byteLength,
-    bookmarkNames,
-    ...(gridFsFileId ? { gridFsFileId } : {}),
+    word: sanitizeCompanyReportTemplateVariableMappingList(data.word, "word"),
+    pptx: sanitizeCompanyReportTemplateVariableMappingList(data.pptx, "pptx"),
   };
 }
 
-async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: string): Promise<Record<string, unknown>> {
+function sanitizeCompanyReportTemplateExcludedVariables(
+  value: unknown,
+): CompanyReportTemplateExcludedVariables {
+  const data = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  return {
+    word: sanitizeReportTemplateVariableNames(data.word),
+    pptx: sanitizeReportTemplateVariableNames(data.pptx),
+  };
+}
+
+async function persistCompanyReportDocumentTemplate(
+  kind: CompanyReportTemplateStorageKind,
+  companyId: string,
+  value: unknown,
+  storageContext: CompanyReportTemplateStorageContext,
+  fallbackIndex = 0,
+): Promise<Record<string, unknown> | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  const config = COMPANY_REPORT_TEMPLATE_STORAGE[kind];
+  const maxDataUrlChars =
+    kind === "word"
+      ? REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS
+      : REPORT_DEFAULTS_PPTX_TEMPLATE_DATA_URL_MAX_CHARS;
+  const maxBytes =
+    kind === "word"
+      ? REPORT_DEFAULTS_WORD_TEMPLATE_FILE_MAX_BYTES
+      : REPORT_DEFAULTS_PPTX_TEMPLATE_FILE_MAX_BYTES;
+  const defaultFileName = config.fallbackFileName;
+  const unsafeFileName = sanitizeReportDefaultsText(data.fileName, 240).replace(/[\\/:*?"<>|]+/g, "-");
+  const fileName = unsafeFileName.toLowerCase().endsWith(config.extension)
+    ? unsafeFileName
+    : defaultFileName;
+  const id = sanitizeReportDefaultsText(data.id, 120) || `${kind}-template-${fallbackIndex + 1}`;
+  const defaultName = fileName.replace(/\.(docx|pptx)$/i, "").trim() || (kind === "word" ? "Word template" : "PowerPoint template");
+  const name = sanitizeReportDefaultsText(data.name, 160) || defaultName;
+  const uploadedAt = sanitizeReportDefaultsText(data.uploadedAt, 40) || new Date().toISOString();
+  const variableNames = sanitizeReportTemplateVariableNames(
+    kind === "pptx" && Array.isArray(data.variableNames) ? data.variableNames : data.bookmarkNames,
+  );
+  const variableMappings = sanitizeCompanyReportTemplateVariableMappingList(data.variableMappings, kind);
+  const excludedVariableNames = sanitizeReportTemplateVariableNames(data.excludedVariableNames);
+  const requestedGridFsId =
+    typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
+      ? data.gridFsFileId.trim()
+      : "";
+  const localMirror = ownCompanyReportTemplateLocalPath(companyId, data.fileUrl, config.extension);
+  const fileDataUrl = typeof data.fileDataUrl === "string" ? data.fileDataUrl.trim() : "";
+
+  const buildStoredTemplate = (
+    gridFsFileId: string,
+    byteLength: number | undefined,
+    fileUrl: string | null,
+  ): Record<string, unknown> => ({
+    id,
+    name,
+    fileName,
+    fileUrl: fileUrl || null,
+    uploadedAt,
+    ...(byteLength != null ? { sizeBytes: byteLength } : {}),
+    ...(kind === "word"
+      ? { bookmarkNames: variableNames }
+      : { variableNames, bookmarkNames: variableNames }),
+    variableMappings,
+    excludedVariableNames,
+    gridFsFileId,
+  });
+
+  if (!fileDataUrl) {
+    if (requestedGridFsId) {
+      const owned = await findOwnedCompanyReportTemplateBlob(kind, companyId, requestedGridFsId);
+      if (owned) {
+        return buildStoredTemplate(
+          requestedGridFsId,
+          owned.byteLength ??
+            (typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes)
+              ? data.sizeBytes
+              : undefined),
+          localMirror?.fileUrl ?? null,
+        );
+      }
+    }
+
+    // Existing local-only records are migrated on their next save. New
+    // records cannot rely on a local file because it is not durable across
+    // replicas or restarts.
+    if (!localMirror) {
+      throw new HttpError(
+        409,
+        "template_storage_unavailable",
+        "The saved report template is missing, does not belong to this company, or must be uploaded again.",
+      );
+    }
+    let legacyBuffer: Buffer;
+    try {
+      legacyBuffer = await readFile(localMirror.filePath);
+    } catch {
+      throw new HttpError(
+        409,
+        "template_storage_unavailable",
+        "The saved report template file is no longer available. Upload the template again.",
+      );
+    }
+    if (!isValidCompanyReportTemplateBuffer(legacyBuffer, maxBytes)) {
+      throw new HttpError(400, "invalid_payload", "The stored report template is not a valid Office file.");
+    }
+    let migratedGridFsId: string;
+    try {
+      migratedGridFsId = await saveCompanyReportTemplateToGridFs(
+        kind,
+        companyId,
+        fileName,
+        legacyBuffer,
+      );
+    } catch (error) {
+      throw new HttpError(
+        503,
+        "template_storage_unavailable",
+        `Could not durably store the ${kind === "word" ? "Word" : "PowerPoint"} template: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    storageContext.uploadedBlobs.push({ kind, companyId, gridFsFileId: migratedGridFsId });
+    return buildStoredTemplate(migratedGridFsId, legacyBuffer.byteLength, localMirror.fileUrl);
+  }
+
+  if (fileDataUrl.length > maxDataUrlChars) {
+    throw new HttpError(
+      400,
+      "invalid_payload",
+      `${kind === "word" ? "Word" : "PowerPoint"} template is too large.`,
+    );
+  }
+  const buffer =
+    kind === "word"
+      ? parseReportDefaultsWordTemplateDataUrl(fileDataUrl)
+      : parseReportDefaultsPptxTemplateDataUrl(fileDataUrl);
+  if (!buffer || !isValidCompanyReportTemplateBuffer(buffer, maxBytes)) {
+    throw new HttpError(
+      400,
+      "invalid_payload",
+      `${kind === "word" ? "Word" : "PowerPoint"} template must be a valid ${config.extension} file.`,
+    );
+  }
+
+  let gridFsFileId: string;
+  try {
+    gridFsFileId = await saveCompanyReportTemplateToGridFs(kind, companyId, fileName, buffer);
+  } catch (error) {
+    // Do not report a successful upload backed only by the ephemeral local
+    // directory. GridFS is the source used by all application instances.
+    throw new HttpError(
+      503,
+      "template_storage_unavailable",
+      `Could not durably store the ${kind === "word" ? "Word" : "PowerPoint"} template: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  const safeCompanyId = safeCompanyReportTemplateCompanyId(companyId);
+  const generatedFileName = `${kind}-template-${Date.now()}-${randomId()}${config.extension}`;
+  storageContext.uploadedBlobs.push({ kind, companyId, gridFsFileId });
+  storageContext.pendingLocalWrites.push({
+    kind,
+    companyId: safeCompanyId,
+    gridFsFileId,
+    generatedFileName,
+    buffer,
+  });
+  return buildStoredTemplate(
+    gridFsFileId,
+    buffer.byteLength,
+    companyReportTemplateUploadUrl(safeCompanyId, generatedFileName),
+  );
+}
+
+async function persistCompanyReportDefaultsAssets(
+  raw: unknown,
+  companyId: string,
+  storageContext: CompanyReportTemplateStorageContext,
+): Promise<Record<string, unknown>> {
   const data = raw && typeof raw === "object" && !Array.isArray(raw)
     ? { ...(raw as Record<string, unknown>) }
     : {};
+  // Accept the early top-level shape as a compatibility input, while storing
+  // the canonical rows on the file template itself. This lets a template be
+  // moved between companies without losing its dashboard configuration.
+  const legacyMappings = sanitizeCompanyReportTemplateVariableMappings(data.variableMappings);
+  const legacyExcludedVariables = sanitizeCompanyReportTemplateExcludedVariables(
+    data.excludedVariables,
+  );
+  const withLegacyTemplateSettings = (value: unknown, kind: CompanyReportTemplateKind): unknown => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const template = { ...(value as Record<string, unknown>) };
+    if (!Array.isArray(template.variableMappings)) {
+      template.variableMappings = legacyMappings[kind] ?? [];
+    }
+    if (!Array.isArray(template.excludedVariableNames)) {
+      template.excludedVariableNames = legacyExcludedVariables[kind] ?? [];
+    }
+    return template;
+  };
   const letterheadRaw =
     data.letterhead && typeof data.letterhead === "object" && !Array.isArray(data.letterhead)
       ? { ...(data.letterhead as Record<string, unknown>) }
@@ -2064,8 +2474,51 @@ async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: strin
     data.letterhead = letterhead;
   }
 
-  if ("wordTemplate" in data) {
-    data.wordTemplate = await persistCompanyReportWordTemplate(companyId, data.wordTemplate);
+  const persistTemplateCollection = async (
+    kind: CompanyReportTemplateStorageKind,
+    listValue: unknown,
+    legacyValue: unknown,
+    hasCanonicalList: boolean,
+  ): Promise<Record<string, unknown>[]> => {
+    const candidates = hasCanonicalList
+      ? (Array.isArray(listValue) ? listValue.slice(0, 20) : [])
+      : legacyValue
+        ? [legacyValue]
+        : [];
+    const saved = await Promise.all(
+      candidates.map((template, index) =>
+        persistCompanyReportDocumentTemplate(
+          kind,
+          companyId,
+          withLegacyTemplateSettings(template, kind),
+          storageContext,
+          index,
+        ),
+      ),
+    );
+    return saved.filter((template): template is Record<string, unknown> => template != null);
+  };
+
+  if ("wordTemplates" in data || "wordTemplate" in data) {
+    const wordTemplates = await persistTemplateCollection(
+      "word",
+      data.wordTemplates,
+      data.wordTemplate,
+      Array.isArray(data.wordTemplates),
+    );
+    data.wordTemplates = wordTemplates;
+    data.wordTemplate = wordTemplates[0] ?? null;
+  }
+
+  if ("pptxTemplates" in data || "pptxTemplate" in data) {
+    const pptxTemplates = await persistTemplateCollection(
+      "pptx",
+      data.pptxTemplates,
+      data.pptxTemplate,
+      Array.isArray(data.pptxTemplates),
+    );
+    data.pptxTemplates = pptxTemplates;
+    data.pptxTemplate = pptxTemplates[0] ?? null;
   }
 
   if (Array.isArray(data.aiTemplates)) {
@@ -2087,6 +2540,166 @@ async function persistCompanyReportDefaultsAssets(raw: unknown, companyId: strin
     );
   }
   return data;
+}
+
+type CompanyReportTemplateReference = {
+  gridFsFileId: string | null;
+  fileUrl: string | null;
+};
+
+function companyReportTemplateReferences(
+  reportDefaults: unknown,
+  kind: CompanyReportTemplateStorageKind,
+): CompanyReportTemplateReference[] {
+  const defaults =
+    reportDefaults && typeof reportDefaults === "object" && !Array.isArray(reportDefaults)
+      ? (reportDefaults as Record<string, unknown>)
+      : {};
+  const listKey = kind === "word" ? "wordTemplates" : "pptxTemplates";
+  const legacyKey = kind === "word" ? "wordTemplate" : "pptxTemplate";
+  const rawTemplates = Array.isArray(defaults[listKey])
+    ? (defaults[listKey] as unknown[])
+    : defaults[legacyKey]
+      ? [defaults[legacyKey]]
+      : [];
+  const seen = new Set<string>();
+  const references: CompanyReportTemplateReference[] = [];
+  for (const raw of rawTemplates) {
+    const template = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+    const gridFsFileId =
+      typeof template.gridFsFileId === "string" && tryParseObjectId(template.gridFsFileId.trim())
+        ? template.gridFsFileId.trim()
+        : null;
+    const fileUrl = typeof template.fileUrl === "string" && template.fileUrl.trim()
+      ? template.fileUrl.trim()
+      : null;
+    if (!gridFsFileId && !fileUrl) continue;
+    const identity = `${gridFsFileId ?? ""}|${fileUrl ?? ""}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    references.push({ gridFsFileId, fileUrl });
+  }
+  return references;
+}
+
+async function discardUncommittedCompanyReportTemplateBlobs(
+  storageContext: CompanyReportTemplateStorageContext,
+): Promise<void> {
+  await Promise.all(
+    storageContext.uploadedBlobs.map(async (blob) => {
+      try {
+        await deleteOwnedCompanyReportTemplateBlob(blob.kind, blob.companyId, blob.gridFsFileId);
+      } catch (error) {
+        console.warn(
+          `Could not discard uncommitted ${blob.kind} template ${blob.gridFsFileId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }),
+  );
+}
+
+/**
+ * Runs only after MongoDB has accepted the new report defaults. GridFS is
+ * already sufficient for merging, so mirror/cleanup failures are logged but
+ * must never turn a successful durable save into a false failure response.
+ */
+async function finalizeCompanyReportTemplateStorage(
+  companyId: string,
+  previousReportDefaults: unknown,
+  storageContext: CompanyReportTemplateStorageContext,
+): Promise<void> {
+  const db = await getMongoDb();
+  const { companies } = getAuthCollections(db);
+  const companyObjectId = tryParseObjectId(companyId);
+  if (!companyObjectId) return;
+  const company = await companies.findOne(
+    { _id: companyObjectId },
+    { projection: { reportDefaults: 1 } },
+  );
+  const currentReportDefaults = company?.reportDefaults;
+  const currentByKind: Record<CompanyReportTemplateStorageKind, CompanyReportTemplateReference[]> = {
+    word: companyReportTemplateReferences(currentReportDefaults, "word"),
+    pptx: companyReportTemplateReferences(currentReportDefaults, "pptx"),
+  };
+
+  for (const pending of storageContext.pendingLocalWrites) {
+    const current = currentByKind[pending.kind];
+    const expectedUrl = companyReportTemplateUploadUrl(
+      pending.companyId,
+      pending.generatedFileName,
+    );
+    // A concurrent replacement won the race. Its document reference is the
+    // only source of truth, so do not create a stale public local mirror.
+    if (!current.some((reference) =>
+      reference.gridFsFileId === pending.gridFsFileId && reference.fileUrl === expectedUrl
+    )) {
+      try {
+        await deleteOwnedCompanyReportTemplateBlob(
+          pending.kind,
+          companyId,
+          pending.gridFsFileId,
+        );
+      } catch {
+        // A later maintenance pass may remove an unreferenced concurrent upload.
+      }
+      continue;
+    }
+    try {
+      const directory = companyReportTemplateDirectory(pending.companyId);
+      await mkdir(directory, { recursive: true });
+      const target = join(directory, pending.generatedFileName);
+      const temporary = `${target}.${randomId()}.tmp`;
+      await writeFile(temporary, pending.buffer);
+      await rename(temporary, target);
+    } catch (error) {
+      console.warn(
+        `Could not write local ${pending.kind} template mirror after GridFS commit: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  for (const kind of ["word", "pptx"] as const) {
+    const previous = companyReportTemplateReferences(previousReportDefaults, kind);
+    const current = currentByKind[kind];
+    const currentGridFsIds = new Set(current.map((reference) => reference.gridFsFileId).filter(Boolean));
+    const currentFileUrls = new Set(current.map((reference) => reference.fileUrl).filter(Boolean));
+    for (const reference of previous) {
+      if (reference.gridFsFileId && !currentGridFsIds.has(reference.gridFsFileId)) {
+        try {
+          await deleteOwnedCompanyReportTemplateBlob(kind, companyId, reference.gridFsFileId);
+        } catch (error) {
+          console.warn(
+            `Could not clean up replaced ${kind} template ${reference.gridFsFileId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      if (!reference.fileUrl || currentFileUrls.has(reference.fileUrl)) continue;
+      const local = ownCompanyReportTemplateLocalPath(
+        companyId,
+        reference.fileUrl,
+        COMPANY_REPORT_TEMPLATE_STORAGE[kind].extension,
+      );
+      if (local) {
+        try {
+          await rm(local.filePath, { force: true });
+        } catch (error) {
+          console.warn(
+            `Could not clean up local ${kind} template mirror: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+  }
 }
 
 function sanitizeCompanyReportCustomGroups(value: unknown): CompanyReportCustomGroup[] {
@@ -2143,7 +2756,7 @@ function sanitizeCompanyReportLetterheadTemplate(value: unknown): CompanyReportL
   const outputFormat = data.outputFormat === "pptx" ? "pptx" : "pdf";
   return {
     enabled: data.enabled === true,
-    templateId: templateId || "classic-letterhead",
+    templateId: templateId || "default-report-template",
     outputFormat,
     coverImageDataUrl: sanitizeReportDefaultsImageReference(data.coverImageDataUrl),
     pageImageDataUrl: sanitizeReportDefaultsImageReference(data.pageImageDataUrl),
@@ -2160,23 +2773,64 @@ function sanitizeCompanyReportWordTemplate(value: unknown): CompanyReportWordTem
   const fileUrl = isReportDefaultsWordTemplateUrl(data.fileUrl)
     ? data.fileUrl.trim().slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS)
     : "";
-  if (!fileUrl) return null;
-  const bookmarkNames = Array.isArray(data.bookmarkNames)
-    ? data.bookmarkNames
-        .slice(0, 300)
-        .map((name) => sanitizeReportDefaultsText(name, 120))
-        .filter(Boolean)
-    : [];
+  const bookmarkNames = sanitizeReportTemplateVariableNames(data.bookmarkNames);
   const gridFsFileId =
     typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
       ? data.gridFsFileId.trim()
       : undefined;
+  // GridFS is durable storage; fileUrl is only the same-company recovery mirror.
+  if (!fileUrl && !gridFsFileId) return null;
+  const variableMappings = sanitizeCompanyReportTemplateVariableMappingList(
+    data.variableMappings,
+    "word",
+  );
+  const excludedVariableNames = sanitizeReportTemplateVariableNames(data.excludedVariableNames);
   return {
+    ...(sanitizeReportDefaultsText(data.id, 120) ? { id: sanitizeReportDefaultsText(data.id, 120) } : {}),
+    name: sanitizeReportDefaultsText(data.name, 160) ||
+      (sanitizeReportDefaultsText(data.fileName, 240).replace(/\.docx$/i, "").trim() || "Word template"),
     fileName: sanitizeReportDefaultsText(data.fileName, 240) || "word-template.docx",
     fileUrl,
     uploadedAt: sanitizeReportDefaultsText(data.uploadedAt, 40),
     sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
     bookmarkNames,
+    variableMappings,
+    excludedVariableNames,
+    ...(gridFsFileId ? { gridFsFileId } : {}),
+  };
+}
+
+function sanitizeCompanyReportPptxTemplate(value: unknown): CompanyReportPptxTemplate | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  const fileUrl = isReportDefaultsPptxTemplateUrl(data.fileUrl)
+    ? data.fileUrl.trim().slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS)
+    : "";
+  const gridFsFileId =
+    typeof data.gridFsFileId === "string" && tryParseObjectId(data.gridFsFileId.trim())
+      ? data.gridFsFileId.trim()
+      : undefined;
+  // GridFS is durable storage; fileUrl is only the same-company recovery mirror.
+  if (!fileUrl && !gridFsFileId) return null;
+  return {
+    ...(sanitizeReportDefaultsText(data.id, 120) ? { id: sanitizeReportDefaultsText(data.id, 120) } : {}),
+    name: sanitizeReportDefaultsText(data.name, 160) ||
+      (sanitizeReportDefaultsText(data.fileName, 240).replace(/\.pptx$/i, "").trim() || "PowerPoint template"),
+    fileName: sanitizeReportDefaultsText(data.fileName, 240) || "pptx-template.pptx",
+    fileUrl: fileUrl || null,
+    uploadedAt: sanitizeReportDefaultsText(data.uploadedAt, 40),
+    sizeBytes: typeof data.sizeBytes === "number" && Number.isFinite(data.sizeBytes) ? data.sizeBytes : undefined,
+    variableNames: sanitizeReportTemplateVariableNames(
+      Array.isArray(data.variableNames) ? data.variableNames : data.bookmarkNames,
+    ),
+    bookmarkNames: sanitizeReportTemplateVariableNames(
+      Array.isArray(data.variableNames) ? data.variableNames : data.bookmarkNames,
+    ),
+    variableMappings: sanitizeCompanyReportTemplateVariableMappingList(
+      data.variableMappings,
+      "pptx",
+    ),
+    excludedVariableNames: sanitizeReportTemplateVariableNames(data.excludedVariableNames),
     ...(gridFsFileId ? { gridFsFileId } : {}),
   };
 }
@@ -2269,6 +2923,167 @@ function sanitizeCompanyAiReportTemplates(value: unknown): CompanyAiReportTempla
     .filter((item): item is CompanyAiReportTemplate => item != null);
 }
 
+function reportTemplateHasOwnArray(value: unknown, key: string): boolean {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Array.isArray((value as Record<string, unknown>)[key])
+  );
+}
+
+function applyLegacyReportTemplateVariableSettings<
+  T extends {
+    variableMappings?: CompanyReportTemplateVariableMapping[];
+    excludedVariableNames?: string[];
+  },
+>(
+  template: T | null,
+  rawTemplate: unknown,
+  kind: CompanyReportTemplateKind,
+  legacyMappings: CompanyReportTemplateVariableMappings,
+  legacyExcludedVariables: CompanyReportTemplateExcludedVariables,
+): T | null {
+  if (!template) return null;
+  return {
+    ...template,
+    variableMappings: reportTemplateHasOwnArray(rawTemplate, "variableMappings")
+      ? template.variableMappings ?? []
+      : legacyMappings[kind] ?? [],
+    excludedVariableNames: reportTemplateHasOwnArray(rawTemplate, "excludedVariableNames")
+      ? template.excludedVariableNames ?? []
+      : legacyExcludedVariables[kind] ?? [],
+  };
+}
+
+function sanitizeCompanyReportDataModels(value: unknown): CompanyReportDataModel[] {
+  if (!Array.isArray(value)) return [];
+  const seenModels = new Set<string>();
+  const models: CompanyReportDataModel[] = [];
+  for (const rawModel of value.slice(0, 12)) {
+    if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) continue;
+    const data = rawModel as Record<string, unknown>;
+    const id = sanitizeReportDefaultsText(data.id, 120);
+    const name = sanitizeReportDefaultsText(data.name, 160);
+    if (!id || !name || seenModels.has(id)) continue;
+    seenModels.add(id);
+    const rawSections = Array.isArray(data.sections) ? data.sections.slice(0, 30) : [];
+    const seenSections = new Set<string>();
+    const sections: CompanyReportDataModelSection[] = [];
+    let fieldCount = 0;
+    for (const rawSection of rawSections) {
+      if (!rawSection || typeof rawSection !== "object" || Array.isArray(rawSection)) continue;
+      const sectionData = rawSection as Record<string, unknown>;
+      const sectionId = sanitizeReportDefaultsText(sectionData.id, 120);
+      const title = sanitizeReportDefaultsText(sectionData.title, 180);
+      if (!sectionId || !title || seenSections.has(sectionId)) continue;
+      seenSections.add(sectionId);
+      const rawFields = Array.isArray(sectionData.fields) ? sectionData.fields : [];
+      const seenFields = new Set<string>();
+      const fields: CompanyReportDataModelField[] = [];
+      for (const rawField of rawFields) {
+        if (fieldCount >= 120) break;
+        if (!rawField || typeof rawField !== "object" || Array.isArray(rawField)) continue;
+        const fieldData = rawField as Record<string, unknown>;
+        const fieldId = sanitizeReportDefaultsText(fieldData.id, 120);
+        const label = sanitizeReportDefaultsText(fieldData.label, 180);
+        const sourceKey = sanitizeReportDefaultsText(fieldData.sourceKey, 180);
+        if (!fieldId || !label || !sourceKey || seenFields.has(fieldId)) continue;
+        // Source keys are deliberately flat. This aligns with the merge
+        // catalogue and never allows a client supplied object path.
+        if (!/^(?:[A-Za-z0-9_-]+|field:[A-Za-z0-9_-]+)$/.test(sourceKey)) continue;
+        seenFields.add(fieldId);
+        const type =
+          fieldData.type === "textarea" || fieldData.type === "number" || fieldData.type === "date"
+            ? fieldData.type
+            : "text";
+        fields.push({
+          id: fieldId,
+          label,
+          sourceKey,
+          type,
+          required: fieldData.required === true,
+          system: fieldData.system === true || !sourceKey.startsWith("field:"),
+        });
+        fieldCount += 1;
+      }
+      sections.push({ id: sectionId, title, fields });
+    }
+    if (sections.length === 0) continue;
+    models.push({ id, name, isDefault: data.isDefault === true, sections });
+  }
+  return models;
+}
+
+function ensureCompanyReportTemplateIdentities<
+  T extends { id?: string; name?: string; fileName?: string },
+>(templates: T[], kind: CompanyReportTemplateKind): T[] {
+  const usedIds = new Set<string>();
+  const usedNames = new Set<string>();
+  return templates.slice(0, 20).map((template, index) => {
+    const fallbackId = `${kind}-template-${index + 1}`;
+    let id = sanitizeReportDefaultsText(template.id, 120) || fallbackId;
+    let idSuffix = 2;
+    while (usedIds.has(id)) {
+      id = `${fallbackId}-${idSuffix}`;
+      idSuffix += 1;
+    }
+    usedIds.add(id);
+
+    const extension = kind === "word" ? /\.docx$/i : /\.pptx$/i;
+    const fileStem = sanitizeReportDefaultsText(template.fileName, 240).replace(extension, "").trim();
+    const baseName = sanitizeReportDefaultsText(template.name, 160) || fileStem ||
+      (kind === "word" ? "Word template" : "PowerPoint template");
+    let name = baseName;
+    let nameSuffix = 2;
+    while (usedNames.has(name.toLocaleLowerCase())) {
+      const suffixText = ` ${nameSuffix}`;
+      name = `${baseName.slice(0, Math.max(1, 160 - suffixText.length))}${suffixText}`;
+      nameSuffix += 1;
+    }
+    usedNames.add(name.toLocaleLowerCase());
+    return { ...template, id, name };
+  });
+}
+
+function sanitizeCompanyReportWordTemplates(
+  rawList: unknown,
+  legacyTemplate: unknown,
+  legacyMappings: CompanyReportTemplateVariableMappings,
+  legacyExcludedVariables: CompanyReportTemplateExcludedVariables,
+): CompanyReportWordTemplate[] {
+  const candidates = Array.isArray(rawList) ? rawList.slice(0, 20) : legacyTemplate ? [legacyTemplate] : [];
+  const templates = candidates
+    .map((raw) => applyLegacyReportTemplateVariableSettings(
+      sanitizeCompanyReportWordTemplate(raw),
+      raw,
+      "word",
+      legacyMappings,
+      legacyExcludedVariables,
+    ))
+    .filter((template): template is CompanyReportWordTemplate => template != null);
+  return ensureCompanyReportTemplateIdentities(templates, "word");
+}
+
+function sanitizeCompanyReportPptxTemplates(
+  rawList: unknown,
+  legacyTemplate: unknown,
+  legacyMappings: CompanyReportTemplateVariableMappings,
+  legacyExcludedVariables: CompanyReportTemplateExcludedVariables,
+): CompanyReportPptxTemplate[] {
+  const candidates = Array.isArray(rawList) ? rawList.slice(0, 20) : legacyTemplate ? [legacyTemplate] : [];
+  const templates = candidates
+    .map((raw) => applyLegacyReportTemplateVariableSettings(
+      sanitizeCompanyReportPptxTemplate(raw),
+      raw,
+      "pptx",
+      legacyMappings,
+      legacyExcludedVariables,
+    ))
+    .filter((template): template is CompanyReportPptxTemplate => template != null);
+  return ensureCompanyReportTemplateIdentities(templates, "pptx");
+}
+
 function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const scopeRaw =
@@ -2281,6 +3096,24 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
     data.assumptions && typeof data.assumptions === "object"
       ? (data.assumptions as Record<string, unknown>)
       : {};
+  const legacyMappings = sanitizeCompanyReportTemplateVariableMappings(data.variableMappings);
+  const legacyExcludedVariables = sanitizeCompanyReportTemplateExcludedVariables(
+    data.excludedVariables,
+  );
+  const wordTemplates = sanitizeCompanyReportWordTemplates(
+    data.wordTemplates,
+    data.wordTemplate,
+    legacyMappings,
+    legacyExcludedVariables,
+  );
+  const pptxTemplates = sanitizeCompanyReportPptxTemplates(
+    data.pptxTemplates,
+    data.pptxTemplate,
+    legacyMappings,
+    legacyExcludedVariables,
+  );
+  const wordTemplate = wordTemplates[0] ?? null;
+  const pptxTemplate = pptxTemplates[0] ?? null;
   return {
     scope: {
       complianceStatement: sanitizeReportDefaultsText(scopeRaw.complianceStatement, 4000),
@@ -2310,49 +3143,34 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
     },
     customGroups: sanitizeCompanyReportCustomGroups(data.customGroups),
     customSections: sanitizeCompanyReportCustomSections(data.customSections),
+    reportDataModels: sanitizeCompanyReportDataModels(data.reportDataModels),
     letterhead: sanitizeCompanyReportLetterheadTemplate(data.letterhead),
     aiTemplates: sanitizeCompanyAiReportTemplates(data.aiTemplates),
-    wordTemplate: sanitizeCompanyReportWordTemplate(data.wordTemplate),
+    wordTemplates,
+    pptxTemplates,
+    wordTemplate,
+    pptxTemplate,
+    variableMappings: {
+      word: wordTemplate?.variableMappings ?? legacyMappings.word ?? [],
+      pptx: pptxTemplate?.variableMappings ?? legacyMappings.pptx ?? [],
+    },
+    excludedVariables: {
+      word: wordTemplate?.excludedVariableNames ?? legacyExcludedVariables.word ?? [],
+      pptx: pptxTemplate?.excludedVariableNames ?? legacyExcludedVariables.pptx ?? [],
+    },
   };
 }
 
-/**
- * Returns the persisted defaults, falling back to seeded templates for any
- * missing field — guarantees the company panel & report preview always have
- * a meaningful initial value to render or override.
- */
+/** Returns persisted company defaults. Document templates are opt-in per company. */
 type CompanyReportDefaultsContext = {
   companyName?: string | null;
   adminPhone?: string | null;
   adminUsername?: string | null;
 };
 
-function normalizeCompanyMatchText(value?: string | null): string {
-  return (value ?? "")
-    .toLowerCase()
-    .replace(/[أإآ]/g, "ا")
-    .replace(/ؤ/g, "و")
-    .replace(/ئ/g, "ي")
-    .replace(/[^a-z0-9\u0600-\u06ff]+/g, "");
-}
-
-function normalizePhoneDigits(value?: string | null): string {
-  return (value ?? "").replace(/\D/g, "");
-}
-
-export function shouldUseProOptionBundledWordTemplate(context?: CompanyReportDefaultsContext): boolean {
-  const companyName = normalizeCompanyMatchText(context?.companyName);
-  const adminDigits = normalizePhoneDigits(context?.adminPhone ?? context?.adminUsername);
-  const looksLikeProOption =
-    companyName.includes("prooption") ||
-    (companyName.includes("برو") &&
-      (companyName.includes("اوبشن") || companyName.includes("اوبشنز") || companyName.includes("option")));
-  return looksLikeProOption || adminDigits.startsWith("966555");
-}
-
 export function resolveCompanyReportDefaults(
   stored: CompanyReportDefaults | undefined | null,
-  context?: CompanyReportDefaultsContext,
+  _context?: CompanyReportDefaultsContext,
 ): CompanyReportDefaults {
   const seeds = buildDefaultCompanyReportDefaults();
   const scopeStored = stored?.scope ?? {};
@@ -2360,17 +3178,27 @@ export function resolveCompanyReportDefaults(
   const assumptionsStored = stored?.assumptions ?? {};
   const customGroupsStored = sanitizeCompanyReportCustomGroups(stored?.customGroups);
   const customSectionsStored = sanitizeCompanyReportCustomSections(stored?.customSections);
+  const reportDataModelsStored = sanitizeCompanyReportDataModels(stored?.reportDataModels);
   const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
   const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
-  const wordTemplateStored = sanitizeCompanyReportWordTemplate(stored?.wordTemplate);
-  // قالب مضمّن لجميع الشركات — لا يشترط رفعاً يدوياً محلياً أو في الـ deployment
-  const wordTemplateDefault = PRO_OPTION_BUNDLED_WORD_TEMPLATE;
-  const effectiveWordTemplate =
-    !wordTemplateStored ||
-    (typeof wordTemplateStored.fileUrl === "string" &&
-      PRO_OPTION_BUNDLED_WORD_TEMPLATE_URLS.has(wordTemplateStored.fileUrl.trim()))
-      ? wordTemplateDefault
-      : wordTemplateStored;
+  const legacyMappings = sanitizeCompanyReportTemplateVariableMappings(stored?.variableMappings);
+  const legacyExcludedVariables = sanitizeCompanyReportTemplateExcludedVariables(
+    stored?.excludedVariables,
+  );
+  const wordTemplatesStored = sanitizeCompanyReportWordTemplates(
+    stored?.wordTemplates,
+    stored?.wordTemplate,
+    legacyMappings,
+    legacyExcludedVariables,
+  );
+  const pptxTemplatesStored = sanitizeCompanyReportPptxTemplates(
+    stored?.pptxTemplates,
+    stored?.pptxTemplate,
+    legacyMappings,
+    legacyExcludedVariables,
+  );
+  const effectiveWordTemplate = wordTemplatesStored[0] ?? null;
+  const effectivePptxTemplate = pptxTemplatesStored[0] ?? null;
   return {
     scope: {
       complianceStatement:
@@ -2439,9 +3267,23 @@ export function resolveCompanyReportDefaults(
     },
     customGroups: customGroupsStored,
     customSections: customSectionsStored,
+    reportDataModels: reportDataModelsStored,
     letterhead: letterheadStored,
     aiTemplates: aiTemplatesStored,
+    wordTemplates: wordTemplatesStored,
+    pptxTemplates: pptxTemplatesStored,
     wordTemplate: effectiveWordTemplate,
+    pptxTemplate: effectivePptxTemplate,
+    // Keep the aggregate fields in responses for integrations created before
+    // mappings moved beside their individual template files.
+    variableMappings: {
+      word: effectiveWordTemplate?.variableMappings ?? legacyMappings.word ?? [],
+      pptx: effectivePptxTemplate?.variableMappings ?? legacyMappings.pptx ?? [],
+    },
+    excludedVariables: {
+      word: effectiveWordTemplate?.excludedVariableNames ?? legacyExcludedVariables.word ?? [],
+      pptx: effectivePptxTemplate?.excludedVariableNames ?? legacyExcludedVariables.pptx ?? [],
+    },
   };
 }
 
@@ -2496,13 +3338,50 @@ const aiTemplateSchema = z.object({
   templateJson: z.record(z.unknown()).optional(),
 });
 
-const wordTemplateSchema = z
+const reportTemplateVariableMappingSchema = z
   .object({
+    id: z.string().max(120).optional(),
+    variable: z.string().max(160).optional(),
+    sourceKey: z.string().max(240).optional(),
+    staticValue: z.string().max(50_000).optional(),
+    // Legacy aliases are read and normalized on the server, so older clients
+    // can keep their saved mapping rows during the transition.
+    variableName: z.string().max(160).optional(),
+    placeholder: z.string().max(160).optional(),
+    source: z.string().max(240).optional(),
+    field: z.string().max(240).optional(),
+    fallbackValue: z.string().max(50_000).optional(),
+    value: z.string().max(50_000).optional(),
+  })
+  .partial();
+
+const reportTemplateVariableMappingsSchema = z
+  .object({
+    word: z.array(reportTemplateVariableMappingSchema).max(300).optional(),
+    pptx: z.array(reportTemplateVariableMappingSchema).max(300).optional(),
+  })
+  .partial()
+  .optional()
+  .nullable();
+
+const reportTemplateExcludedVariablesSchema = z
+  .object({
+    word: z.array(z.string().max(160)).max(300).optional(),
+    pptx: z.array(z.string().max(160)).max(300).optional(),
+  })
+  .partial()
+  .optional()
+  .nullable();
+
+const wordTemplateItemSchema = z
+  .object({
+    id: z.string().max(120).optional(),
+    name: z.string().max(160).optional(),
     fileName: z.string().max(240).optional(),
     fileUrl: z
       .union([
         z.string().max(REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS).refine(isReportDefaultsWordTemplateUrl, {
-          message: "word template URL must be a persisted .docx upload URL or bundled /files .docx URL",
+          message: "word template URL must be a persisted company .docx upload URL",
         }),
         z.literal(""),
         z.null(),
@@ -2524,10 +3403,50 @@ const wordTemplateSchema = z
     uploadedAt: z.string().max(40).optional(),
     sizeBytes: z.number().optional(),
     bookmarkNames: z.array(z.string().max(120)).max(300).optional(),
+    variableMappings: z.array(reportTemplateVariableMappingSchema).max(300).optional(),
+    excludedVariableNames: z.array(z.string().max(160)).max(300).optional(),
   })
-  .partial()
-  .optional()
-  .nullable();
+  .partial();
+
+const wordTemplateSchema = wordTemplateItemSchema.optional().nullable();
+
+const pptxTemplateItemSchema = z
+  .object({
+    id: z.string().max(120).optional(),
+    name: z.string().max(160).optional(),
+    fileName: z.string().max(240).optional(),
+    fileUrl: z
+      .union([
+        z.string().max(REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS).refine(isReportDefaultsPptxTemplateUrl, {
+          message: "PowerPoint template URL must be a persisted company .pptx upload URL",
+        }),
+        z.literal(""),
+        z.null(),
+      ])
+      .optional(),
+    gridFsFileId: z
+      .union([z.string().max(40), z.literal(""), z.null()])
+      .optional(),
+    fileDataUrl: z
+      .union([
+        z
+          .string()
+          .max(REPORT_DEFAULTS_PPTX_TEMPLATE_DATA_URL_MAX_CHARS)
+          .refine((value) => value.startsWith("data:"), { message: "PowerPoint template must be a data URL" }),
+        z.literal(""),
+        z.null(),
+      ])
+      .optional(),
+    uploadedAt: z.string().max(40).optional(),
+    sizeBytes: z.number().optional(),
+    variableNames: z.array(z.string().max(160)).max(300).optional(),
+    bookmarkNames: z.array(z.string().max(160)).max(300).optional(),
+    variableMappings: z.array(reportTemplateVariableMappingSchema).max(300).optional(),
+    excludedVariableNames: z.array(z.string().max(160)).max(300).optional(),
+  })
+  .partial();
+
+const pptxTemplateSchema = pptxTemplateItemSchema.optional().nullable();
 
 const updateCompanyReportDefaultsSchema = z.object({
   scope: z
@@ -2587,6 +3506,36 @@ const updateCompanyReportDefaultsSchema = z.object({
     )
     .max(40)
     .optional(),
+  reportDataModels: z
+    .array(
+      z.object({
+        id: z.string().max(120),
+        name: z.string().max(160),
+        isDefault: z.boolean().optional(),
+        sections: z
+          .array(
+            z.object({
+              id: z.string().max(120),
+              title: z.string().max(180),
+              fields: z
+                .array(
+                  z.object({
+                    id: z.string().max(120),
+                    label: z.string().max(180),
+                    sourceKey: z.string().max(180),
+                    type: z.enum(["text", "textarea", "number", "date"]).optional(),
+                    required: z.boolean().optional(),
+                    system: z.boolean().optional(),
+                  }),
+                )
+                .max(120),
+            }),
+          )
+          .max(30),
+      }),
+    )
+    .max(12)
+    .optional(),
   letterhead: z
     .object({
       enabled: z.boolean().optional(),
@@ -2602,7 +3551,12 @@ const updateCompanyReportDefaultsSchema = z.object({
     .partial()
     .optional(),
   aiTemplates: z.array(aiTemplateSchema).max(20).optional(),
+  wordTemplates: z.array(wordTemplateItemSchema).max(20).optional(),
+  pptxTemplates: z.array(pptxTemplateItemSchema).max(20).optional(),
   wordTemplate: wordTemplateSchema,
+  pptxTemplate: pptxTemplateSchema,
+  variableMappings: reportTemplateVariableMappingsSchema,
+  excludedVariables: reportTemplateExcludedVariablesSchema,
 });
 
 const updateCompanyBrandingSchema = z
@@ -2614,9 +3568,10 @@ const updateCompanyBrandingSchema = z
         z.null(),
       ])
       .optional(),
+    commercialRegistration: z.string().trim().max(32).optional(),
   })
-  .refine((v) => v.logoDataUrl !== undefined, {
-    message: "Provide logoDataUrl.",
+  .refine((v) => v.logoDataUrl !== undefined || v.commercialRegistration !== undefined, {
+    message: "Provide logoDataUrl or commercialRegistration.",
   });
 
 const updateMemberSignatureBodySchema = z.object({
@@ -3098,6 +4053,7 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
             name: company.name,
             valueTechProductIds: company.valueTechProductIds,
             logoDataUrl: company.logoDataUrl ?? null,
+            commercialRegistration: company.commercialRegistration?.trim() || "",
             employeeCount: memberLinks.length,
           }
         : null,
@@ -3230,6 +4186,7 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
     payload: {
       companyName: company?.name ?? "",
       logoDataUrl: company?.logoDataUrl ?? null,
+      commercialRegistration: company?.commercialRegistration?.trim() || "",
       /** رقم عضوية مدير الشركة مباشرة من ‎users.valuationReportMembershipNo‎ — للغلاف والتوقيعات. */
       companyAdminMembershipNo: companyAdminIdentity.membershipNo,
       companyAdminName: companyAdminIdentity.name,
@@ -3295,12 +4252,70 @@ export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request
   const db = await getMongoDb();
   const { companies } = getAuthCollections(db);
   const companyId = context.company!._id;
-  const defaultsWithStoredAssets = await persistCompanyReportDefaultsAssets(parsed.data, companyId.toString());
-  const sanitized = sanitizeCompanyReportDefaults(defaultsWithStoredAssets);
-  await companies.updateOne(
+  const existingCompany = await companies.findOne(
     { _id: companyId },
-    { $set: { reportDefaults: sanitized, updatedAt: new Date() } as Partial<CompanyDoc> },
+    { projection: { reportDefaults: 1 } },
   );
+  const incomingDefaults = { ...parsed.data } as Record<string, unknown>;
+  const existingDefaults = existingCompany?.reportDefaults as Record<string, unknown> | undefined;
+  // A pre-catalogue client only knows the singleton field. Let it update the
+  // first template without silently discarding the rest of the catalogue.
+  for (const kind of ["word", "pptx"] as const) {
+    const listKey = kind === "word" ? "wordTemplates" : "pptxTemplates";
+    const legacyKey = kind === "word" ? "wordTemplate" : "pptxTemplate";
+    if (Object.prototype.hasOwnProperty.call(incomingDefaults, listKey)) continue;
+    const existingList = Array.isArray(existingDefaults?.[listKey])
+      ? (existingDefaults?.[listKey] as unknown[]).slice(0, 20)
+      : [];
+    if (existingList.length === 0) continue;
+    if (!Object.prototype.hasOwnProperty.call(incomingDefaults, legacyKey)) {
+      incomingDefaults[listKey] = existingList;
+      continue;
+    }
+    const incomingLegacy = incomingDefaults[legacyKey];
+    incomingDefaults[listKey] = incomingLegacy
+      ? [incomingLegacy, ...existingList.slice(1)]
+      : existingList.slice(1);
+  }
+  const storageContext: CompanyReportTemplateStorageContext = {
+    uploadedBlobs: [],
+    pendingLocalWrites: [],
+  };
+  let sanitized: CompanyReportDefaults;
+  try {
+    const defaultsWithStoredAssets = await persistCompanyReportDefaultsAssets(
+      incomingDefaults,
+      companyId.toString(),
+      storageContext,
+    );
+    sanitized = sanitizeCompanyReportDefaults(defaultsWithStoredAssets);
+    const update = await companies.updateOne(
+      { _id: companyId },
+      { $set: { reportDefaults: sanitized, updatedAt: new Date() } as Partial<CompanyDoc> },
+    );
+    if (update.matchedCount !== 1) {
+      throw new HttpError(404, "not_found", "Company was not found while saving report templates.");
+    }
+  } catch (error) {
+    await discardUncommittedCompanyReportTemplateBlobs(storageContext);
+    throw error;
+  }
+
+  try {
+    await finalizeCompanyReportTemplateStorage(
+      companyId.toString(),
+      existingCompany?.reportDefaults,
+      storageContext,
+    );
+  } catch (error) {
+    // The database now references an intact GridFS object. Cleanup and local
+    // mirroring are deliberately non-fatal after that durable commit.
+    console.warn(
+      `Could not finalize company report template storage: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 
   return {
     context,
@@ -3342,6 +4357,10 @@ export async function updateCompanyBrandingByCompanyAdmin(request: Request, body
   if (parsed.data.logoDataUrl !== undefined) {
     const v = parsed.data.logoDataUrl;
     $set.logoDataUrl = v === "" || v === null ? null : v;
+  }
+  if (parsed.data.commercialRegistration !== undefined) {
+    const value = parsed.data.commercialRegistration.trim();
+    $set.commercialRegistration = value || null;
   }
 
   await companies.updateOne({ _id: companyId }, { $set });
