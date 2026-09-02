@@ -453,6 +453,21 @@ function isDuplicateKeyError(error: unknown) {
   );
 }
 
+const LEGACY_UNTAGGED_PRODUCT_ID: ValueTechProductId = "machine-valuation";
+
+function reportOnlySignatoryMatchesProduct(
+  row: Pick<CompanyReportOnlySignatory, "productIds">,
+  productId: ValueTechProductId | null,
+): boolean {
+  if (!productId) return true; // no filter requested — show all
+  const ids = row.productIds ?? [];
+  if (ids.length === 0) {
+    // legacy/untagged rows default to machine-valuation only
+    return productId === LEGACY_UNTAGGED_PRODUCT_ID;
+  }
+  return ids.includes(productId);
+}
+
 function stripUnknown(input: Record<string, unknown> | undefined) {
   if (!input) return undefined;
   return JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
@@ -2651,14 +2666,9 @@ function normalizeReportOnlySignatories(raw: unknown): CompanyReportOnlySignator
         normalizeOptionalText(typeof row.membershipNo === "string" ? row.membershipNo : null) ??
         undefined,
       signatureImageDataUrl: signature,
-      createdAt:
-        typeof row.createdAt === "string" && row.createdAt.trim()
-          ? row.createdAt
-          : new Date(0).toISOString(),
-      updatedAt:
-        typeof row.updatedAt === "string" && row.updatedAt.trim()
-          ? row.updatedAt
-          : new Date(0).toISOString(),
+      productIds: normalizeProductIds(row.productIds), // NEW — reuses the helper already defined at the top of the file
+      createdAt: typeof row.createdAt === "string" && row.createdAt.trim() ? row.createdAt : new Date(0).toISOString(),
+      updatedAt: typeof row.updatedAt === "string" && row.updatedAt.trim() ? row.updatedAt : new Date(0).toISOString(),
     });
     if (out.length >= 100) break;
   }
@@ -2681,6 +2691,7 @@ function reportOnlySignatoryToApiRow(row: CompanyReportOnlySignatory): CompanyRe
     memberRole: "report_only",
     isCompanyAdmin: false,
     isReportOnly: true,
+    productIds: row.productIds ?? [], // NEW
   };
 }
 
@@ -3112,16 +3123,19 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
             ? u.valuationReportSignatureDataUrl
             : null,
       })),
-      reportOnlySignatories: normalizeReportOnlySignatories(company?.reportOnlySignatories).map(
-        (row) => ({
-          id: row.id,
-          name: row.name,
-          jobTitle: row.jobTitle ?? "",
-          membershipNo: row.membershipNo ?? "",
-          signatureImageDataUrl: row.signatureImageDataUrl ?? null,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-          isReportOnly: true as const,
+      reportOnlySignatories: normalizeReportOnlySignatories(company?.reportOnlySignatories)
+        .filter((row) => reportOnlySignatoryMatchesProduct(row, productId))
+              .map(
+                (row) => ({
+                  id: row.id,
+                  name: row.name,
+                  jobTitle: row.jobTitle ?? "",
+                  membershipNo: row.membershipNo ?? "",
+                  signatureImageDataUrl: row.signatureImageDataUrl ?? null,
+                  productIds: row.productIds ?? [],
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                  isReportOnly: true as const,
         }),
       ),
     },
@@ -3155,9 +3169,11 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
   const companyId = context.company!._id;
   const company = await companies.findOne({ _id: companyId });
 
+  const productId = readProductIdFromRequest(request) ?? "machine-valuation";
+
   const allMemberLinks = await userCompanyMemberships.find({ companyId }).toArray();
   const memberLinks = allMemberLinks.filter((m) =>
-    membershipHasProductAccess(m, "machine-valuation", company),
+    membershipHasProductAccess(m, productId, company),
   );
   const memberIds = memberLinks.map((m) => m.userId);
   const roleByUserId = new Map(
@@ -3201,6 +3217,7 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
     );
 
   const reportOnlyRows = normalizeReportOnlySignatories(company?.reportOnlySignatories)
+    .filter((row) => (row.productIds ?? []).includes(productId)) // NEW
     .map(reportOnlySignatoryToApiRow)
     .sort((a, b) => a.name.localeCompare(b.name, "ar"));
 
@@ -3434,6 +3451,9 @@ export async function createCompanyReportOnlySignatory(request: Request, body: u
     throw new HttpError(404, "not_found", "Company not found.");
   }
 
+  // NEW — pick up the product the admin was working in when they created this signatory
+  const productId = readProductIdFromRequest(request);
+
   const nowIso = new Date().toISOString();
   const next: CompanyReportOnlySignatory = {
     id: newReportOnlySignatoryId(),
@@ -3441,6 +3461,7 @@ export async function createCompanyReportOnlySignatory(request: Request, body: u
     jobTitle: normalizeOptionalText(parsed.data.jobTitle) ?? undefined,
     membershipNo: normalizeOptionalText(parsed.data.membershipNo) ?? undefined,
     signatureImageDataUrl: null,
+    productIds: productId ? [productId] : [], // NEW
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -3468,6 +3489,7 @@ export async function createCompanyReportOnlySignatory(request: Request, body: u
         jobTitle: next.jobTitle ?? "",
         membershipNo: next.membershipNo ?? "",
         signatureImageDataUrl: null,
+        productIds: next.productIds ?? [], // NEW
         createdAt: next.createdAt,
         updatedAt: next.updatedAt,
         isReportOnly: true as const,

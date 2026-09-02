@@ -140,7 +140,7 @@ export type EvalData = {
   assumptions: string;
   risks: string;
 
-    authorEntries: AuthorEntry[];
+  authorEntries: AuthorEntry[];
 
   // report authors
   author1Id: string;

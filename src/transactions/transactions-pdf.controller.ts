@@ -10,9 +10,11 @@ export class TransactionsPdfController {
   async downloadReport(
     @Param("id") id: string,
     @Query("disposition") disposition: string | undefined,
+    @Query("format") format: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
     const mode = disposition === "inline" ? "inline" : "attachment";
-    await this.svc.generateReport(id, res, mode);
+    const wantsPdf = format === "pdf";
+    await this.svc.generateReport(id, res, mode, wantsPdf);
   }
 }
