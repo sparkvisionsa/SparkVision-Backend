@@ -162,6 +162,8 @@ function findPythonBin(): string {
   const venvPaths = [
     path.join(process.cwd(), "pdf-worker", ".venv", "bin", "python"),
     path.join(process.cwd(), "pdf-worker", ".venv", "Scripts", "python.exe"), // Windows
+    path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
+    path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"),
   ];
   for (const p of venvPaths) {
     if (fs.existsSync(p)) return p;

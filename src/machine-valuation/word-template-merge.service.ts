@@ -240,6 +240,8 @@ function findDocxWorkerVenvPython(): string | null {
   const venvPaths = [
     path.join(process.cwd(), "docx-worker", "venv", "bin", "python"),
     path.join(process.cwd(), "docx-worker", "venv", "Scripts", "python.exe"),
+    path.join(process.cwd(), "docx-worker", ".venv", "bin", "python"),
+    path.join(process.cwd(), "docx-worker", ".venv", "Scripts", "python.exe"),
   ];
   for (const p of venvPaths) {
     if (fs.existsSync(p)) return p;
@@ -251,6 +253,8 @@ function findPythonBin(): string {
   const dedicated = findDocxWorkerVenvPython();
   if (dedicated) return dedicated;
   const fallbacks = [
+    path.join(process.cwd(), "pdf-worker", ".venv", "Scripts", "python.exe"),
+    path.join(process.cwd(), "pdf-worker", ".venv", "bin", "python"),
     path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"),
     path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
   ];

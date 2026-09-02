@@ -7,3 +7,8 @@ docx-worker/venv
 docx-worker/.venv
 docx-worker/__pycache__
 docx-worker/*.pyc
+pdf-worker/venv
+pdf-worker/.venv
+pdf-worker/**/__pycache__
+pptx-worker/**/__pycache__
+**/*.pyc

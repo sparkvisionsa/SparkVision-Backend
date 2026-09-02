@@ -491,6 +491,8 @@ function findPythonBin(): string {
   const candidates = [
     path.join(process.cwd(), "docx-worker", "venv", "Scripts", "python.exe"),
     path.join(process.cwd(), "docx-worker", "venv", "bin", "python"),
+    path.join(process.cwd(), "docx-worker", ".venv", "Scripts", "python.exe"),
+    path.join(process.cwd(), "docx-worker", ".venv", "bin", "python"),
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;

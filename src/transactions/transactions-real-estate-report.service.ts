@@ -70,6 +70,8 @@ function resolveFilePath(filePath: string): string {
 
 function findPythonBin(): string {
   const venvPaths = [
+    path.join(process.cwd(), "docx-worker", "venv", "bin", "python"),
+    path.join(process.cwd(), "docx-worker", "venv", "Scripts", "python.exe"),
     path.join(process.cwd(), "docx-worker", ".venv", "bin", "python"),
     path.join(process.cwd(), "docx-worker", ".venv", "Scripts", "python.exe"),
   ];

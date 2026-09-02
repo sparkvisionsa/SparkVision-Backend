@@ -1,0 +1,3 @@
+WeasyPrint==69.0
+Pillow==12.3.0
+pdf2image==1.17.0

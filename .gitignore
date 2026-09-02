@@ -5,6 +5,12 @@ coverage/
 .env.*
 !.env.example
 dist/
+# Python worker environments and bytecode are generated per host.
+**/__pycache__/
+*.py[cod]
+docx-worker/venv/
+docx-worker/.venv/
+pdf-worker/venv/
 pdf-worker/.venv/
 # Company report templates are tenant data stored at runtime (GridFS is the
 # canonical store); never add local cache copies to source control.
