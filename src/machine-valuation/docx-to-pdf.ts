@@ -2,6 +2,11 @@ import { execFileSync, spawn } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import {
+  convertOfficeFileToPdfViaMicrosoftGraph,
+  isMicrosoftGraphPdfConfigured,
+  microsoftGraphPdfConfigurationMissing,
+} from "./microsoft-graph-pdf";
 
 /** فلتر PDF في LibreOffice بدون تصغير دقة الصور المضمّنة. */
 const LO_WRITER_PDF_FILTER =
@@ -90,10 +95,33 @@ function candidatePowerPointBins(): string[] {
   ].filter((v) => v.trim().length > 0);
 }
 
-function preferredPdfRenderer(): "office" | "libreoffice" {
-  const raw = process.env.MV_WORD_PDF_RENDERER?.trim().toLowerCase();
+type PdfRenderer = "graph" | "office" | "libreoffice";
+
+function preferredPdfRenderer(): PdfRenderer {
+  const raw = (
+    process.env.MV_PDF_RENDERER ??
+    process.env.MV_WORD_PDF_RENDERER ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  if (["graph", "microsoft-graph", "microsoft_graph", "office365", "m365"].includes(raw)) {
+    return "graph";
+  }
   if (raw === "libreoffice" || raw === "lo") return "libreoffice";
+  if (!raw && isMicrosoftGraphPdfConfigured()) return "graph";
   return "office";
+}
+
+function allowLocalFallbackAfterGraphFailure(): boolean {
+  const raw = (
+    process.env.MS_GRAPH_ALLOW_LOCAL_FALLBACK ??
+    process.env.MV_PDF_ALLOW_LIBREOFFICE_FALLBACK ??
+    "false"
+  )
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw);
 }
 
 function canCreateComObject(progId: string): boolean {
@@ -416,7 +444,35 @@ export async function convertDocxToPdf(
   opts?: { timeoutMs?: number },
 ): Promise<string> {
   const errors: string[] = [];
-  const preferOffice = preferredPdfRenderer() === "office";
+  const renderer = preferredPdfRenderer();
+
+  if (renderer === "graph") {
+    if (isMicrosoftGraphPdfConfigured()) {
+      try {
+        return await convertOfficeFileToPdfViaMicrosoftGraph(docxPath, outDir, {
+          kind: "docx",
+          timeoutMs: opts?.timeoutMs,
+        });
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      errors.push(
+        `Microsoft Graph غير مكتمل الإعداد: ${microsoftGraphPdfConfigurationMissing().join(", ")}`,
+      );
+    }
+
+    if (!allowLocalFallbackAfterGraphFailure()) {
+      throw new Error(
+        `تعذر تحويل Word إلى PDF عبر Microsoft 365. ${errors.filter(Boolean).join(" | ")}`.slice(
+          0,
+          700,
+        ),
+      );
+    }
+  }
+
+  const preferOffice = renderer !== "libreoffice";
 
   if (preferOffice && isMicrosoftWordAvailable()) {
     try {
@@ -540,7 +596,35 @@ export async function convertPptxToPdf(
   opts?: { timeoutMs?: number },
 ): Promise<string> {
   const errors: string[] = [];
-  const preferOffice = preferredPdfRenderer() === "office";
+  const renderer = preferredPdfRenderer();
+
+  if (renderer === "graph") {
+    if (isMicrosoftGraphPdfConfigured()) {
+      try {
+        return await convertOfficeFileToPdfViaMicrosoftGraph(pptxPath, outDir, {
+          kind: "pptx",
+          timeoutMs: opts?.timeoutMs,
+        });
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      errors.push(
+        `Microsoft Graph غير مكتمل الإعداد: ${microsoftGraphPdfConfigurationMissing().join(", ")}`,
+      );
+    }
+
+    if (!allowLocalFallbackAfterGraphFailure()) {
+      throw new Error(
+        (
+          "تعذر تحويل PowerPoint إلى PDF عبر Microsoft 365. " +
+          errors.filter(Boolean).join(" | ")
+        ).slice(0, 700),
+      );
+    }
+  }
+
+  const preferOffice = renderer !== "libreoffice";
 
   if (preferOffice && isMicrosoftPowerPointAvailable()) {
     try {
@@ -581,10 +665,24 @@ export async function convertPptxToPdf(
 }
 
 export function isDocxPdfConversionAvailable(): boolean {
+  if (preferredPdfRenderer() === "graph") {
+    return (
+      isMicrosoftGraphPdfConfigured() ||
+      (allowLocalFallbackAfterGraphFailure() &&
+        (resolveSofficeBinary() != null || isMicrosoftWordAvailable()))
+    );
+  }
   return resolveSofficeBinary() != null || isMicrosoftWordAvailable();
 }
 
 export function isPptxPdfConversionAvailable(): boolean {
+  if (preferredPdfRenderer() === "graph") {
+    return (
+      isMicrosoftGraphPdfConfigured() ||
+      (allowLocalFallbackAfterGraphFailure() &&
+        (resolveSofficeBinary() != null || isMicrosoftPowerPointAvailable()))
+    );
+  }
   return resolveSofficeBinary() != null || isMicrosoftPowerPointAvailable();
 }
 

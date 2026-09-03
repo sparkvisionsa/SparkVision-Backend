@@ -1475,6 +1475,19 @@ export class WordTemplateMergeService {
         );
       }
 
+      res.setHeader(
+        "Access-Control-Expose-Headers",
+        [
+          "Content-Disposition",
+          "X-Word-Merge-Stats",
+          "X-Word-Merge-Warnings",
+          "X-Word-Merge-Pdf",
+          "X-Word-Merge-Pdf-Token",
+          "X-Word-Merge-Pdf-Error",
+          "X-Word-Merge-Pdf-Available",
+        ].join(", "),
+      );
+
       const wantPdf = body.alsoPdf === true;
       if (wantPdf) {
         try {
@@ -1492,15 +1505,6 @@ export class WordTemplateMergeService {
           });
           res.setHeader("X-Word-Merge-Pdf", "1");
           res.setHeader("X-Word-Merge-Pdf-Token", pdfToken);
-          res.setHeader("Access-Control-Expose-Headers", [
-            "Content-Disposition",
-            "X-Word-Merge-Stats",
-            "X-Word-Merge-Warnings",
-            "X-Word-Merge-Pdf",
-            "X-Word-Merge-Pdf-Token",
-            "X-Word-Merge-Pdf-Error",
-            "X-Word-Merge-Pdf-Available",
-          ].join(", "));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`Word→PDF conversion failed for ${projectId}: ${msg}`);
