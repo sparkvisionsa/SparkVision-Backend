@@ -244,7 +244,11 @@ function getBrowser(): Promise<any> {
 export class TransactionsPdfHtmlService {
   private readonly logger = new Logger(TransactionsPdfHtmlService.name);
 
-  async generatePdf(id: string, res: Response): Promise<void> {
+  async generatePdf(
+    id: string,
+    res: Response,
+    disposition: "inline" | "attachment" = "attachment", // ← new param
+  ): Promise<void> {
     this.logger.log(`Starting PDF generation for transaction: ${id}`);
 
     if (!ObjectId.isValid(id)) throw new NotFoundException("المعاملة غير موجودة");
@@ -374,11 +378,17 @@ export class TransactionsPdfHtmlService {
     }
 
     const finalBytes = await finalDoc.save();
-    this.logger.log(`PDF generated: ${finalBytes.length} bytes`);
+        this.logger.log(`PDF generated: ${finalBytes.length} bytes`);
 
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="valuation-${id}.pdf"`);
-    res.end(Buffer.from(finalBytes));
-    this.logger.log("PDF sent successfully");
+        // Only allow the two known values — never trust the query string verbatim.
+        const safeDisposition = disposition === "inline" ? "inline" : "attachment";
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+          "Content-Disposition",
+          `${safeDisposition}; filename="valuation-${id}.pdf"`,
+        );
+        res.end(Buffer.from(finalBytes));
+        this.logger.log("PDF sent successfully");
   }
 }
