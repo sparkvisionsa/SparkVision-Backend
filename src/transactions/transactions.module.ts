@@ -6,6 +6,7 @@ import { TransactionsMediaService } from "./transactions-media.service";
 import { TransactionsNotesController } from "./transactions-notes.controller";
 import { TransactionsNotesService } from "./transactions-notes.service";
 import { TransactionsPdfController } from "./transactions-pdf.controller";
+import { TransactionsPdfHtmlService } from "./transactions-pdf.service"; // Add this import
 import { TransactionsRealEstateReportService } from "./transactions-real-estate-report.service";
 import { TransactionsVisionService } from "./transactions-ocr.service";
 import { RealEstateReportTemplateController } from "./real-estate-report-template.controller";
@@ -26,6 +27,7 @@ import { RealEstateReportTemplateService } from "./real-estate-report-template.s
     TransactionsNotesService,
     TransactionsRealEstateReportService,
     RealEstateReportTemplateService,
+    TransactionsPdfHtmlService, // Add this line
   ],
 })
 export class TransactionsModule {}

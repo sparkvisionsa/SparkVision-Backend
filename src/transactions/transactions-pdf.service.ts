@@ -2,8 +2,9 @@ import { Injectable, NotFoundException, Logger } from "@nestjs/common";
 import { ObjectId } from "mongodb";
 import { Response } from "express";
 import * as path from "path";
-import * as fs from "fs";
-import { spawn } from "child_process";
+import * as fs from "fs/promises";
+import * as fsSync from "fs";
+import { PDFDocument } from "pdf-lib";
 import { getMongoDb } from "@/server/mongodb";
 import {
   TRANSACTIONS_COLLECTION,
@@ -16,147 +17,70 @@ import {
   type AttachmentDoc,
   type ImageDoc,
 } from "./transactions-media.model";
+import { buildReportData, type SignatoryMap } from "./build-report-data";
+import { COMPANIES_COLLECTION } from "@/server/auth-tracking/collections";
+import { type CompanyDoc } from "@/server/auth-tracking/types";
+import { renderReportHtml } from "./report-template";
+import type { ReportImage, PdfAttachment, ImageAttachment, OtherAttachment } from "./report-types";
 
-// ─── Label maps (kept here so the Python script doesn't need them hard-coded) ──
+function resolveFilePath(filePath: string): string {
+  return path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+}
 
-const VALUATION_PURPOSES: Record<string, string> = {
-  "1": "التمويل",
-  "2": "الشراء",
-  "3": "البيع",
-  "4": "الرهن",
-  "5": "محاسبة",
-  "6": "إفلاس",
-  "7": "استحواذ",
-  "8": "التقرير المالي",
-  "9": "الضرائب",
-  "10": "الأغراض التأمينية",
-  "11": "تقاضي",
-  "12": "أغراض داخلية",
-  "13": "نزع الملكية",
-  "14": "نقل",
-  "15": "ورث",
-  "16": "اخرى",
-  "17": "توزيع تركه",
-  "18": "البيع القسري",
-  "19": "معرفة القيمة السوقية",
-  "20": "معرفة القيمة الإيجارية",
-  "21": "التصفية",
-  "50": "أغراض إستثمارية",
-  "54": "التعويض",
-};
-const VALUATION_BASES: Record<string, string> = {
-  "1": "القيمة السوقية",
-  "2": "القيمة الاستثمارية",
-  "3": "القيمة المنصفة",
-  "4": "قيمة التصفية",
-  "5": "القيمة التكاملية",
-  "6": "الايجار السوقي",
-  "7": "القيمة السوقية / قيمة الايجار السوقي",
-  "8": "القيمة العادلة",
-  "10": "الإدراج في القوائم المالية",
-};
-const OWNERSHIP_TYPES: Record<string, string> = {
-  "1": "الملكية المطلقة",
-  "2": "الملكية المشروطة",
-  "3": "الملكية المقيدة",
-  "4": "ملكية مدى الحياة",
-  "5": "منفعة",
-  "6": "مشاع",
-  "7": "ملكية مرهونة",
-};
-const VALUATION_HYPOTHESES: Record<string, string> = {
-  "1": "الاستخدام الحالي",
-  "2": "الاستخدام الأعلى والأفضل",
-  "3": "التصفية المنظمة",
-  "4": "البيع القسري",
-};
-const PROPERTY_TYPES: Record<string, string> = {
-  "1": "أرض",
-  "2": "شقة",
-  "3": "فيلا سكنية",
-  "4": "عمارة",
-  "5": "إستراحة",
-  "6": "مزرعة",
-  "7": "مستودع",
-  "9": "محل تجاري",
-  "10": "دور",
-  "21": "أرض سكنية",
-  "22": "أرض تجارية",
-  "24": "فندق",
-  "28": "مبنى تجاري",
-  "67": "عمارة سكنية",
-};
-const REGIONS: Record<string, string> = {
-  "1": "منطقة الرياض",
-  "2": "منطقة مكة المكرمة",
-  "3": "منطقة المدينة المنورة",
-  "4": "منطقة القصيم",
-  "5": "المنطقة الشرقية",
-  "6": "منطقة عسير",
-  "7": "منطقة تبوك",
-  "8": "منطقة حائل",
-  "9": "منطقة الحدود الشمالية",
-  "10": "منطقة جازان",
-  "11": "منطقة نجران",
-  "12": "منطقة الباحة",
-  "13": "منطقة الجوف",
-};
-const BUILDING_STATES: Record<string, string> = {
-  "10001": "جديد",
-  "10002": "مستخدم",
-  "10003": "تحت الإنشاء",
-  "10004": "اخرى",
-};
-const FINISH_LEVELS: Record<string, string> = {
-  "23": "تشطيب فاخر",
-  "24": "تشطيب متوسط",
-  "25": "تشطيب عادي",
-  "10006": "بدون تشطيب",
-};
-const BUILD_QUALITY: Record<string, string> = {
-  "44": "ممتاز",
-  "45": "جيد جداً",
-  "46": "ردئ",
-  "10058": "جيد",
+const MIME_MAP: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
 };
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+function buildSignatoryMap(company: CompanyDoc | null): SignatoryMap {
+  const map: SignatoryMap = new Map();
+  if (!company) return map;
 
-function fileToDataUri(filePath: string): string | null {
+  for (const s of company.reportOnlySignatories ?? []) {
+    if (!s?.id) continue;
+    map.set(s.id, {
+      name: s.name ?? "—",
+      jobTitle: s.jobTitle ?? "—",
+      membershipNo: s.membershipNo ?? "—",
+      signatureImageDataUrl: s.signatureImageDataUrl ?? null,
+    });
+  }
+
+  return map;
+}
+
+async function fileToDataUri(absPath: string): Promise<string | null> {
   try {
-    const abs = path.isAbsolute(filePath)
-      ? filePath
-      : path.join(process.cwd(), filePath);
-    if (!fs.existsSync(abs)) return null;
-    const buf = fs.readFileSync(abs);
-    const ext = path.extname(filePath).toLowerCase().replace(".", "");
-    const mimeMap: Record<string, string> = {
-      jpg: "image/jpeg",
-      jpeg: "image/jpeg",
-      png: "image/png",
-      gif: "image/gif",
-      webp: "image/webp",
-      bmp: "image/bmp",
-    };
-    const mime = mimeMap[ext] ?? "image/jpeg";
+    const buf = await fs.readFile(absPath);
+    const ext = path.extname(absPath).toLowerCase().replace(".", "");
+    const mime = MIME_MAP[ext] ?? "image/jpeg";
     return `data:${mime};base64,${buf.toString("base64")}`;
   } catch {
     return null;
   }
 }
 
-function resolveFilePath(filePath: string): string {
-  return path.isAbsolute(filePath)
-    ? filePath
-    : path.join(process.cwd(), filePath);
-}
+// ── free, keyless static map image ──────────────────────────────────────
+// Tries a couple of free, no-API-key static-map renderers in order and
+// falls back to a text note on the maps page if both are unreachable. The
+// previous single-provider version (staticmap.openstreetmap.de only) was
+// silently failing — that community server is flaky/rate-limited and was
+// sometimes returning a non-2xx or an HTML error page instead of an image,
+// which we weren't validating for.
+//
+// 1) Wikimedia Maps — free, no key, backed by Wikimedia's own infra (more
+//    reliable uptime than staticmap.openstreetmap.de). No marker pin support,
 
 // ─── Python worker invocation ──────────────────────────────────────────────────
 
 /**
  * Finds the Python executable to use.
- * Looks for a venv at <cwd>/pdf-worker/venv first, then falls back to
- * `python3` / `python` on PATH.
+ * Looks for a venv at <cwd>/pdf-worker/.venv first, then falls back to
+ * <cwd>/pdf-worker/venv and finally `python3` / `python` on PATH.
  */
 function findPythonBin(): string {
   const venvPaths = [
@@ -165,205 +89,239 @@ function findPythonBin(): string {
     path.join(process.cwd(), "pdf-worker", "venv", "bin", "python"),
     path.join(process.cwd(), "pdf-worker", "venv", "Scripts", "python.exe"),
   ];
+
   for (const p of venvPaths) {
-    if (fs.existsSync(p)) return p;
+    if (fsSync.existsSync(p)) return p;
   }
-  return "python3"; // fallback — must be on PATH
+
+  return process.platform === "win32" ? "python" : "python3";
 }
 
-function findScriptPath(): string {
-  const candidates = [
-    path.join(process.cwd(), "pdf-worker", "generate_pdf.py"),
-    path.join(__dirname, "generate_pdf.py"),
-    path.join(__dirname, "../../pdf-worker/generate_pdf.py"),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+async function fetchImageAsDataUri(url: string): Promise<string | null> {
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": "SparkVisionValuationReport/1.0" },
+    });
+
+    if (!r.ok) {
+      console.warn(`Map fetch failed (${r.status} ${r.statusText}): ${url}`);
+      return null;
+    }
+
+    const contentType = r.headers.get("content-type") || "";
+    if (!contentType.startsWith("image/")) {
+      console.warn(
+        `Map fetch returned non-image content-type "${contentType}": ${url}`,
+      );
+      return null;
+    }
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length < 500) {
+      console.warn(
+        `Map fetch returned suspiciously small image (${buf.length} bytes)`,
+      );
+      return null;
+    }
+
+    return `data:${contentType};base64,${buf.toString("base64")}`;
+  } catch (e) {
+    console.warn(`Map fetch threw for ${url}: ${(e as Error).message}`);
+    return null;
   }
-  throw new Error(
-    "generate_pdf.py not found. Expected at pdf-worker/generate_pdf.py",
-  );
 }
 
-async function runPythonWorker(payload: object): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const python = findPythonBin();
-    const script = findScriptPath();
+import sharp from "sharp";
 
-    const child = spawn(python, [script], {
-      cwd: process.cwd(),
-      timeout: 120_000, // 2 min hard limit
-    });
+const TILE_SIZE = 256;
+const MAP_WIDTH = 700;
+const MAP_HEIGHT = 340;
+const ZOOM = 16;
 
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
+function latLngToPixel(lat: number, lng: number, zoom: number) {
+  const scale = TILE_SIZE * Math.pow(2, zoom);
 
-    child.stdout.on("data", (d: Buffer) => chunks.push(d));
-    child.stderr.on("data", (d: Buffer) => errChunks.push(d));
+  const x = ((lng + 180) / 360) * scale;
 
-    child.on("error", (err) => {
-      reject(new Error(`Failed to spawn Python worker: ${err.message}`));
-    });
+  const latRad = (lat * Math.PI) / 180;
+  const y =
+    ((1 -
+      Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) /
+      2) *
+    scale;
 
-    child.on("close", (code) => {
-      const stderr = Buffer.concat(errChunks).toString("utf8");
-      if (stderr) {
-        // Log Python's stderr (debug info + errors) but don't fail on it
-        console.log("[python worker stderr]\n" + stderr);
-      }
-      if (code !== 0) {
-        reject(new Error(`Python worker exited with code ${code}.\n${stderr}`));
-        return;
-      }
-      resolve(Buffer.concat(chunks));
-    });
+  return { x, y };
+}
 
-    // Write JSON payload to stdin and close it
-    const json = JSON.stringify(payload);
-    child.stdin.on("error", (err) => {
-      console.error("stdin error:", err);
-    });
+async function fetchTile(
+  x: number,
+  y: number,
+  zoom: number,
+): Promise<Buffer> {
+  const max = Math.pow(2, zoom);
 
-    child.stdin.end(json, "utf8");
+  // Wrap longitude around the world.
+  const wrappedX = ((x % max) + max) % max;
+
+  // Latitude cannot wrap.
+  if (y < 0 || y >= max) {
+    throw new Error(`Invalid OSM tile Y coordinate: ${y}`);
+  }
+
+  const url = `https://tile.openstreetmap.org/${zoom}/${wrappedX}/${y}.png`;
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "SparkVisionValuationReport/1.0 (contact: aasimq194@gmail.com)",
+    },
   });
+
+  if (!response.ok) {
+    throw new Error(
+      `OSM tile fetch failed (${response.status} ${response.statusText}): ${url}`,
+    );
+  }
+
+  return Buffer.from(await response.arrayBuffer());
 }
 
-// ─── PDF Service ───────────────────────────────────────────────────────────────
+async function fetchMapImage(
+  lat: string | number,
+  lng: string | number,
+): Promise<string | null> {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+
+  if (
+    !Number.isFinite(latNum) ||
+    !Number.isFinite(lngNum) ||
+    latNum < -90 ||
+    latNum > 90 ||
+    lngNum < -180 ||
+    lngNum > 180
+  ) {
+    console.warn(`Map skipped: invalid lat/lng ("${lat}", "${lng}")`);
+    return null;
+  }
+
+  const apiKey = process.env.GEOAPIFY_API_KEY;
+
+  if (!apiKey) {
+    console.warn("Map skipped: GEOAPIFY_API_KEY is not configured");
+    return null;
+  }
+
+  const url =
+    `https://maps.geoapify.com/v1/staticmap` +
+    `?style=osm-bright` +
+    `&width=700` +
+    `&height=340` +
+    `&center=lonlat:${lngNum},${latNum}` +
+    `&zoom=16` +
+    `&marker=lonlat:${lngNum},${latNum};type:material;color:%23ff0000;size:medium` +
+    `&apiKey=${encodeURIComponent(apiKey)}`;
+
+  return fetchImageAsDataUri(url);
+}
+
+// Puppeteer's launch is somewhat expensive — reuse a single browser instance
+// across requests within this process rather than spawning one per PDF.
+let browserPromise: Promise<any> | null = null;
+function getBrowser(): Promise<any> {
+  if (!browserPromise) {
+    browserPromise = import("puppeteer").then(({ default: puppeteer }) =>
+      puppeteer.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      })
+    );
+  }
+  return browserPromise;
+}
 
 @Injectable()
-export class TransactionsPdfService {
-  private readonly logger = new Logger(TransactionsPdfService.name);
+export class TransactionsPdfHtmlService {
+  private readonly logger = new Logger(TransactionsPdfHtmlService.name);
 
   async generatePdf(id: string, res: Response): Promise<void> {
     this.logger.log(`Starting PDF generation for transaction: ${id}`);
 
-    if (!ObjectId.isValid(id)) {
-      throw new NotFoundException("المعاملة غير موجودة");
-    }
+    if (!ObjectId.isValid(id)) throw new NotFoundException("المعاملة غير موجودة");
 
     const db = await getMongoDb();
     const tx = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOne({ _id: new ObjectId(id) });
-
     if (!tx) throw new NotFoundException("المعاملة غير موجودة");
 
-    this.logger.log(`Transaction found: ${tx.assignmentNumber || id}`);
+    const company = tx.companyId
+         ? await db.collection<CompanyDoc>(COMPANIES_COLLECTION).findOne({ _id: new ObjectId(tx.companyId) })
+         : null;
+       const signatories = buildSignatoryMap(company);
 
-    const ev = { ...emptyEvalData(), ...(tx.evalData ?? {}) };
+       const ev = { ...emptyEvalData(), ...(tx.evalData ?? {}) };
 
-    // ── Attachments ────────────────────────────────────────────────────────────
-    const attachmentDocs = await db
-      .collection<AttachmentDoc>(ATTACHMENTS_COLLECTION)
-      .find({ transactionId: id })
-      .sort({ uploadedAt: 1 })
-      .toArray();
+    const [attachmentDocs, imageDocs, mapImageDataUri] = await Promise.all([
+      db
+        .collection<AttachmentDoc>(ATTACHMENTS_COLLECTION)
+        .find({ transactionId: id })
+        .sort({ uploadedAt: 1 })
+        .toArray(),
+      db
+        .collection<ImageDoc>(IMAGES_COLLECTION)
+        .find({ transactionId: id })
+        .sort({ sortIndex: 1 })
+        .toArray(),
+      fetchMapImage(ev.lat, ev.lng),
+    ]);
 
-    const imageDocs = await db
-      .collection<ImageDoc>(IMAGES_COLLECTION)
-      .find({ transactionId: id })
-      .sort({ sortIndex: 1 })
-      .toArray();
-
-    this.logger.log(
-      `Attachments: ${attachmentDocs.length}, images: ${imageDocs.length}`,
-    );
-
-    // ── Build label map ────────────────────────────────────────────────────────
-    const bl: Record<string, string> = {};
-    for (const [, entry] of Object.entries(tx.templateFieldValues ?? {})) {
-      if (entry?.label) bl[entry.label] = entry.value ?? "";
-    }
-
-    // ── Comparison rows ────────────────────────────────────────────────────────
-    const compRows = (ev.comparisonRows ?? []).filter(
-      (r: any) => r.inReport !== false,
-    );
-
-    // ── Load image data URIs — property images ─────────────────────────────────
-    const seenUris = new Set<string>();
-    // ── Load image data URIs — property images ─────────────────────────────────
-    const images: { dataUri: string; name: string }[] = [];
-
+    // ── property images (rendered inline, 3/row grid) ──
+    const images: ReportImage[] = [];
     for (const img of imageDocs) {
       let dataUri: string | null = null;
-
       if (img.url) {
-        // Cloudinary-backed: fetch from URL
         try {
-          const response = await fetch(img.url);
-          const arrayBuffer = await response.arrayBuffer();
-          const buf = Buffer.from(arrayBuffer);
-          const mime = img.mimeType || "image/jpeg";
-          dataUri = `data:${mime};base64,${buf.toString("base64")}`;
+          const r = await fetch(img.url);
+          const buf = Buffer.from(await r.arrayBuffer());
+          dataUri = `data:${img.mimeType || "image/jpeg"};base64,${buf.toString("base64")}`;
         } catch {
           this.logger.warn(`Failed to fetch remote image: ${img.url}`);
           continue;
         }
       } else if (img.filePath) {
-        // Local file
-        const abs = resolveFilePath(img.filePath);
-        if (!fs.existsSync(abs)) {
+        dataUri = await fileToDataUri(resolveFilePath(img.filePath));
+        if (!dataUri) {
           this.logger.warn(`Image not found: ${img.filePath}`);
           continue;
         }
-        const buf = fs.readFileSync(abs);
-        const ext = path.extname(img.filePath).toLowerCase().replace(".", "");
-        const mimeMap: Record<string, string> = {
-          jpg: "image/jpeg",
-          jpeg: "image/jpeg",
-          png: "image/png",
-          gif: "image/gif",
-          webp: "image/webp",
-          bmp: "image/bmp",
-        };
-        const mime = mimeMap[ext] ?? "image/jpeg";
-        dataUri = `data:${mime};base64,${buf.toString("base64")}`;
       } else {
-        this.logger.warn(`Image doc ${img._id} has neither filePath nor url`);
         continue;
       }
-
-      images.push({
-        dataUri,
-        name: img.name || img.originalName,
-      });
+      images.push({ dataUri, name: img.name || img.originalName });
     }
-    // ── Load image attachment data URIs ────────────────────────────────────────
-    const imageAttachments: { dataUri: string; name: string }[] = [];
-    const pdfAttachments: {
-      filePath: string;
-      name: string;
-      size: number;
-      mimeType: string;
-    }[] = [];
-    const otherAttachments: { name: string; size: number; mimeType: string }[] =
-      [];
+
+    // ── attachments, split by kind ──
+    const pdfAttachments: PdfAttachment[] = [];
+    const imageAttachments: ImageAttachment[] = [];
+    const otherAttachments: OtherAttachment[] = [];
 
     for (const att of attachmentDocs) {
-      if (att.mimeType.startsWith("image/")) {
-        const abs = resolveFilePath(att.filePath);
-        if (!fs.existsSync(abs)) {
-          this.logger.warn(`Image attachment not found: ${att.filePath}`);
-          continue;
-        }
-        const buf = fs.readFileSync(abs);
-        imageAttachments.push({
-          dataUri: `data:${att.mimeType};base64,${buf.toString("base64")}`,
-          name: att.name || att.originalName,
-        });
-      } else if (att.mimeType === "application/pdf") {
-        const abs = resolveFilePath(att.filePath);
-        if (!fs.existsSync(abs)) {
+      const abs = resolveFilePath(att.filePath);
+      if (att.mimeType === "application/pdf") {
+        try {
+          const bytes = await fs.readFile(abs);
+          pdfAttachments.push({ name: att.name || att.originalName, bytes });
+        } catch {
           this.logger.warn(`PDF attachment not found: ${abs}`);
-          continue;
         }
-        pdfAttachments.push({
-          filePath: abs,
-          name: att.name || att.originalName,
-          size: att.size,
-          mimeType: att.mimeType,
-        });
+      } else if (att.mimeType.startsWith("image/")) {
+        const dataUri = await fileToDataUri(abs);
+        if (dataUri) {
+          imageAttachments.push({ dataUri, name: att.name || att.originalName });
+        } else {
+          this.logger.warn(`Image attachment not found: ${abs}`);
+        }
       } else {
         otherAttachments.push({
           name: att.name || att.originalName,
@@ -373,57 +331,54 @@ export class TransactionsPdfService {
       }
     }
 
-    this.logger.log(
-      `Payload: ${images.length} property images, ${imageAttachments.length} image attachments, ` +
-        `${pdfAttachments.length} PDF attachments, ${otherAttachments.length} others`,
-    );
-
-    // ── Build payload for Python ───────────────────────────────────────────────
-    const payload = {
-      fontDir: path.join(process.cwd(), "assets/fonts"),
-      tx: { ...tx, _id: id },
-      ev,
-      bl,
-      compRows,
+    // ── build report data + HTML ──
+    const reportData = buildReportData(tx, ev, {
       images,
-      imageAttachments,
       pdfAttachments,
+      imageAttachments,
       otherAttachments,
-      labelMaps: {
-        valuationPurposes: VALUATION_PURPOSES,
-        valuationBases: VALUATION_BASES,
-        ownershipTypes: OWNERSHIP_TYPES,
-        valuationHypotheses: VALUATION_HYPOTHESES,
-        propertyTypes: PROPERTY_TYPES,
-        regions: REGIONS,
-        buildingStates: BUILDING_STATES,
-        finishLevels: FINISH_LEVELS,
-        buildQuality: BUILD_QUALITY,
-      },
-    };
+      mapImageDataUri,
+    }, signatories);
+    const html = renderReportHtml(reportData);
 
-    // ── Call Python worker ─────────────────────────────────────────────────────
-    this.logger.log(`Calling Python PDF worker...`);
-    let pdfBuffer: Buffer;
+    // ── render main report to PDF via Puppeteer ──
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    let mainPdfBytes: Buffer;
     try {
-      pdfBuffer = await runPythonWorker(payload);
-    } catch (err) {
-      this.logger.error(`Python worker failed: ${(err as Error).message}`);
-      res.status(500).json({
-        error: "Failed to generate PDF",
-        details: (err as Error).message,
+      await page.setContent(html, { waitUntil: "load" });
+      // NB: pages no longer clip overflow (see report-template.ts CSS
+      // changes), so a card/table that runs long now correctly spills onto
+      // an extra physical PDF page instead of being cut off.
+      const pdfBytes = await page.pdf({
+        width: "794px",
+        height: "1123px",
+        printBackground: true,
+        margin: { top: "0", bottom: "0", left: "0", right: "0" },
       });
-      return;
+      mainPdfBytes = Buffer.from(pdfBytes);
+    } finally {
+      await page.close();
     }
 
-    this.logger.log(`PDF generated: ${pdfBuffer.length} bytes`);
+    // ── merge in the real attachment PDFs, page-for-page ──
+    const finalDoc = await PDFDocument.load(mainPdfBytes);
+    for (const att of pdfAttachments) {
+      try {
+        const attDoc = await PDFDocument.load(att.bytes, { ignoreEncryption: true });
+        const copiedPages = await finalDoc.copyPages(attDoc, attDoc.getPageIndices());
+        copiedPages.forEach((p) => finalDoc.addPage(p));
+      } catch (e) {
+        this.logger.warn(`Failed to merge attachment PDF "${att.name}": ${(e as Error).message}`);
+      }
+    }
+
+    const finalBytes = await finalDoc.save();
+    this.logger.log(`PDF generated: ${finalBytes.length} bytes`);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="valuation-${id}.pdf"`,
-    );
-    res.end(pdfBuffer);
-    this.logger.log(`PDF sent successfully`);
+    res.setHeader("Content-Disposition", `attachment; filename="valuation-${id}.pdf"`);
+    res.end(Buffer.from(finalBytes));
+    this.logger.log("PDF sent successfully");
   }
 }

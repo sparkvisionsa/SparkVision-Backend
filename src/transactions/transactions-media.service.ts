@@ -294,16 +294,19 @@ export class TransactionsMediaService {
   }
 
   // ── Images ────────────────────────────────────────────────────────────────
-
   async listImages(transactionId: string) {
     const db = await getMongoDb();
     await assertTransactionExists(db, transactionId);
 
     const filter = {
-      ...transactionIdFilter(transactionId),
-      $or: [
-        { mediaType: { $exists: false } }, // old docs have no mediaType
-        { mediaType: "image" }, // new docs explicitly typed as image
+      $and: [
+        transactionIdFilter(transactionId),
+        {
+          $or: [
+            { mediaType: { $exists: false } },
+            { mediaType: "image" },
+          ],
+        },
       ],
     } as Filter<Document>;
 
@@ -315,6 +318,7 @@ export class TransactionsMediaService {
 
     return raw.map((doc) => toImageJson(doc as unknown as ImageDoc));
   }
+
   async addImages(
     transactionId: string,
     files: Express.Multer.File[],
