@@ -25,6 +25,8 @@ type PptxMergeRequest = {
   useStoredProjectState?: boolean;
   /** Convert the merged PowerPoint to PDF and expose a download token. */
   alsoPdf?: boolean;
+  /** Stream only the final PDF. This avoids sending an unused large PPTX to a PDF preview. */
+  pdfOnly?: boolean;
   /** Optional per-export overrides; saved report settings remain the defaults. */
   imageLayout?: {
     assetImagesPerRow?: number;
@@ -845,7 +847,8 @@ export class PptxTemplateMergeService {
         "X-Pptx-Merge-Pdf-Available",
       ];
 
-      if (body.alsoPdf === true) {
+      const pdfOnly = body.pdfOnly === true;
+      if (body.alsoPdf === true || pdfOnly) {
         try {
           const pdfStartedAt = Date.now();
           const pdfPath = await convertPptxToPdf(outputPath, workDir, {
@@ -858,6 +861,17 @@ export class PptxTemplateMergeService {
           this.logger.log(
             `PowerPoint→PDF conversion completed for ${projectId} in ${Date.now() - pdfStartedAt}ms`,
           );
+          if (pdfOnly) {
+            const pdfStat = await fs.promises.stat(pdfPath);
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+              "Content-Disposition",
+              `attachment; filename="${encodeURIComponent(pdfName)}"`,
+            );
+            res.setHeader("Content-Length", String(pdfStat.size));
+            await pipeFileToResponse(pdfPath, res);
+            return;
+          }
           const pdfToken = storePendingPdfExport({
             projectId,
             sourcePdfPath: pdfPath,
@@ -868,6 +882,9 @@ export class PptxTemplateMergeService {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`PowerPoint→PDF conversion failed for ${projectId}: ${msg}`);
+          if (pdfOnly) {
+            throw new BadRequestException(`Could not convert the PowerPoint report to PDF: ${msg}`);
+          }
           res.setHeader("X-Pptx-Merge-Pdf", "0");
           res.setHeader("X-Pptx-Merge-Pdf-Error", encodeURIComponent(msg.slice(0, 300)));
         }

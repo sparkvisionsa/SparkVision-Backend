@@ -951,6 +951,8 @@ export class MachineValuationController {
       textValues?: Record<string, string>;
       templateId?: string;
       alsoPdf?: boolean;
+      /** Return the converted PDF directly instead of first downloading the DOCX. */
+      pdfOnly?: boolean;
       useStoredProjectState?: boolean;
       imageLayout?: {
         imagesPerRow?: number;
@@ -981,6 +983,8 @@ export class MachineValuationController {
       templateId?: string;
       useStoredProjectState?: boolean;
       alsoPdf?: boolean;
+      /** Return the converted PDF directly instead of first downloading the PPTX. */
+      pdfOnly?: boolean;
       imageLayout?: {
         assetImagesPerRow?: number;
         clientImagesPerRow?: number;

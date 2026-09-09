@@ -1269,8 +1269,10 @@ export class WordTemplateMergeService {
       textValues?: Record<string, string>;
       /** Selects one of the owning company's saved Word templates. */
       templateId?: string;
-      /** عند true: يُرجع ZIP يحتوي Word + PDF محوّل من نفس الملف. */
+      /** Convert the merged Word report to PDF. */
       alsoPdf?: boolean;
+      /** Stream only the final PDF. This avoids sending an unused large DOCX to a PDF preview. */
+      pdfOnly?: boolean;
       /** تجاهل نسخة الواجهة واقرأ أحدث بيانات وصور المشروع من قاعدة البيانات. */
       useStoredProjectState?: boolean;
       imageLayout?: {
@@ -1488,7 +1490,8 @@ export class WordTemplateMergeService {
         ].join(", "),
       );
 
-      const wantPdf = body.alsoPdf === true;
+      const pdfOnly = body.pdfOnly === true;
+      const wantPdf = body.alsoPdf === true || pdfOnly;
       if (wantPdf) {
         try {
           const pdfStartedAt = Date.now();
@@ -1498,6 +1501,17 @@ export class WordTemplateMergeService {
           this.logger.log(
             `Word→PDF conversion completed for ${projectId} in ${Date.now() - pdfStartedAt}ms`,
           );
+          if (pdfOnly) {
+            const pdfStat = await fs.promises.stat(pdfPath);
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+              "Content-Disposition",
+              `attachment; filename="${encodeURIComponent(pdfName)}"`,
+            );
+            res.setHeader("Content-Length", String(pdfStat.size));
+            await pipeFileToResponse(pdfPath, res);
+            return;
+          }
           const pdfToken = storePendingPdfExport({
             projectId,
             sourcePdfPath: pdfPath,
@@ -1508,6 +1522,9 @@ export class WordTemplateMergeService {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`Word→PDF conversion failed for ${projectId}: ${msg}`);
+          if (pdfOnly) {
+            throw new BadRequestException(`Could not convert the Word report to PDF: ${msg}`);
+          }
           res.setHeader("X-Word-Merge-Pdf", "0");
           res.setHeader(
             "X-Word-Merge-Pdf-Error",
