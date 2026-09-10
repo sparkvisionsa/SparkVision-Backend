@@ -274,9 +274,13 @@ export class TransactionsPdfHtmlService {
         .toArray(),
       db
         .collection<ImageDoc>(IMAGES_COLLECTION)
-        .find({ transactionId: id })
-        .sort({ sortIndex: 1 })
-        .toArray(),
+         .find({
+           transactionId: ObjectId.isValid(id)
+             ? { $in: [id, new ObjectId(id)] }
+             : id,
+         } as any)
+         .sort({ sortIndex: 1 })
+         .toArray(),
       fetchMapImage(ev.lat, ev.lng),
     ]);
 

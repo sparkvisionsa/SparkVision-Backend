@@ -834,7 +834,7 @@ function mapsPage(d: ReportData, pageNum: number): string {
 // ── Property images: 3-per-row grid, paginated, numbered captions ──────────
 function imagesPages(d: ReportData, startPageNum: number): string {
   if (!d.images.length) return "";
-  const PER_PAGE = 9;
+  const PER_PAGE = 15;
   const chunks: (typeof d.images)[] = [];
   for (let i = 0; i < d.images.length; i += PER_PAGE) chunks.push(d.images.slice(i, i + PER_PAGE));
 
@@ -922,7 +922,7 @@ function planPages(d: ReportData): PlannedPage[] {
   if (d.investmentApproach.used) plan.push({ key: "investment", title: "التقييم بأسلوب الدخل", pageCount: 1 });
   plan.push({ key: "opinion", title: "الرأي النهائي للقيمة", pageCount: 1 });
   plan.push({ key: "maps", title: "الملحقات — الخرائط", pageCount: 1 });
-  if (d.images.length) plan.push({ key: "images", title: "الصور والملحقات", pageCount: Math.ceil(d.images.length / 9) });
+  if (d.images.length) plan.push({ key: "images", title: "الصور والملحقات", pageCount: Math.ceil(d.images.length / 15) });
   const hasAttachments = d.pdfAttachments.length + d.imageAttachments.length + d.otherAttachments.length > 0;
   if (hasAttachments) plan.push({ key: "attachments", title: "المرفقات", pageCount: 1 + d.imageAttachments.length });
   return plan;
@@ -965,7 +965,7 @@ export function renderReportHtml(d: ReportData): string {
   const imgPages = imagesPages(d, pageNum);
   if (imgPages) {
     pages.push(imgPages);
-    pageNum += Math.ceil(d.images.length / 9);
+    pageNum += Math.ceil(d.images.length / 15);
   }
 
   const hasAttachments = d.pdfAttachments.length + d.imageAttachments.length + d.otherAttachments.length > 0;

@@ -473,11 +473,11 @@ function reportOnlySignatoryMatchesProduct(
 ): boolean {
   if (!productId) return true; // no filter requested — show all
   const ids = row.productIds ?? [];
-  if (ids.length === 0) {
-    // legacy/untagged rows default to machine-valuation only
-    return productId === LEGACY_UNTAGGED_PRODUCT_ID;
-  }
-  return ids.includes(productId);
+  // Untagged rows are not scoped to any single product — treat them as
+  // available everywhere, rather than silently defaulting to
+  // machine-valuation only.
+  if (ids.length === 0) return true;
+  return ids.includes(productId) || ids.includes("all" as ValueTechProductId);
 }
 
 function stripUnknown(input: Record<string, unknown> | undefined) {
@@ -4271,7 +4271,7 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
     );
 
   const reportOnlyRows = normalizeReportOnlySignatories(company?.reportOnlySignatories)
-    .filter((row) => (row.productIds ?? []).includes(productId)) // NEW
+    .filter((row) => reportOnlySignatoryMatchesProduct(row, productId))
     .map(reportOnlySignatoryToApiRow)
     .sort((a, b) => a.name.localeCompare(b.name, "ar"));
 
