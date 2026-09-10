@@ -82,6 +82,11 @@ IMAGE_SECTION_HEADINGS: dict[str, tuple[str, ...]] = {
         "مرفق 3: المستندات المستلمة من العميل",
         "مرفق3: المستندات المستلمة من العميل",
     ),
+    "certificate": (
+        "مرفق 4: شهادة التسجيل في بوابة «تقييم»",
+        "مرفق4: شهادة التسجيل في بوابة «تقييم»",
+        "مرفق 4: شهادة التسجيل في بوابة تقييم",
+    ),
 }
 DEFAULT_ASSET_IMAGE_MARKERS = (
     "صور_الاصول",
@@ -92,6 +97,12 @@ DEFAULT_VALUATION_IMAGE_MARKERS = (
 )
 DEFAULT_CLIENT_IMAGE_MARKERS = (
     "صور_ملفات_العميل",
+)
+DEFAULT_CERTIFICATE_IMAGE_MARKERS = (
+    "صور_شهادة_قيمة",
+    "صور_شهادة_النظام",
+    "sceCertificateImages",
+    "certificateImages",
 )
 
 REPORT_PREPARER_TABLE_HEADERS = (
@@ -3283,6 +3294,8 @@ def insert_client_images_after_section_heading(
     images: list[ImageSource],
     images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
     images_per_page: int = CLIENT_DOCS_IMAGES_PER_PAGE,
+    field: str = "client",
+    grid_name: str = "client_grid",
 ) -> int:
     """
     إدراج مستندات العميل بعد عنوان مرفق 3 فقط.
@@ -3297,7 +3310,7 @@ def insert_client_images_after_section_heading(
     children = list(body)
     target_idx, found_name = find_body_heading_index(
         children,
-        IMAGE_SECTION_HEADINGS["client"],
+        IMAGE_SECTION_HEADINGS[field],
     )
     if target_idx is None:
         log(
@@ -3314,7 +3327,7 @@ def insert_client_images_after_section_heading(
         body,
         insert_at,
         images,
-        "client_grid",
+        grid_name,
         images_per_row,
         images_per_page,
         section_metrics,
@@ -3327,9 +3340,11 @@ def apply_image_sections_docx_api(
     asset_images: list[ImageSource],
     valuation_images: list[ImageSource],
     client_images: list[ImageSource] | None = None,
+    certificate_images: list[ImageSource] | None = None,
     asset_image_marker_variables: set[str] | None = None,
     valuation_image_marker_variables: set[str] | None = None,
     client_image_marker_variables: set[str] | None = None,
+    certificate_image_marker_variables: set[str] | None = None,
     images_per_row: int = IMAGES_PER_ROW,
     images_per_page: int = IMAGES_PER_PAGE,
     client_images_per_row: int = CLIENT_DOCS_IMAGES_PER_ROW,
@@ -3340,7 +3355,7 @@ def apply_image_sections_docx_api(
 
     asset_max_side = adaptive_asset_max_side(len(asset_images))
     doc = Document(io.BytesIO(docx_bytes))
-    stats = {"asset": 0, "valuation": 0, "client": 0}
+    stats = {"asset": 0, "valuation": 0, "client": 0, "certificate": 0}
     # الأهم أولاً: حسابات القيمة + مستندات العميل قبل مئات صور الأصول،
     # حتى لا تفشل إضافتها بعد تضخّم المستند/تعارض معرّفات الرسم.
     valuation_marker_found, valuation_marker_inserted = insert_images_after_dynamic_marker(
@@ -3390,6 +3405,33 @@ def apply_image_sections_docx_api(
         client_images.clear()
     gc.collect()
     log(f"client images inserted: {stats['client']}")
+
+    certificate_marker_found, certificate_marker_inserted = insert_images_after_dynamic_marker(
+        doc,
+        certificate_images or [],
+        certificate_image_marker_variables or set(),
+        "certificate_grid",
+        client_images_per_row,
+        client_images_per_page,
+        log_label="certificate",
+        portrait=True,
+    )
+    stats["certificate"] = (
+        certificate_marker_inserted
+        if certificate_marker_found
+        else insert_client_images_after_section_heading(
+            doc,
+            certificate_images or [],
+            client_images_per_row,
+            client_images_per_page,
+            field="certificate",
+            grid_name="certificate_grid",
+        )
+    )
+    if certificate_images is not None:
+        certificate_images.clear()
+    gc.collect()
+    log(f"certificate images inserted: {stats['certificate']}")
 
     marker_found, marker_inserted = insert_asset_images_after_dynamic_marker(
         doc,
@@ -3501,13 +3543,23 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         "clientImageMarkerVariables",
         DEFAULT_CLIENT_IMAGE_MARKERS,
     )
+    certificate_image_marker_variables = marker_name_set(
+        "certificateImageMarkerVariables",
+        DEFAULT_CERTIFICATE_IMAGE_MARKERS,
+    )
     excluded_variable_names.update(asset_image_marker_variables)
     excluded_variable_names.update(valuation_image_marker_variables)
     excluded_variable_names.update(client_image_marker_variables)
+    excluded_variable_names.update(certificate_image_marker_variables)
     report_preparers_present, report_preparers = collect_report_preparers(payload)
     asset_images = collect_image_sources(payload, "assetImagePaths", "assetImagesBase64")
     valuation_images = collect_image_sources(payload, "valuationImagePaths", "valuationImagesBase64")
     client_images = collect_image_sources(payload, "clientImagePaths", "clientImagesBase64")
+    certificate_images = collect_image_sources(
+        payload,
+        "certificateImagePaths",
+        "certificateImagesBase64",
+    )
     image_layout = payload.get("imageLayout") if isinstance(payload.get("imageLayout"), dict) else {}
     try:
         image_quality = max(60, min(100, int(image_layout.get("imageQuality", 90))))
@@ -3548,7 +3600,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
 
     log(
         f"merge start: assets={len(asset_images)} valuation={len(valuation_images)} "
-        f"client={len(client_images)} output={'disk' if output_path else 'stdout'}"
+        f"client={len(client_images)} certificate={len(certificate_images)} output={'disk' if output_path else 'stdout'}"
     )
 
     in_buf = io.BytesIO(template_bytes)
@@ -3560,7 +3612,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
     variables_filled = 0
     header_wraps_normalized = 0
     redundant_page_breaks_removed = 0
-    img_stats = {"asset": 0, "valuation": 0, "client": 0}
+    img_stats = {"asset": 0, "valuation": 0, "client": 0, "certificate": 0}
     preparer_stats = {
         "tableFound": 0,
         "rowsRemoved": 0,
@@ -3691,18 +3743,22 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
         asset_images
         or valuation_images
         or client_images
+        or certificate_images
         or asset_image_marker_variables
         or valuation_image_marker_variables
         or client_image_marker_variables
+        or certificate_image_marker_variables
     ):
         result, img_stats = apply_image_sections_docx_api(
             result,
             asset_images,
             valuation_images,
             client_images=client_images,
+            certificate_images=certificate_images,
             asset_image_marker_variables=asset_image_marker_variables,
             valuation_image_marker_variables=valuation_image_marker_variables,
             client_image_marker_variables=client_image_marker_variables,
+            certificate_image_marker_variables=certificate_image_marker_variables,
             images_per_row=images_per_row,
             images_per_page=images_per_page,
             client_images_per_row=client_images_per_row,
@@ -3740,6 +3796,7 @@ def merge_package(payload: dict[str, Any]) -> bytes | None:
                 "assetImagesInserted": img_stats.get("asset", 0),
                 "valuationImagesInserted": img_stats.get("valuation", 0),
                 "clientImagesInserted": img_stats.get("client", 0),
+                "certificateImagesInserted": img_stats.get("certificate", 0),
             },
             ensure_ascii=False,
         )

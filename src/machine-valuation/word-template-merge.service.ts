@@ -38,9 +38,11 @@ type DiskMergeManifest = {
   assetImageMarkerVariables?: string[];
   valuationImageMarkerVariables?: string[];
   clientImageMarkerVariables?: string[];
+  certificateImageMarkerVariables?: string[];
   assetImagePaths: string[];
   valuationImagePaths: string[];
   clientImagePaths: string[];
+  certificateImagePaths: string[];
   reportPreparers: DiskReportPreparer[];
   imageLayout: MergeImageLayout;
 };
@@ -287,6 +289,7 @@ type MergeWorkerResult = {
     assetImagesInserted: number;
     valuationImagesInserted: number;
     clientImagesInserted: number;
+    certificateImagesInserted: number;
     reportPreparerTableFound: number;
     reportPreparerRowsRemoved: number;
     reportPreparersInserted: number;
@@ -307,6 +310,7 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
         assetImagesInserted: Number(parsed.assetImagesInserted ?? 0),
         valuationImagesInserted: Number(parsed.valuationImagesInserted ?? 0),
         clientImagesInserted: Number(parsed.clientImagesInserted ?? 0),
+        certificateImagesInserted: Number(parsed.certificateImagesInserted ?? 0),
         reportPreparerTableFound: Number(parsed.reportPreparerTableFound ?? 0),
         reportPreparerRowsRemoved: Number(parsed.reportPreparerRowsRemoved ?? 0),
         reportPreparersInserted: Number(parsed.reportPreparersInserted ?? 0),
@@ -322,6 +326,7 @@ function parseWorkerStats(stderr: string): MergeWorkerResult["stats"] {
     assetImagesInserted: 0,
     valuationImagesInserted: 0,
     clientImagesInserted: 0,
+    certificateImagesInserted: 0,
     reportPreparerTableFound: 0,
     reportPreparerRowsRemoved: 0,
     reportPreparersInserted: 0,
@@ -765,7 +770,7 @@ function readExcludedTemplateVariableNames(value: unknown): string[] {
   )];
 }
 
-const IMAGE_MARKER_SOURCE_KEYS = new Set(["images.asset", "images.valuation", "images.client"]);
+const IMAGE_MARKER_SOURCE_KEYS = new Set(["images.asset", "images.valuation", "images.client", "images.certificate"]);
 
 function dynamicTemplateValues(
   baseValues: Record<string, string>,
@@ -775,11 +780,13 @@ function dynamicTemplateValues(
   assetImageMarkerVariables: string[];
   valuationImageMarkerVariables: string[];
   clientImageMarkerVariables: string[];
+  certificateImageMarkerVariables: string[];
 } {
   const values = { ...baseValues };
   const assetImageMarkerVariables: string[] = [];
   const valuationImageMarkerVariables: string[] = [];
   const clientImageMarkerVariables: string[] = [];
+  const certificateImageMarkerVariables: string[] = [];
   for (const mapping of mappings) {
     // Keep marker text intact until the DOCX worker has measured its
     // actual position and inserted the matching image grid beneath it.
@@ -789,8 +796,10 @@ function dynamicTemplateValues(
         assetImageMarkerVariables.push(mapping.variable);
       } else if (mapping.sourceKey === "images.valuation") {
         valuationImageMarkerVariables.push(mapping.variable);
-      } else {
+      } else if (mapping.sourceKey === "images.client") {
         clientImageMarkerVariables.push(mapping.variable);
+      } else {
+        certificateImageMarkerVariables.push(mapping.variable);
       }
       continue;
     }
@@ -812,6 +821,7 @@ function dynamicTemplateValues(
     assetImageMarkerVariables: [...new Set(assetImageMarkerVariables)],
     valuationImageMarkerVariables: [...new Set(valuationImageMarkerVariables)],
     clientImageMarkerVariables: [...new Set(clientImageMarkerVariables)],
+    certificateImageMarkerVariables: [...new Set(certificateImageMarkerVariables)],
   };
 }
 
@@ -1263,9 +1273,11 @@ export class WordTemplateMergeService {
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
       clientImageUrls?: string[];
+      certificateImageUrls?: string[];
       assetImagesBase64?: string[];
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
+      certificateImagesBase64?: string[];
       textValues?: Record<string, string>;
       /** Selects one of the owning company's saved Word templates. */
       templateId?: string;
@@ -1331,8 +1343,17 @@ export class WordTemplateMergeService {
       fallback: "client",
       project,
     });
+    const certificateSources = await this.resolveImageSources({
+      projectId,
+      ctx,
+      urls: useStoredProjectState ? undefined : body.certificateImageUrls,
+      base64List: useStoredProjectState ? undefined : body.certificateImagesBase64,
+      fallback: "certificate",
+      project,
+    });
 
-    const imageCount = assetSources.length + valuationSources.length + clientSources.length;
+    const imageCount =
+      assetSources.length + valuationSources.length + clientSources.length + certificateSources.length;
     const imageLayout = sanitizeImageLayout({
       imagesPerRow: reportData.wordAssetImagesPerRow,
       clientImagesPerRow: reportData.clientDocumentsImagesPerRow,
@@ -1357,16 +1378,18 @@ export class WordTemplateMergeService {
       const assetDir = path.join(workDir, "asset");
       const valuationDir = path.join(workDir, "valuation");
       const clientDir = path.join(workDir, "client");
+      const certificateDir = path.join(workDir, "certificate");
       await fs.promises.mkdir(assetDir, { recursive: true });
       await fs.promises.mkdir(valuationDir, { recursive: true });
       await fs.promises.mkdir(clientDir, { recursive: true });
+      await fs.promises.mkdir(certificateDir, { recursive: true });
 
       const prepareStartedAt = Date.now();
       this.logger.log(
         `Preparing Word merge for ${projectId}: ${assetSources.length} asset, ${valuationSources.length} valuation, ${clientSources.length} client images (disk pipeline, asset≤${assetSettings.maxWidth}px, concurrency=${MV_MERGE_ASSET_FETCH_CONCURRENCY}/${MV_MERGE_PRINT_FETCH_CONCURRENCY})`,
       );
 
-      const [assetImagePaths, valuationImagePaths, clientImagePaths, reportPreparers] = await Promise.all([
+      const [assetImagePaths, valuationImagePaths, clientImagePaths, certificateImagePaths, reportPreparers] = await Promise.all([
         this.materializeImagesToDisk(assetSources, assetDir, "a", assetSettings, projectId, ctx),
         this.materializeImagesToDisk(
           valuationSources,
@@ -1377,6 +1400,14 @@ export class WordTemplateMergeService {
           ctx,
         ),
         this.materializeImagesToDisk(clientSources, clientDir, "c", clientSettings, projectId, ctx),
+        this.materializeImagesToDisk(
+          certificateSources,
+          certificateDir,
+          "s",
+          clientSettings,
+          projectId,
+          ctx,
+        ),
         this.resolveReportPreparers(reportData, project.companyId, ctx),
       ]);
       this.logger.log(
@@ -1415,9 +1446,11 @@ export class WordTemplateMergeService {
         assetImageMarkerVariables: configuredValues.assetImageMarkerVariables,
         valuationImageMarkerVariables: configuredValues.valuationImageMarkerVariables,
         clientImageMarkerVariables: configuredValues.clientImageMarkerVariables,
+        certificateImageMarkerVariables: configuredValues.certificateImageMarkerVariables,
         assetImagePaths,
         valuationImagePaths,
         clientImagePaths,
+        certificateImagePaths,
         reportPreparers,
         imageLayout,
       };
@@ -1460,6 +1493,11 @@ export class WordTemplateMergeService {
         "صور ملفات العميل",
         clientSources.length,
         stats.clientImagesInserted,
+      );
+      appendImageWarning(
+        "صور شهادة نظام الهيئة",
+        certificateSources.length,
+        stats.certificateImagesInserted,
       );
       if (imageWarnings.length > 0) {
         this.logger.warn(
@@ -1583,8 +1621,13 @@ export class WordTemplateMergeService {
     ctx: MvAccessContext;
     urls?: string[];
     base64List?: string[];
-    fallback: "assets" | "valuation" | "client";
-    project?: { _id?: unknown; valuationAccountingWorkspace?: unknown; clientDocumentsWorkspace?: unknown };
+    fallback: "assets" | "valuation" | "client" | "certificate";
+    project?: {
+      _id?: unknown;
+      valuationAccountingWorkspace?: unknown;
+      clientDocumentsWorkspace?: unknown;
+      sceCertificateWorkspace?: unknown;
+    };
   }): Promise<ImageSource[]> {
     const fromBase64: ImageSource[] = [];
     for (const item of opts.base64List ?? []) {
@@ -1613,7 +1656,11 @@ export class WordTemplateMergeService {
       const fileIds = this.listWorkspaceImageFileIds(opts.project?.valuationAccountingWorkspace);
       return fileIds.map((fileId) => ({ kind: "fileId" as const, fileId }));
     }
-    const fileIds = this.listWorkspaceImageFileIds(opts.project?.clientDocumentsWorkspace);
+    const workspace =
+      opts.fallback === "certificate"
+        ? opts.project?.sceCertificateWorkspace
+        : opts.project?.clientDocumentsWorkspace;
+    const fileIds = this.listWorkspaceImageFileIds(workspace);
     this.logger.log(
       `Word merge client images fallback for ${opts.projectId}: ${fileIds.length} fileId(s) from workspace`,
     );

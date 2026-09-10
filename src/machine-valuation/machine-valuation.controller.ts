@@ -349,6 +349,7 @@ export class MachineValuationController {
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
       clientDocumentsWorkspace?: unknown | null;
+      sceCertificateWorkspace?: unknown | null;
     },
   ) {
     const context = await resolveRequestContext(req);
@@ -373,6 +374,7 @@ export class MachineValuationController {
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
       clientDocumentsWorkspace?: unknown | null;
+      sceCertificateWorkspace?: unknown | null;
     },
   ) {
     const context = await resolveRequestContext(req);
@@ -945,9 +947,11 @@ export class MachineValuationController {
       assetImageUrls?: string[];
       valuationImageUrls?: string[];
       clientImageUrls?: string[];
+      certificateImageUrls?: string[];
       assetImagesBase64?: string[];
       valuationImagesBase64?: string[];
       clientImagesBase64?: string[];
+      certificateImagesBase64?: string[];
       textValues?: Record<string, string>;
       templateId?: string;
       alsoPdf?: boolean;

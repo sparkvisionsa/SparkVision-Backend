@@ -801,6 +801,7 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   return {
     reportDataModelId: sanitizeOptionalText(data.reportDataModelId, 120),
+    reportSectionModelId: sanitizeOptionalText(data.reportSectionModelId, 120),
     reportReference: sanitizeOptionalText(data.reportReference, 120),
     reportTitle: sanitizeOptionalText(data.reportTitle, 220),
     valuationMethod: sanitizeOptionalText(data.valuationMethod, 120),
@@ -912,6 +913,7 @@ function pickReportDataProgressSummary(raw: unknown): MvProjectReportData | unde
 
   const summary: MvProjectReportData = {
     reportDataModelId: pickText("reportDataModelId", 120),
+    reportSectionModelId: pickText("reportSectionModelId", 120),
     valuationMethod: pickText("valuationMethod", 120),
     reportReference: pickText("reportReference", 120),
     reportTitle: pickText("reportTitle", 220),
@@ -1116,6 +1118,15 @@ function sanitizeClientDocumentsWorkspaceForPersist(raw: unknown): Record<string
 
 function sanitizeClientDocumentsWorkspaceForClient(raw: unknown | undefined | null): unknown {
   return sanitizeValuationAccountingWorkspaceForClient(raw);
+}
+
+/** The certificate has the same safe image/PDF workspace contract as client documents. */
+function sanitizeSceCertificateWorkspaceForPersist(raw: unknown): Record<string, unknown> {
+  return sanitizeClientDocumentsWorkspaceForPersist(raw);
+}
+
+function sanitizeSceCertificateWorkspaceForClient(raw: unknown | undefined | null): unknown {
+  return sanitizeClientDocumentsWorkspaceForClient(raw);
 }
 
 function sanitizeValuationReadyExcelWorkspaceForPersist(raw: unknown): Record<string, unknown> {
@@ -5828,6 +5839,7 @@ export class MachineValuationService implements OnModuleInit {
         valuationAccountingWorkspace: null,
         valuationReadyExcelWorkspace: null,
         clientDocumentsWorkspace: null,
+        sceCertificateWorkspace: null,
       },
     };
   }
@@ -5846,6 +5858,7 @@ export class MachineValuationService implements OnModuleInit {
       valuationAccountingWorkspace?: unknown | null;
       valuationReadyExcelWorkspace?: unknown | null;
       clientDocumentsWorkspace?: unknown | null;
+      sceCertificateWorkspace?: unknown | null;
     } | null,
   ) {
     const db = await getMongoDb();
@@ -5942,6 +5955,16 @@ export class MachineValuationService implements OnModuleInit {
       }
     }
 
+    if (b.sceCertificateWorkspace !== undefined) {
+      if (b.sceCertificateWorkspace === null) {
+        $set.sceCertificateWorkspace = null;
+      } else {
+        $set.sceCertificateWorkspace = sanitizeSceCertificateWorkspaceForPersist(
+          b.sceCertificateWorkspace,
+        );
+      }
+    }
+
     if (Object.keys($set).length === 1) {
       throw new BadRequestException("No project fields to update");
     }
@@ -5992,6 +6015,9 @@ export class MachineValuationService implements OnModuleInit {
         clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(
           updated.clientDocumentsWorkspace,
         ),
+        sceCertificateWorkspace: sanitizeSceCertificateWorkspaceForClient(
+          updated.sceCertificateWorkspace,
+        ),
       },
       updatedAt: now.toISOString(),
     };
@@ -6034,6 +6060,11 @@ export class MachineValuationService implements OnModuleInit {
       )
         ? (project.clientDocumentsWorkspace as { images: unknown[] }).images.length
         : 0;
+      const sceCertificateImageCount = Array.isArray(
+        (project.sceCertificateWorkspace as { images?: unknown[] } | null | undefined)?.images,
+      )
+        ? (project.sceCertificateWorkspace as { images: unknown[] }).images.length
+        : 0;
       return {
         project: {
           _id: project._id.toString(),
@@ -6061,6 +6092,7 @@ export class MachineValuationService implements OnModuleInit {
           assetImageCount,
           valuationAccountImageCount,
           clientDocumentImageCount,
+          sceCertificateImageCount,
           createdByUserId:
             creatorOid?.toString() ??
             (typeof project.userId === "string" ? project.userId : null),
@@ -6073,6 +6105,9 @@ export class MachineValuationService implements OnModuleInit {
           valuationReadyExcelWorkspace: null,
           clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(
             project.clientDocumentsWorkspace,
+          ),
+          sceCertificateWorkspace: sanitizeSceCertificateWorkspaceForClient(
+            project.sceCertificateWorkspace,
           ),
         },
         subProjects: [],
@@ -6252,6 +6287,9 @@ export class MachineValuationService implements OnModuleInit {
         ),
         clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(
           project.clientDocumentsWorkspace,
+        ),
+        sceCertificateWorkspace: sanitizeSceCertificateWorkspaceForClient(
+          project.sceCertificateWorkspace,
         ),
       },
       subProjects: merged,

@@ -43,6 +43,8 @@ type PptxWorkerStats = {
   valuationImageMarkers: number;
   clientImagesInserted: number;
   clientImageMarkers: number;
+  certificateImagesInserted: number;
+  certificateImageMarkers: number;
   slidesAdded: number;
   warnings: string[];
 };
@@ -59,6 +61,7 @@ type PptxWorkerManifest = {
   assetImagePaths: string[];
   valuationImagePaths: string[];
   clientImagePaths: string[];
+  certificateImagePaths: string[];
   imageLayout: PptxImageLayout;
   /** Values intentionally left unchanged in this company's template. */
   excludedVariableNames?: string[];
@@ -66,6 +69,7 @@ type PptxWorkerManifest = {
   assetImageMarkerVariables?: string[];
   valuationImageMarkerVariables?: string[];
   clientImageMarkerVariables?: string[];
+  certificateImageMarkerVariables?: string[];
 };
 
 type StoredTemplateVariableMapping = {
@@ -284,7 +288,7 @@ function readExcludedTemplateVariableNames(value: unknown): string[] {
   )];
 }
 
-const IMAGE_MARKER_SOURCE_KEYS = new Set(["images.asset", "images.valuation", "images.client"]);
+const IMAGE_MARKER_SOURCE_KEYS = new Set(["images.asset", "images.valuation", "images.client", "images.certificate"]);
 
 function dynamicPptxTemplateValues(
   baseValues: Record<string, string>,
@@ -294,11 +298,13 @@ function dynamicPptxTemplateValues(
   assetImageMarkerVariables: string[];
   valuationImageMarkerVariables: string[];
   clientImageMarkerVariables: string[];
+  certificateImageMarkerVariables: string[];
 } {
   const textValues = { ...baseValues };
   const assetImageMarkerVariables: string[] = [];
   const valuationImageMarkerVariables: string[] = [];
   const clientImageMarkerVariables: string[] = [];
+  const certificateImageMarkerVariables: string[] = [];
   for (const mapping of mappings) {
     if (IMAGE_MARKER_SOURCE_KEYS.has(mapping.sourceKey)) {
       // Do not put an empty scalar under this key: the PPTX worker needs the
@@ -308,8 +314,10 @@ function dynamicPptxTemplateValues(
         assetImageMarkerVariables.push(mapping.variable);
       } else if (mapping.sourceKey === "images.valuation") {
         valuationImageMarkerVariables.push(mapping.variable);
-      } else {
+      } else if (mapping.sourceKey === "images.client") {
         clientImageMarkerVariables.push(mapping.variable);
+      } else {
+        certificateImageMarkerVariables.push(mapping.variable);
       }
       continue;
     }
@@ -332,6 +340,7 @@ function dynamicPptxTemplateValues(
     assetImageMarkerVariables: [...new Set(assetImageMarkerVariables)],
     valuationImageMarkerVariables: [...new Set(valuationImageMarkerVariables)],
     clientImageMarkerVariables: [...new Set(clientImageMarkerVariables)],
+    certificateImageMarkerVariables: [...new Set(certificateImageMarkerVariables)],
   };
 }
 
@@ -523,6 +532,8 @@ function parseWorkerStats(stderr: string): PptxWorkerStats {
     valuationImageMarkers: 0,
     clientImagesInserted: 0,
     clientImageMarkers: 0,
+    certificateImagesInserted: 0,
+    certificateImageMarkers: 0,
     slidesAdded: 0,
     warnings: [],
   };
@@ -539,6 +550,8 @@ function parseWorkerStats(stderr: string): PptxWorkerStats {
         valuationImageMarkers: Number(parsed.valuationImageMarkers ?? 0),
         clientImagesInserted: Number(parsed.clientImagesInserted ?? 0),
         clientImageMarkers: Number(parsed.clientImageMarkers ?? 0),
+        certificateImagesInserted: Number(parsed.certificateImagesInserted ?? 0),
+        certificateImageMarkers: Number(parsed.certificateImageMarkers ?? 0),
         slidesAdded: Number(parsed.slidesAdded ?? 0),
         warnings: Array.isArray(parsed.warnings) ? parsed.warnings.map(String).filter(Boolean) : [],
       };
@@ -552,7 +565,10 @@ function parseWorkerStats(stderr: string): PptxWorkerStats {
 function runPptxMergeWorker(manifest: PptxWorkerManifest): Promise<PptxWorkerStats> {
   const manifestPath = path.join(path.dirname(manifest.outputPath), "manifest.json");
   const imageCount =
-    manifest.assetImagePaths.length + manifest.valuationImagePaths.length + manifest.clientImagePaths.length;
+    manifest.assetImagePaths.length +
+    manifest.valuationImagePaths.length +
+    manifest.clientImagePaths.length +
+    manifest.certificateImagePaths.length;
   const timeoutMs = Math.min(15 * 60_000, Math.max(180_000, 90_000 + imageCount * 1_500));
   return fs.promises.writeFile(manifestPath, JSON.stringify(manifest), "utf8").then(
     () => new Promise<PptxWorkerStats>((resolve, reject) => {
@@ -763,10 +779,12 @@ export class PptxTemplateMergeService {
       const assetDir = path.join(workDir, "asset-images");
       const valuationDir = path.join(workDir, "valuation-images");
       const clientDir = path.join(workDir, "client-images");
+      const certificateDir = path.join(workDir, "certificate-images");
       await fs.promises.mkdir(assetDir, { recursive: true });
       await fs.promises.mkdir(valuationDir, { recursive: true });
       await fs.promises.mkdir(clientDir, { recursive: true });
-      const [imageMaterialization, valuationMaterialization, clientMaterialization] = await Promise.all([
+      await fs.promises.mkdir(certificateDir, { recursive: true });
+      const [imageMaterialization, valuationMaterialization, clientMaterialization, certificateMaterialization] = await Promise.all([
         this.materializeReportAssetImages(projectId, ctx, assetDir),
         this.materializeWorkspaceImages(
           projectId,
@@ -781,6 +799,13 @@ export class PptxTemplateMergeService {
           (project as { clientDocumentsWorkspace?: unknown }).clientDocumentsWorkspace,
           clientDir,
           "client",
+        ),
+        this.materializeWorkspaceImages(
+          projectId,
+          ctx,
+          (project as { sceCertificateWorkspace?: unknown }).sceCertificateWorkspace,
+          certificateDir,
+          "certificate",
         ),
       ]);
       const imageLayout = sanitizePptxImageLayout({
@@ -803,17 +828,20 @@ export class PptxTemplateMergeService {
         assetImagePaths: imageMaterialization.paths,
         valuationImagePaths: valuationMaterialization.paths,
         clientImagePaths: clientMaterialization.paths,
+        certificateImagePaths: certificateMaterialization.paths,
         imageLayout,
         excludedVariableNames: companyTemplateConfig.excludedVariableNames,
         assetImageMarkerVariables: configuredValues.assetImageMarkerVariables,
         valuationImageMarkerVariables: configuredValues.valuationImageMarkerVariables,
         clientImageMarkerVariables: configuredValues.clientImageMarkerVariables,
+        certificateImageMarkerVariables: configuredValues.certificateImageMarkerVariables,
       }));
 
       const warnings = [
         ...imageMaterialization.warnings,
         ...valuationMaterialization.warnings,
         ...clientMaterialization.warnings,
+        ...certificateMaterialization.warnings,
         ...stats.warnings,
       ];
       if (stats.assetImagesInserted < imageMaterialization.paths.length) {
@@ -855,7 +883,8 @@ export class PptxTemplateMergeService {
             timeoutMs: machineValuationPdfTimeoutMs(
               imageMaterialization.paths.length +
                 valuationMaterialization.paths.length +
-                clientMaterialization.paths.length,
+                clientMaterialization.paths.length +
+                certificateMaterialization.paths.length,
             ),
           });
           this.logger.log(
@@ -1000,7 +1029,7 @@ export class PptxTemplateMergeService {
     ctx: MvAccessContext,
     workspace: unknown,
     destinationDir: string,
-    label: "valuation" | "client",
+    label: "valuation" | "client" | "certificate",
   ): Promise<{ requested: number; paths: string[]; warnings: string[] }> {
     const fileIds = this.listWorkspaceImageFileIds(workspace).slice(0, MAX_PPTX_WORKSPACE_IMAGES);
     const warnings: string[] = [];

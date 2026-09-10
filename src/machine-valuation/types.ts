@@ -103,6 +103,8 @@ export interface MvReportCustomSection {
 export interface MvProjectReportData {
   /** Company report-data model selected for this simplified project. */
   reportDataModelId?: string;
+  /** Company report-section model selected for this project's final report. */
+  reportSectionModelId?: string;
   reportReference?: string;
   reportTitle?: string;
   valuationMethod?: string;
@@ -314,6 +316,8 @@ export interface MvProjectDoc {
   valuationReadyExcelWorkspace?: unknown;
   /** مستندات العميل (PDF/صور) لخطوة «ملفات العميل» ومرفق 3 / إشارة مستنداتعميل. */
   clientDocumentsWorkspace?: unknown;
+  /** شهادة التسجيل في بوابة «تقييم» (PDF/صور) لمرفق 4 ومتغيرات القوالب. */
+  sceCertificateWorkspace?: unknown;
 }
 
 export type MvProjectMongoDoc = WithId<MvProjectDoc>;

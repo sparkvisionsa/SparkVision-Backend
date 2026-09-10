@@ -41,6 +41,9 @@ import type {
   CompanyReportDataModel,
   CompanyReportDataModelField,
   CompanyReportDataModelSection,
+  CompanyReportSectionModel,
+  CompanyReportSectionModelItem,
+  CompanyReportSectionModelSection,
   CompanyMongoDoc,
   CompanyMembershipRole,
   CompanyReportDefaults,
@@ -3015,6 +3018,67 @@ function sanitizeCompanyReportDataModels(value: unknown): CompanyReportDataModel
   return models;
 }
 
+function sanitizeCompanyReportSectionModels(value: unknown): CompanyReportSectionModel[] {
+  if (!Array.isArray(value)) return [];
+  const seenModels = new Set<string>();
+  const models: CompanyReportSectionModel[] = [];
+  for (const rawModel of value.slice(0, 12)) {
+    if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) continue;
+    const data = rawModel as Record<string, unknown>;
+    const id = sanitizeReportDefaultsText(data.id, 120);
+    const name = sanitizeReportDefaultsText(data.name, 160);
+    if (!id || !name || seenModels.has(id)) continue;
+    seenModels.add(id);
+
+    const seenSections = new Set<string>();
+    const sections: CompanyReportSectionModelSection[] = [];
+    let itemCount = 0;
+    for (const rawSection of (Array.isArray(data.sections) ? data.sections.slice(0, 30) : [])) {
+      if (!rawSection || typeof rawSection !== "object" || Array.isArray(rawSection)) continue;
+      const sectionData = rawSection as Record<string, unknown>;
+      const sectionId = sanitizeReportDefaultsText(sectionData.id, 120);
+      const title = sanitizeReportDefaultsText(sectionData.title, 220);
+      if (!sectionId || !title || seenSections.has(sectionId)) continue;
+      seenSections.add(sectionId);
+
+      const seenItems = new Set<string>();
+      const items: CompanyReportSectionModelItem[] = [];
+      for (const rawItem of (Array.isArray(sectionData.items) ? sectionData.items : [])) {
+        if (itemCount >= 160) break;
+        if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
+        const itemData = rawItem as Record<string, unknown>;
+        const itemId = sanitizeReportDefaultsText(itemData.id, 120);
+        const itemTitle = sanitizeReportDefaultsText(itemData.title, 220);
+        if (!itemId || !itemTitle || seenItems.has(itemId)) continue;
+        seenItems.add(itemId);
+        items.push({
+          id: itemId,
+          title: itemTitle,
+          body: sanitizeReportDefaultsText(itemData.body, 50_000),
+          visibleInReport: itemData.visibleInReport !== false,
+        });
+        itemCount += 1;
+      }
+      sections.push({
+        id: sectionId,
+        title,
+        sectionNumber: sanitizeReportDefaultsText(sectionData.sectionNumber, 40),
+        visibleInReport: sectionData.visibleInReport !== false,
+        items,
+      });
+    }
+    if (sections.length === 0) continue;
+    models.push({
+      id,
+      name,
+      isDefault: data.isDefault === true,
+      visibleInReport: data.visibleInReport !== false,
+      sections,
+    });
+  }
+  return models;
+}
+
 function ensureCompanyReportTemplateIdentities<
   T extends { id?: string; name?: string; fileName?: string },
 >(templates: T[], kind: CompanyReportTemplateKind): T[] {
@@ -3144,6 +3208,7 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
     customGroups: sanitizeCompanyReportCustomGroups(data.customGroups),
     customSections: sanitizeCompanyReportCustomSections(data.customSections),
     reportDataModels: sanitizeCompanyReportDataModels(data.reportDataModels),
+    reportSectionModels: sanitizeCompanyReportSectionModels(data.reportSectionModels),
     letterhead: sanitizeCompanyReportLetterheadTemplate(data.letterhead),
     aiTemplates: sanitizeCompanyAiReportTemplates(data.aiTemplates),
     wordTemplates,
@@ -3179,6 +3244,7 @@ export function resolveCompanyReportDefaults(
   const customGroupsStored = sanitizeCompanyReportCustomGroups(stored?.customGroups);
   const customSectionsStored = sanitizeCompanyReportCustomSections(stored?.customSections);
   const reportDataModelsStored = sanitizeCompanyReportDataModels(stored?.reportDataModels);
+  const reportSectionModelsStored = sanitizeCompanyReportSectionModels(stored?.reportSectionModels);
   const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
   const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
   const legacyMappings = sanitizeCompanyReportTemplateVariableMappings(stored?.variableMappings);
@@ -3268,6 +3334,7 @@ export function resolveCompanyReportDefaults(
     customGroups: customGroupsStored,
     customSections: customSectionsStored,
     reportDataModels: reportDataModelsStored,
+    reportSectionModels: reportSectionModelsStored,
     letterhead: letterheadStored,
     aiTemplates: aiTemplatesStored,
     wordTemplates: wordTemplatesStored,
@@ -3529,6 +3596,37 @@ const updateCompanyReportDefaultsSchema = z.object({
                   }),
                 )
                 .max(120),
+            }),
+          )
+          .max(30),
+      }),
+    )
+    .max(12)
+    .optional(),
+  reportSectionModels: z
+    .array(
+      z.object({
+        id: z.string().max(120),
+        name: z.string().max(160),
+        isDefault: z.boolean().optional(),
+        visibleInReport: z.boolean().optional(),
+        sections: z
+          .array(
+            z.object({
+              id: z.string().max(120),
+              title: z.string().max(220),
+              sectionNumber: z.string().max(40).optional(),
+              visibleInReport: z.boolean().optional(),
+              items: z
+                .array(
+                  z.object({
+                    id: z.string().max(120),
+                    title: z.string().max(220),
+                    body: z.string().max(50_000).optional(),
+                    visibleInReport: z.boolean().optional(),
+                  }),
+                )
+                .max(160),
             }),
           )
           .max(30),

@@ -50,6 +50,12 @@ DEFAULT_CLIENT_IMAGE_MARKERS = (
     "صورملفاتالعميل",
     "clientImages",
 )
+DEFAULT_CERTIFICATE_IMAGE_MARKERS = (
+    "صور_شهادة_قيمة",
+    "صور_شهادة_النظام",
+    "sceCertificateImages",
+    "certificateImages",
+)
 ASSET_HEADING_HINTS = (
     "الصورالفوتوغرافية",
     "صورالأصول",
@@ -65,6 +71,11 @@ CLIENT_HEADING_HINTS = (
     "صورملفاتالعميل",
     "ملفاتالعميل",
     "المستنداتالمستلمةمنالعميل",
+)
+CERTIFICATE_HEADING_HINTS = (
+    "شهادةالتسجيلفيبوابةتقييم",
+    "شهادةنظامالهيئة",
+    "شهادةقيمة",
 )
 
 
@@ -797,6 +808,7 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
     asset_image_paths = [str(path) for path in manifest.get("assetImagePaths", []) if isinstance(path, str)]
     valuation_image_paths = [str(path) for path in manifest.get("valuationImagePaths", []) if isinstance(path, str)]
     client_image_paths = [str(path) for path in manifest.get("clientImagePaths", []) if isinstance(path, str)]
+    certificate_image_paths = [str(path) for path in manifest.get("certificateImagePaths", []) if isinstance(path, str)]
     raw_layout = manifest.get("imageLayout")
     image_layout = raw_layout if isinstance(raw_layout, dict) else {}
     def layout_columns(name: str, fallback: int) -> int:
@@ -819,10 +831,15 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
         manifest.get("clientImageMarkerVariables"),
         DEFAULT_CLIENT_IMAGE_MARKERS,
     )
+    certificate_image_marker_variables = marker_name_set(
+        manifest.get("certificateImageMarkerVariables"),
+        DEFAULT_CERTIFICATE_IMAGE_MARKERS,
+    )
     for marker_name in (
         asset_image_marker_variables
         | valuation_image_marker_variables
         | client_image_marker_variables
+        | certificate_image_marker_variables
     ):
         excluded_variable_names.add(marker_name)
 
@@ -845,6 +862,8 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
         "valuationImageMarkers": 0,
         "clientImagesInserted": 0,
         "clientImageMarkers": 0,
+        "certificateImagesInserted": 0,
+        "certificateImageMarkers": 0,
         "slidesAdded": 0,
         "warnings": [],
     }
@@ -852,6 +871,7 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
         ("asset", asset_image_marker_variables, ASSET_HEADING_HINTS),
         ("valuation", valuation_image_marker_variables, VALUATION_HEADING_HINTS),
         ("client", client_image_marker_variables, CLIENT_HEADING_HINTS),
+        ("certificate", certificate_image_marker_variables, CERTIFICATE_HEADING_HINTS),
     )
     variable_targets: dict[str, dict[str, str]] = {}
     heading_targets: dict[str, dict[str, str]] = {}
@@ -884,6 +904,7 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
         "asset": asset_image_marker_variables,
         "valuation": valuation_image_marker_variables,
         "client": client_image_marker_variables,
+        "certificate": certificate_image_marker_variables,
     }
     for kind, target in targets.items():
         if kind not in variable_targets:
@@ -938,6 +959,7 @@ def merge(manifest: dict[str, Any]) -> dict[str, Any]:
     insert_image_group("asset", asset_image_paths, asset_columns)
     insert_image_group("valuation", valuation_image_paths, 1, one_per_slide=True)
     insert_image_group("client", client_image_paths, client_columns)
+    insert_image_group("certificate", certificate_image_paths, client_columns)
 
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as output:
         for name, data in parts.items():

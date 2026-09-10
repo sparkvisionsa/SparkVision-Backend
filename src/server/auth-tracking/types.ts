@@ -268,6 +268,30 @@ export interface CompanyReportDataModel {
   sections: CompanyReportDataModelSection[];
 }
 
+/** A reusable, company-owned structure for the narrative sections of the final report. */
+export interface CompanyReportSectionModelItem {
+  id: string;
+  title: string;
+  body?: string;
+  visibleInReport?: boolean;
+}
+
+export interface CompanyReportSectionModelSection {
+  id: string;
+  title: string;
+  sectionNumber?: string;
+  visibleInReport?: boolean;
+  items: CompanyReportSectionModelItem[];
+}
+
+export interface CompanyReportSectionModel {
+  id: string;
+  name: string;
+  isDefault?: boolean;
+  visibleInReport?: boolean;
+  sections: CompanyReportSectionModelSection[];
+}
+
 /** قوالب التقرير النهائي الافتراضية على مستوى الشركة. */
 export interface CompanyReportDefaults {
   scope?: CompanyReportScopeDefaults;
@@ -287,6 +311,8 @@ export interface CompanyReportDefaults {
   excludedVariables?: CompanyReportTemplateExcludedVariables;
   /** Models offered before entering report data in a simplified project. */
   reportDataModels?: CompanyReportDataModel[];
+  /** Reusable narrative section models available when preparing a final report. */
+  reportSectionModels?: CompanyReportSectionModel[];
 }
 
 /**
