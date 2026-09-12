@@ -1390,6 +1390,171 @@ function mapPicAssetImagesStructure(
   return next;
 }
 
+/** هوية ثابتة للصورة، تُستخدم لتحديث اختيار التقرير من دون استبدال بنية ‎images‎. */
+function picAssetImageSelectionKeys(raw: unknown): string[] {
+  const keys = new Set<string>();
+  const addObjectId = (prefix: "file" | "id", value: unknown) => {
+    if (value instanceof ObjectId) {
+      keys.add(`${prefix}:${value.toString()}`);
+      return;
+    }
+    if (typeof value === "string" && ObjectId.isValid(value)) {
+      keys.add(`${prefix}:${value}`);
+    }
+  };
+  const addUrl = (value: unknown) => {
+    if (typeof value !== "string") return;
+    const url = value.trim();
+    if (url) keys.add(`url:${url}`);
+  };
+
+  if (raw instanceof ObjectId) {
+    addObjectId("file", raw);
+    return Array.from(keys);
+  }
+  if (typeof raw === "string") {
+    addObjectId("file", raw);
+    return Array.from(keys);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+
+  const row = raw as { fileId?: unknown; _id?: unknown; url?: unknown };
+  addObjectId("file", row.fileId);
+  addObjectId("id", row._id);
+  addUrl(row.url);
+  return Array.from(keys);
+}
+
+function picAssetImagePrimarySelectionKey(raw: unknown): string | null {
+  const keys = picAssetImageSelectionKeys(raw);
+  return keys.find((key) => key.startsWith("id:")) ??
+    keys.find((key) => key.startsWith("file:")) ??
+    keys.find((key) => key.startsWith("url:")) ??
+    null;
+}
+
+/**
+ * يحلل تحديثات اختيار التقرير فقط. لا نقبل تغيير الوسيط نفسه عبر هذا المسار؛
+ * الهوية وحالة ‎includeInReport‎ هما الحقلان الوحيدان المسموح بهما.
+ */
+function parsePicAssetImageReportSelections(raw: unknown): Map<string, boolean> {
+  if (!Array.isArray(raw)) {
+    throw new BadRequestException("imageReportSelections must be an array");
+  }
+  const selections = new Map<string, boolean>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new BadRequestException("Invalid imageReportSelections entry");
+    }
+    const includeInReport = (item as { includeInReport?: unknown }).includeInReport;
+    if (typeof includeInReport !== "boolean") {
+      throw new BadRequestException("imageReportSelections.includeInReport must be a boolean");
+    }
+    const keys = picAssetImageSelectionKeys(item);
+    if (keys.length === 0) {
+      throw new BadRequestException("imageReportSelections entry requires a valid image identity");
+    }
+    for (const key of keys) selections.set(key, includeInReport);
+  }
+  if (selections.size === 0) {
+    throw new BadRequestException("imageReportSelections cannot be empty");
+  }
+  return selections;
+}
+
+/** يحدّث ‎includeInReport‎ مع الاحتفاظ بالمصفوفة أو الكائن المصنّف كما هو. */
+function applyPicAssetImageReportSelections(
+  raw: unknown,
+  selections: ReadonlyMap<string, boolean>,
+): { next: unknown; changed: boolean } {
+  let changed = false;
+  const next = mapPicAssetImagesStructure(raw, (image) => {
+    const includeInReport = picAssetImageSelectionKeys(image)
+      .map((key) => selections.get(key))
+      .find((value): value is boolean => typeof value === "boolean");
+    if (includeInReport === undefined) return image;
+
+    const current =
+      image && typeof image === "object" && !(image instanceof ObjectId)
+        ? (image as { includeInReport?: unknown }).includeInReport
+        : undefined;
+    if (current === includeInReport) return image;
+
+    changed = true;
+    if (image instanceof ObjectId) {
+      return { fileId: image, includeInReport };
+    }
+    if (typeof image === "string" && ObjectId.isValid(image)) {
+      return { fileId: image, includeInReport };
+    }
+    if (image && typeof image === "object") {
+      return { ...(image as object), includeInReport };
+    }
+    return image;
+  });
+  return { next, changed };
+}
+
+/**
+ * Reconciles a legacy flattened `images` PATCH against a categorized source.
+ * The public UI receives a flat list for display, but that list must never
+ * replace the categorized source structure. A subset is treated as deletion;
+ * `includeInReport` is applied in place; ordering remains owned by the source.
+ */
+function reconcileCategorizedPicAssetImagesPatch(
+  current: unknown,
+  incoming: unknown,
+): { next: unknown; changed: boolean } | null {
+  if (!isPicAssetCategorizedImagesObject(current) || !Array.isArray(incoming)) return null;
+
+  const currentIds = new Set<string>();
+  const keyToCurrentId = new Map<string, string>();
+  for (const image of flattenPicAssetImagesRaw(current)) {
+    const currentId = picAssetImagePrimarySelectionKey(image);
+    if (!currentId || currentIds.has(currentId)) return null;
+    currentIds.add(currentId);
+    for (const key of picAssetImageSelectionKeys(image)) {
+      const existingId = keyToCurrentId.get(key);
+      if (existingId && existingId !== currentId) return null;
+      keyToCurrentId.set(key, currentId);
+    }
+  }
+
+  const keptIds = new Set<string>();
+  const selectionRows: unknown[] = [];
+  for (const image of incoming) {
+    const keys = picAssetImageSelectionKeys(image);
+    const currentId = keys.map((key) => keyToCurrentId.get(key)).find(Boolean);
+    if (!currentId || keptIds.has(currentId)) return null;
+    keptIds.add(currentId);
+    if (
+      image &&
+      typeof image === "object" &&
+      typeof (image as { includeInReport?: unknown }).includeInReport === "boolean"
+    ) {
+      selectionRows.push(image);
+    }
+  }
+
+  const removedIds = new Set(Array.from(currentIds).filter((id) => !keptIds.has(id)));
+  let next: unknown = current;
+  let changed = false;
+  if (removedIds.size > 0) {
+    const removed = removePicAssetImagesBySelectionKeys(next, removedIds);
+    next = removed.next;
+    changed = removed.changed;
+  }
+  if (selectionRows.length > 0) {
+    const applied = applyPicAssetImageReportSelections(
+      next,
+      parsePicAssetImageReportSelections(selectionRows),
+    );
+    next = applied.next;
+    changed = changed || applied.changed;
+  }
+  return { next, changed };
+}
+
 function picAssetImagesExistFilter(): Record<string, unknown> {
   return {
     images: { $exists: true, $nin: [null, []] },
@@ -1430,6 +1595,45 @@ function removePicAssetImageByFileId(raw: unknown, fileId: ObjectId): { next: un
       continue;
     }
     if (typeof value === "object" && picAssetImageMatchesFileId(value, fileId)) {
+      next[key] = key === "other" ? [] : null;
+      changed = true;
+    }
+  }
+  return { next, changed };
+}
+
+/** Removes images by their stable external/GridFS identity without flattening categories. */
+function removePicAssetImagesBySelectionKeys(
+  raw: unknown,
+  removeKeys: ReadonlySet<string>,
+): { next: unknown; changed: boolean } {
+  const shouldRemove = (image: unknown) => {
+    const key = picAssetImagePrimarySelectionKey(image);
+    return key != null && removeKeys.has(key);
+  };
+  let changed = false;
+  if (Array.isArray(raw)) {
+    const next = raw.filter((image) => {
+      const keep = !shouldRemove(image);
+      if (!keep) changed = true;
+      return keep;
+    });
+    return { next, changed };
+  }
+  if (!isPicAssetCategorizedImagesObject(raw)) return { next: raw, changed: false };
+
+  const next: Record<string, unknown> = { ...raw };
+  for (const [key, value] of Object.entries(raw)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      next[key] = value.filter((image) => {
+        const keep = !shouldRemove(image);
+        if (!keep) changed = true;
+        return keep;
+      });
+      continue;
+    }
+    if (typeof value === "object" && shouldRemove(value)) {
       next[key] = key === "other" ? [] : null;
       changed = true;
     }
@@ -7425,6 +7629,7 @@ export class MachineValuationService implements OnModuleInit {
         "category",
         "type",
         "images",
+        "imageReportSelections",
         "voiceNotes",
       ].some((key) => Object.prototype.hasOwnProperty.call(body, key));
     if (hasNodePatch && !hasPicPatch) {
@@ -7594,10 +7799,23 @@ export class MachineValuationService implements OnModuleInit {
       $set.employer = employer;
     }
     if (b.images !== undefined) {
-      $set.images = normalizePicAssetMediaArrayForPatch(
-        b.images as unknown,
-        "images",
-      ) as never;
+      const nextImages = normalizePicAssetMediaArrayForPatch(b.images as unknown, "images");
+      const reconciled = reconcileCategorizedPicAssetImagesPatch(pic.images, nextImages);
+      if (reconciled) {
+        if (reconciled.changed) $set.images = reconciled.next as never;
+      } else if (isPicAssetCategorizedImagesObject(pic.images) && Array.isArray(nextImages)) {
+        throw new BadRequestException(
+          "Categorized asset images cannot be replaced with a flattened array",
+        );
+      } else {
+        $set.images = nextImages as never;
+      }
+    }
+    if (b.imageReportSelections !== undefined) {
+      const selections = parsePicAssetImageReportSelections(b.imageReportSelections);
+      const baseImages = $set.images ?? pic.images;
+      const applied = applyPicAssetImageReportSelections(baseImages, selections);
+      if (applied.changed) $set.images = applied.next as never;
     }
     if (b.voiceNotes !== undefined) {
       $set.voiceNotes = normalizePicAssetMediaArrayForPatch(
@@ -7632,7 +7850,7 @@ export class MachineValuationService implements OnModuleInit {
     if (!nextPic) throw new NotFoundException("photo folder asset not found");
 
     // مزامنة includeInReport على مرايا GridFS حتى يحترم إعداد التقرير ودمج Word التحديد
-    if (b.images !== undefined) {
+    if (b.images !== undefined || b.imageReportSelections !== undefined) {
       await syncGridFsIncludeInReportFromPicImages(
         db,
         pid,

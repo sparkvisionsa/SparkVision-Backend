@@ -417,6 +417,16 @@ export type PicAssetPatch = Partial<{
   type: string | null;
   /** معرّفات GridFS أو مصفوفة كائنات وسائط خارجية ‎(لإعادة الترتيب/الحذف)‎ */
   images: string[] | unknown[];
+  /**
+   * تحديث حالة ظهور الصور في التقرير فقط. هذا الحقل لا يستبدل ‎images‎ إطلاقًا؛
+   * إذ قد تكون مخزنة كبنية مصنّفة من تطبيق المعاينة مثل ‎main/brand/details/other‎.
+   */
+  imageReportSelections: Array<{
+    includeInReport: boolean;
+    fileId?: string;
+    _id?: string;
+    url?: string;
+  }>;
   voiceNotes: string[] | unknown[];
 }>;
 
