@@ -10,7 +10,47 @@
  * narrative paragraphs in the report preview.
  */
 
-import type { CompanyReportDefaults } from "./types";
+import type { CompanyReportDefaults, CompanyReportSectionModel } from "./types";
+
+/**
+ * The initial report-section model must be available to companies created
+ * before section models were introduced as well.  It is deliberately kept as
+ * a separate factory so a company that explicitly saves an empty list can
+ * still remove all of its models later.
+ */
+const DEFAULT_COMPANY_REPORT_SECTION_MODELS: CompanyReportSectionModel[] = [
+  {
+    id: "mv-report-sections-standard",
+    name: "نموذج تقرير مفصل",
+    isDefault: true,
+    visibleInReport: true,
+    sections: [
+      {
+        id: "report-definitions",
+        title: "التعريفات والملاحظات",
+        visibleInReport: true,
+        items: [
+          {
+            id: "report-definition",
+            title: "تعريف جديد",
+            body: "",
+            visibleInReport: true,
+          },
+        ],
+      },
+    ],
+  },
+];
+
+export function buildDefaultCompanyReportSectionModels(): CompanyReportSectionModel[] {
+  return DEFAULT_COMPANY_REPORT_SECTION_MODELS.map((model) => ({
+    ...model,
+    sections: model.sections.map((section) => ({
+      ...section,
+      items: section.items.map((item) => ({ ...item })),
+    })),
+  }));
+}
 
 export const COMPANY_REPORT_DEFAULT_TEMPLATES: Required<{
   scope: Required<NonNullable<CompanyReportDefaults["scope"]>>;

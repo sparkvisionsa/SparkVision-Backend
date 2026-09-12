@@ -274,6 +274,7 @@ export interface CompanyReportSectionModelItem {
   title: string;
   body?: string;
   visibleInReport?: boolean;
+  overrideSystemContent?: boolean;
 }
 
 export interface CompanyReportSectionModelSection {
@@ -281,6 +282,7 @@ export interface CompanyReportSectionModelSection {
   title: string;
   sectionNumber?: string;
   visibleInReport?: boolean;
+  systemAnchor?: string;
   items: CompanyReportSectionModelItem[];
 }
 

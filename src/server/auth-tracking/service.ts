@@ -72,7 +72,10 @@ import type {
   ValueTechProductId,
 } from "./types";
 import { COMPANY_MEMBER_ROLES } from "./types";
-import { buildDefaultCompanyReportDefaults } from "./company-report-defaults.constants";
+import {
+  buildDefaultCompanyReportDefaults,
+  buildDefaultCompanyReportSectionModels,
+} from "./company-report-defaults.constants";
 
 const COMPANY_MEMBERSHIP_ROLE_LABELS_AR: Record<CompanyMembershipRole, string> = {
   company_admin: "مدير الشركة",
@@ -3026,14 +3029,19 @@ function sanitizeCompanyReportSectionModels(value: unknown): CompanyReportSectio
     if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) continue;
     const data = rawModel as Record<string, unknown>;
     const id = sanitizeReportDefaultsText(data.id, 120);
-    const name = sanitizeReportDefaultsText(data.name, 160);
+    const rawName = sanitizeReportDefaultsText(data.name, 160);
+    const name = id === "mv-report-sections-standard" && rawName === "النموذج القياسي"
+      ? "نموذج تقرير مفصل"
+      : rawName;
     if (!id || !name || seenModels.has(id)) continue;
     seenModels.add(id);
 
     const seenSections = new Set<string>();
     const sections: CompanyReportSectionModelSection[] = [];
     let itemCount = 0;
-    for (const rawSection of (Array.isArray(data.sections) ? data.sections.slice(0, 30) : [])) {
+    // The detailed system report includes 41 sections once annexes and the
+    // closing page are included. Do not truncate its tail while saving.
+    for (const rawSection of (Array.isArray(data.sections) ? data.sections.slice(0, 50) : [])) {
       if (!rawSection || typeof rawSection !== "object" || Array.isArray(rawSection)) continue;
       const sectionData = rawSection as Record<string, unknown>;
       const sectionId = sanitizeReportDefaultsText(sectionData.id, 120);
@@ -3056,6 +3064,7 @@ function sanitizeCompanyReportSectionModels(value: unknown): CompanyReportSectio
           title: itemTitle,
           body: sanitizeReportDefaultsText(itemData.body, 50_000),
           visibleInReport: itemData.visibleInReport !== false,
+          ...(itemData.overrideSystemContent === true ? { overrideSystemContent: true } : {}),
         });
         itemCount += 1;
       }
@@ -3064,10 +3073,12 @@ function sanitizeCompanyReportSectionModels(value: unknown): CompanyReportSectio
         title,
         sectionNumber: sanitizeReportDefaultsText(sectionData.sectionNumber, 40),
         visibleInReport: sectionData.visibleInReport !== false,
+        ...(sanitizeReportDefaultsText(sectionData.systemAnchor, 160)
+          ? { systemAnchor: sanitizeReportDefaultsText(sectionData.systemAnchor, 160) }
+          : {}),
         items,
       });
     }
-    if (sections.length === 0) continue;
     models.push({
       id,
       name,
@@ -3076,7 +3087,24 @@ function sanitizeCompanyReportSectionModels(value: unknown): CompanyReportSectio
       sections,
     });
   }
-  return models;
+  // Do not assign a hidden model to newly-created projects.  A legacy hidden
+  // default is moved to the first visible model during normalization.
+  const declaredDefaultIndex = models.findIndex(
+    (model) => model.isDefault && model.visibleInReport !== false,
+  );
+  const firstVisibleIndex = models.findIndex((model) => model.visibleInReport !== false);
+  const defaultIndex =
+    declaredDefaultIndex >= 0
+      ? declaredDefaultIndex
+      : firstVisibleIndex >= 0
+        ? firstVisibleIndex
+        : models.length > 0
+          ? 0
+          : -1;
+  return models.map((model, index) => ({
+    ...model,
+    isDefault: index === defaultIndex,
+  }));
 }
 
 function ensureCompanyReportTemplateIdentities<
@@ -3334,7 +3362,12 @@ export function resolveCompanyReportDefaults(
     customGroups: customGroupsStored,
     customSections: customSectionsStored,
     reportDataModels: reportDataModelsStored,
-    reportSectionModels: reportSectionModelsStored,
+    // Earlier versions persisted an empty list before this feature existed.
+    // Keep one ready-to-use model available instead of rendering a blank tab.
+    reportSectionModels:
+      reportSectionModelsStored.length > 0
+        ? reportSectionModelsStored
+        : buildDefaultCompanyReportSectionModels(),
     letterhead: letterheadStored,
     aiTemplates: aiTemplatesStored,
     wordTemplates: wordTemplatesStored,
@@ -3617,6 +3650,7 @@ const updateCompanyReportDefaultsSchema = z.object({
               title: z.string().max(220),
               sectionNumber: z.string().max(40).optional(),
               visibleInReport: z.boolean().optional(),
+              systemAnchor: z.string().max(160).optional(),
               items: z
                 .array(
                   z.object({
@@ -3624,12 +3658,13 @@ const updateCompanyReportDefaultsSchema = z.object({
                     title: z.string().max(220),
                     body: z.string().max(50_000).optional(),
                     visibleInReport: z.boolean().optional(),
+                    overrideSystemContent: z.boolean().optional(),
                   }),
                 )
                 .max(160),
             }),
           )
-          .max(30),
+          .max(50),
       }),
     )
     .max(12)
