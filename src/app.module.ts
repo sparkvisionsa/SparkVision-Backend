@@ -1,7 +1,10 @@
 import { CacheModule } from "@nestjs/cache-manager";
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-import { APP_FILTER, APP_GUARD } from "@nestjs/core";
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
+import { RealtimeModule } from "./realtime/realtime.module";
+import { RealtimeInterceptor } from "./realtime/realtime.interceptor";
+import { SupportModule } from "./support/support.module";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { HealthController } from "./health/health.controller";
 import { SourcesController } from "./sources/sources.controller";
@@ -18,6 +21,8 @@ import { TransactionsModule } from "./transactions/transactions.module";
 
 @Module({
   imports: [
+    RealtimeModule,
+    SupportModule,
     DatabaseModule,
     ClientsModule,
     LocationsModule,
@@ -48,6 +53,7 @@ import { TransactionsModule } from "./transactions/transactions.module";
     OrganizationController,
   ],
   providers: [
+    { provide: APP_INTERCEPTOR, useClass: RealtimeInterceptor },
     {
       provide: APP_FILTER,
       useClass: ApiErrorFilter,

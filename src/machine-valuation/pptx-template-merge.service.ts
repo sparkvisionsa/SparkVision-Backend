@@ -17,6 +17,7 @@ import {
   machineValuationPdfTimeoutMs,
 } from "./docx-to-pdf";
 import { getPendingPdfExport, storePendingPdfExport } from "./pending-pdf-export";
+import { formatReportTemplateTeam } from "./report-template-team";
 
 type PptxMergeRequest = {
   /** Selects one of the owning company's saved PowerPoint templates. */
@@ -395,6 +396,7 @@ function buildPptxTextValues(
     intendedUse: sanitizeForXml(String(reportData.intendedUse || "")),
     assetDetailedDescription: sanitizeForXml(String(reportData.assetDetailedDescription || "")),
     reportTypeLabel: sanitizeForXml(String(reportData.reportTypeLabel || "")),
+    valuationTeam: sanitizeForXml(formatReportTemplateTeam(reportData.valuationTeam)),
     standardsVersion: sanitizeForXml(String(reportData.standardsVersion || "")),
     currencyLabel: sanitizeForXml(String(reportData.currencyLabel || "")),
     valuePremise: sanitizeForXml(String(reportData.valuePremise || "")),

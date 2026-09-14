@@ -14,6 +14,7 @@ import { format, transports } from "winston";
 import { AppModule } from "./app.module";
 import { triggerSourceIndexWarmup } from "./server/source-indexes";
 import { join } from "path";
+import { RealtimeService } from "./realtime/realtime.service";
 
 function parseCorsOrigins() {
   const raw =
@@ -89,6 +90,8 @@ async function bootstrap() {
   });
 
   const port = Number(process.env.PORT ?? 5000);
+  app.get(RealtimeService).attach(app.getHttpServer());
+  app.enableShutdownHooks();
   await app.listen(port);
   triggerSourceIndexWarmup();
   Logger.log(`Backend listening on http://localhost:${port}`, "Bootstrap");

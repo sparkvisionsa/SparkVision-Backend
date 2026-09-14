@@ -126,7 +126,15 @@ async function migrateUsersUsernameLowerField(db: Db) {
 
 async function replaceUsersUsernameLowerUniqueIndex(db: Db) {
   const { users } = getAuthCollections(db);
-  const indexes = await users.indexes();
+  // A fresh MongoDB has no physical `users` collection yet. `indexes()` throws
+  // NamespaceNotFound in that case, while `createIndex()` below will create it.
+  let indexes: Awaited<ReturnType<typeof users.indexes>> = [];
+  try {
+    indexes = await users.indexes();
+  } catch (error: unknown) {
+    const code = (error as { code?: number }).code;
+    if (code !== 26) throw error; // 26 = NamespaceNotFound
+  }
   for (const idx of indexes) {
     const key = idx.key as Record<string, number> | undefined;
     if (!key || Object.keys(key).length !== 1 || key.usernameLower !== 1) continue;

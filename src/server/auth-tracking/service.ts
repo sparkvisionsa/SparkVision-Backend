@@ -1537,6 +1537,8 @@ export async function logoutUser(request: Request) {
   const context = await resolveRequestContext(request);
   const now = new Date();
   await writeSessionPatch(context.session._id, {
+    userId: null,
+    activeCompanyId: null,
     isActive: false,
     endTime: now,
     lastSeenAt: now,
@@ -2319,6 +2321,7 @@ async function persistCompanyReportDocumentTemplate(
   ): Record<string, unknown> => ({
     id,
     name,
+    reportDataModelId: sanitizeReportDefaultsText(data.reportDataModelId, 120) || undefined,
     fileName,
     fileUrl: fileUrl || null,
     uploadedAt,
@@ -2792,6 +2795,7 @@ function sanitizeCompanyReportWordTemplate(value: unknown): CompanyReportWordTem
   );
   const excludedVariableNames = sanitizeReportTemplateVariableNames(data.excludedVariableNames);
   return {
+    reportDataModelId: sanitizeReportDefaultsText(data.reportDataModelId, 120) || undefined,
     ...(sanitizeReportDefaultsText(data.id, 120) ? { id: sanitizeReportDefaultsText(data.id, 120) } : {}),
     name: sanitizeReportDefaultsText(data.name, 160) ||
       (sanitizeReportDefaultsText(data.fileName, 240).replace(/\.docx$/i, "").trim() || "Word template"),
@@ -2819,6 +2823,7 @@ function sanitizeCompanyReportPptxTemplate(value: unknown): CompanyReportPptxTem
   // GridFS is durable storage; fileUrl is only the same-company recovery mirror.
   if (!fileUrl && !gridFsFileId) return null;
   return {
+    reportDataModelId: sanitizeReportDefaultsText(data.reportDataModelId, 120) || undefined,
     ...(sanitizeReportDefaultsText(data.id, 120) ? { id: sanitizeReportDefaultsText(data.id, 120) } : {}),
     name: sanitizeReportDefaultsText(data.name, 160) ||
       (sanitizeReportDefaultsText(data.fileName, 240).replace(/\.pptx$/i, "").trim() || "PowerPoint template"),
@@ -3475,6 +3480,7 @@ const reportTemplateExcludedVariablesSchema = z
 
 const wordTemplateItemSchema = z
   .object({
+    reportDataModelId: z.string().max(120).optional(),
     id: z.string().max(120).optional(),
     name: z.string().max(160).optional(),
     fileName: z.string().max(240).optional(),
@@ -3512,6 +3518,7 @@ const wordTemplateSchema = wordTemplateItemSchema.optional().nullable();
 
 const pptxTemplateItemSchema = z
   .object({
+    reportDataModelId: z.string().max(120).optional(),
     id: z.string().max(120).optional(),
     name: z.string().max(160).optional(),
     fileName: z.string().max(240).optional(),

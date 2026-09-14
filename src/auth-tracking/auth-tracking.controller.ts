@@ -1,6 +1,7 @@
 ﻿import { Body, Controller, Get, Patch, Post, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { z } from "zod";
+import { RealtimeService } from "../realtime/realtime.service";
 import { applyContextCookies } from "@/server/auth-tracking/context";
 import {
   getSessionSnapshot,
@@ -40,6 +41,7 @@ const sessionSchema = z.object({
 
 @Controller()
 export class AuthTrackingController {
+  constructor(private readonly realtime: RealtimeService) {}
   @Get("auth/me")
   async getSession(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await getSessionSnapshot(req);
@@ -80,6 +82,7 @@ export class AuthTrackingController {
     @Body() body: unknown,
   ) {
     const result = await setActiveCompanyForUser(req, body);
+    this.realtime.disconnectSession(result.context.sessionId);
     applyContextCookies(res, result.context);
     return result.payload;
   }
@@ -87,6 +90,7 @@ export class AuthTrackingController {
   @Post("auth/logout")
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await logoutUser(req);
+    this.realtime.disconnectSession(result.context.sessionId);
     applyContextCookies(res, result.context, { clearSession: true });
     return { success: true };
   }

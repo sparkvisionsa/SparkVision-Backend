@@ -11,6 +11,7 @@
     "build": "node -e \"const fs=require('fs'); ['dist','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{ recursive: true, force: true }));\" && nest build",
     "typecheck": "tsc --noEmit",
     "test:auth-tracking": "node --import tsx --test tests/auth-tracking.test.ts",
+    "test:support": "npm run build && node --test tests/support.integration.test.cjs",
     "test:report-templates": "node --import tsx --test tests/report-template-catalog.test.ts",
     "test:pending-pdf": "node --import tsx --test tests/pending-pdf-export.test.ts",
     "test:graph-pdf": "node --import tsx --test tests/microsoft-graph-pdf.test.ts",
@@ -56,6 +57,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "sharp": "^0.34.5",
+    "socket.io": "^4.8.3",
     "tesseract.js": "^7.0.0",
     "tsconfig-paths": "^4.2.0",
     "typeorm": "^0.3.24",
@@ -75,6 +77,8 @@
     "@types/module-alias": "^2.0.4",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.0.0",
+    "mongodb-memory-server": "^11.2.0",
+    "socket.io-client": "^4.8.3",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   }

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveCompanyReportDefaults } from "@/server/auth-tracking/service";
+import { formatReportTemplateTeam } from "@/machine-valuation/report-template-team";
 
 const WORD_FILE_1 = "64b000000000000000000001";
 const WORD_FILE_2 = "64b000000000000000000002";
@@ -118,4 +119,22 @@ test("report-data models keep safe company fields for template bindings", () => 
   const fields = resolved.reportDataModels?.[0]?.sections[0]?.fields ?? [];
   assert.deepEqual(fields.map((field) => field.sourceKey), ["field:equipment-serial"]);
   assert.equal(fields[0]?.required, true);
+});
+
+test("Word and PowerPoint templates retain their selected report-data model independently", () => {
+  const resolved = resolveCompanyReportDefaults({
+    wordTemplates: [{ id: "word-model", fileName: "model.docx", gridFsFileId: WORD_FILE_1, reportDataModelId: "individual" }],
+    pptxTemplates: [{ id: "pptx-model", fileName: "model.pptx", gridFsFileId: PPTX_FILE_1, reportDataModelId: "equipment" }],
+  });
+  assert.equal(resolved.wordTemplates?.[0]?.reportDataModelId, "individual");
+  assert.equal(resolved.pptxTemplates?.[0]?.reportDataModelId, "equipment");
+});
+
+test("the report-team source resolves structured members to readable template text", () => {
+  assert.equal(formatReportTemplateTeam([
+    { name: "أحمد", title: "مقيم", membershipNo: "123", role: "إعداد التقرير" },
+    { name: "سارة", role: "مراجعة" },
+    null,
+  ]), "أحمد — مقيم — 123 — إعداد التقرير\nسارة — مراجعة");
+  assert.equal(formatReportTemplateTeam(undefined), "");
 });

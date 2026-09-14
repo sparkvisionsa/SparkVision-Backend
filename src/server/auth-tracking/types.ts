@@ -176,6 +176,7 @@ export interface CompanyAiReportTemplate {
 }
 
 export interface CompanyReportWordTemplate {
+  reportDataModelId?: string;
   /** Stable id selected by projects; never a GridFS id. */
   id?: string;
   /** Human-readable name shown in template selectors. */
@@ -198,6 +199,7 @@ export interface CompanyReportWordTemplate {
  * بينما تبقى أسماء المتغيرات بيانات وصفية خفيفة تُستخدم في لوحة الربط.
  */
 export interface CompanyReportPptxTemplate {
+  reportDataModelId?: string;
   /** Stable id selected by projects; never a GridFS id. */
   id?: string;
   /** Human-readable name shown in template selectors. */
