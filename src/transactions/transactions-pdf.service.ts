@@ -64,6 +64,36 @@ async function fileToDataUri(absPath: string): Promise<string | null> {
   }
 }
 
+function toCloudinaryReportUrl(url: string): string | null {
+  const marker = "/upload/";
+  const idx = url.indexOf(marker);
+  if (!idx || !url.includes("res.cloudinary.com")) return null;
+  if (idx === -1) return null;
+
+  const insertAt = idx + marker.length;
+  // Avoid double-inserting if this URL already carries a transformation
+  // (defensive — shouldn't normally happen for stored delivery URLs).
+  const rest = url.slice(insertAt);
+  if (/^[a-z]_[^/]+\//.test(rest)) return null;
+
+  return `${url.slice(0, insertAt)}w_700,q_auto:good,f_jpg/${rest}`;
+}
+
+async function toReportImageDataUri(buf: Buffer): Promise<string> {
+  try {
+    const resized = await sharp(buf)
+      .rotate() // respect EXIF orientation before resizing
+      .resize(700, null, { withoutEnlargement: true })
+      .jpeg({ quality: 72 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${resized.toString("base64")}`;
+  } catch (e) {
+    // If sharp can't process it (corrupt/unsupported format), fall back to
+    // embedding the original bytes rather than dropping the image.
+    return `data:image/jpeg;base64,${buf.toString("base64")}`;
+  }
+}
+
 // ── free, keyless static map image ──────────────────────────────────────
 // Tries a couple of free, no-API-key static-map renderers in order and
 // falls back to a text note on the maps page if both are unreachable. The
@@ -285,59 +315,87 @@ export class TransactionsPdfHtmlService {
     ]);
 
     // ── property images (rendered inline, 3/row grid) ──
-    const images: ReportImage[] = [];
-    for (const img of imageDocs) {
-      let dataUri: string | null = null;
-      if (img.url) {
-        try {
-          const r = await fetch(img.url);
-          const buf = Buffer.from(await r.arrayBuffer());
-          dataUri = `data:${img.mimeType || "image/jpeg"};base64,${buf.toString("base64")}`;
-        } catch {
-          this.logger.warn(`Failed to fetch remote image: ${img.url}`);
-          continue;
-        }
-      } else if (img.filePath) {
-        dataUri = await fileToDataUri(resolveFilePath(img.filePath));
-        if (!dataUri) {
-          this.logger.warn(`Image not found: ${img.filePath}`);
-          continue;
-        }
-      } else {
-        continue;
-      }
-      images.push({ dataUri, name: img.name || img.originalName });
-    }
+    const images: ReportImage[] = (
+      await Promise.all(
+        imageDocs.map(async (img): Promise<ReportImage | null> => {
+          try {
+            if (img.url) {
+              const cloudinaryUrl = toCloudinaryReportUrl(img.url);
+              if (cloudinaryUrl) {
+                const r = await fetch(cloudinaryUrl);
+                if (!r.ok) {
+                  this.logger.warn(`Cloudinary fetch failed (${r.status}): ${cloudinaryUrl}`);
+                  return null;
+                }
+                const buf = Buffer.from(await r.arrayBuffer());
+                return {
+                  dataUri: `data:image/jpeg;base64,${buf.toString("base64")}`,
+                  name: img.name || img.originalName,
+                };
+              }
+              // Non-Cloudinary remote URL — fall back to fetch + local resize.
+              const r = await fetch(img.url);
+              if (!r.ok) {
+                this.logger.warn(`Failed to fetch remote image (${r.status}): ${img.url}`);
+                return null;
+              }
+              const buf = Buffer.from(await r.arrayBuffer());
+              const dataUri = await toReportImageDataUri(buf);
+              return { dataUri, name: img.name || img.originalName };
+            }
 
+            if (img.filePath) {
+              let buf: Buffer;
+              try {
+                buf = await fs.readFile(resolveFilePath(img.filePath));
+              } catch {
+                this.logger.warn(`Image not found: ${img.filePath}`);
+                return null;
+              }
+              const dataUri = await toReportImageDataUri(buf);
+              return { dataUri, name: img.name || img.originalName };
+            }
+
+            return null;
+          } catch (e) {
+            this.logger.warn(`Failed to process image ${img._id}: ${(e as Error).message}`);
+            return null;
+          }
+        }),
+      )
+    ).filter((x): x is ReportImage => x !== null);
     // ── attachments, split by kind ──
     const pdfAttachments: PdfAttachment[] = [];
-    const imageAttachments: ImageAttachment[] = [];
-    const otherAttachments: OtherAttachment[] = [];
+       const imageAttachments: ImageAttachment[] = [];
+       const otherAttachments: OtherAttachment[] = [];
 
-    for (const att of attachmentDocs) {
-      const abs = resolveFilePath(att.filePath);
-      if (att.mimeType === "application/pdf") {
-        try {
-          const bytes = await fs.readFile(abs);
-          pdfAttachments.push({ name: att.name || att.originalName, bytes });
-        } catch {
-          this.logger.warn(`PDF attachment not found: ${abs}`);
-        }
-      } else if (att.mimeType.startsWith("image/")) {
-        const dataUri = await fileToDataUri(abs);
-        if (dataUri) {
-          imageAttachments.push({ dataUri, name: att.name || att.originalName });
-        } else {
-          this.logger.warn(`Image attachment not found: ${abs}`);
-        }
-      } else {
-        otherAttachments.push({
-          name: att.name || att.originalName,
-          size: att.size,
-          mimeType: att.mimeType,
-        });
-      }
-    }
+       await Promise.all(
+         attachmentDocs.map(async (att) => {
+           const abs = resolveFilePath(att.filePath);
+           if (att.mimeType === "application/pdf") {
+             try {
+               const bytes = await fs.readFile(abs);
+               pdfAttachments.push({ name: att.name || att.originalName, bytes });
+             } catch {
+               this.logger.warn(`PDF attachment not found: ${abs}`);
+             }
+           } else if (att.mimeType.startsWith("image/")) {
+             try {
+               const buf = await fs.readFile(abs);
+               const dataUri = await toReportImageDataUri(buf);
+               imageAttachments.push({ dataUri, name: att.name || att.originalName });
+             } catch {
+               this.logger.warn(`Image attachment not found: ${abs}`);
+             }
+           } else {
+             otherAttachments.push({
+               name: att.name || att.originalName,
+               size: att.size,
+               mimeType: att.mimeType,
+             });
+           }
+         }),
+       );
 
     // ── build report data + HTML ──
     const reportData = buildReportData(tx, ev, {
