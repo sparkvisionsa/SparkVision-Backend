@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:auth-tracking": "node --import tsx --test tests/auth-tracking.test.ts",
     "test:support": "npm run build && node --test tests/support.integration.test.cjs",
+    "support:agents": "node scripts/set-support-agents.cjs",
     "test:report-templates": "node --import tsx --test tests/report-template-catalog.test.ts",
     "test:pending-pdf": "node --import tsx --test tests/pending-pdf-export.test.ts",
     "test:graph-pdf": "node --import tsx --test tests/microsoft-graph-pdf.test.ts",

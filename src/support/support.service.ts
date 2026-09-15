@@ -4,7 +4,8 @@ import { z } from "zod";
 import { getMongoDb } from "../server/mongodb";
 import { getAuthCollections } from "../server/auth-tracking/collections";
 import { RealtimeService } from "../realtime/realtime.service";
-import { canChangeStatus, createTicketSchema, idSchema, messageSchema, notificationReadSchema, ticketScope, updateTicketSchema, type SupportActor, type SupportAttachment, type SupportMessage, type SupportNotification, type SupportTicket } from "./support.types";
+import { findSupportUser, supportUserIds, supportUsers } from "./support-agents";
+import { canChangeStatus, createTicketSchema, idSchema, messageSchema, notificationReadSchema, supportUserIdSchema, ticketScope, updateTicketSchema, type SupportActor, type SupportAttachment, type SupportMessage, type SupportNotification, type SupportTicket } from "./support.types";
 
 export interface SupportFile {
   _id: ObjectId; ticketId: string; uploaderId: string; fileId: ObjectId;
@@ -77,7 +78,6 @@ export class SupportService {
     }).parse(query);
     const db = await this.db();
     const filter: Filter<SupportTicket> = { ...ticketScope(actor) };
-    if (status && status !== "all") filter.status = status as SupportTicket["status"];
     if (kind === "developer") filter.kind = { $in: ["bug", "idea"] };
     else if (kind && kind !== "all") filter.kind = kind as SupportTicket["kind"];
     if (product && product !== "all") filter.product = product as SupportTicket["product"];
@@ -86,16 +86,22 @@ export class SupportService {
       const expression = { $regex: q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
       filter.$or = [{ subject: expression }, { number: expression }, { companyName: expression }, { ownerPhone: expression }];
     }
-    const [rows, total] = await Promise.all([
-      db.collection<SupportTicket>("support_tickets").find(filter, { projection: { history: 0 } }).sort({ updatedAt: -1, _id: -1 }).skip((page - 1) * 30).limit(30).toArray(),
-      db.collection<SupportTicket>("support_tickets").countDocuments(filter),
+    // Status tabs describe this inbox across all statuses, never the other kind
+    // of request or just the current page of results.
+    const rowFilter = { ...filter, ...(status && status !== "all" ? { status: status as SupportTicket["status"] } : {}) };
+    const [rows, counts] = await Promise.all([
+      db.collection<SupportTicket>("support_tickets").find(rowFilter, { projection: { history: 0 } }).sort({ updatedAt: -1, _id: -1 }).skip((page - 1) * 30).limit(30).toArray(),
+      db.collection<SupportTicket>("support_tickets").aggregate<{ _id: string; count: number }>([
+        { $match: filter }, { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]).toArray(),
     ]);
+    const total = counts.reduce((sum, row) => sum + (!status || status === "all" || row._id === status ? row.count : 0), 0);
     const unread = await db.collection<SupportMessage>("support_messages").aggregate<{ _id: string; count: number }>([
       { $match: { ...this.unreadFilter(actor), ticketId: { $in: rows.map(row => String(row._id)) } } },
       { $group: { _id: "$ticketId", count: { $sum: 1 } } },
     ]).toArray();
-    const counts = new Map(unread.map(row => [row._id, row.count]));
-    return { tickets: rows.map(row => ({ ...row, unread: counts.get(String(row._id)) ?? 0 })), total, page, hasMore: page * 30 < total };
+    const unreadCounts = new Map(unread.map(row => [row._id, row.count]));
+    return { tickets: rows.map(row => ({ ...row, unread: unreadCounts.get(String(row._id)) ?? 0 })), total, page, hasMore: page * 30 < total, counts: Object.fromEntries(counts.map(row => [row._id, row.count])) };
   }
   async summary(actor: SupportActor) {
     const db = await this.db();
@@ -242,16 +248,24 @@ export class SupportService {
   }
   async agents() {
     const db = await this.db();
-    const granted = await db.collection("support_agents").find({ enabled: true }).limit(200).toArray();
-    const users = await getAuthCollections(db).users.find({ isBlocked: { $ne: true }, $or: [{ role: "super_admin" }, { _id: { $in: granted.map(g => new ObjectId(g.userId)) } }] }, { projection: { username: 1, phone: 1, role: 1 } }).limit(200).toArray();
+    const granted = await db.collection<{ userId: string }>("support_agents").find({ enabled: true }).toArray();
+    const users = await supportUsers(db).find({ isBlocked: { $ne: true }, $or: [{ role: "super_admin" }, { _id: { $in: supportUserIds(granted.map(g => String(g.userId))) } }] }, { projection: { username: 1, phone: 1, role: 1 } }).sort({ username: 1, _id: 1 }).toArray();
     return users.map(u => ({ id: String(u._id), name: u.username, phone: u.phone, superAdmin: u.role === "super_admin" }));
   }
   async setAgent(actor: SupportActor, input: unknown) {
     if (!actor.superAdmin) throw new ForbiddenException("صلاحية مالك النظام مطلوبة");
-    const body = z.object({ phone: z.string().trim().min(3).max(60), enabled: z.boolean() }).parse(input);
+    const body = z.union([
+      z.object({ userId: supportUserIdSchema, enabled: z.boolean() }),
+      z.object({ phone: z.string().trim().min(3).max(60), enabled: z.boolean() }),
+    ]).parse(input);
     const db = await this.db();
-    const user = await getAuthCollections(db).users.findOne({ $or: [{ phone: body.phone }, { username: body.phone }] });
+    const matches = "userId" in body
+      ? await supportUsers(db).find({ _id: { $in: supportUserIds([body.userId]) } }).limit(2).toArray()
+      : await findSupportUser(db, body.phone);
+    if (matches.length > 1) throw new BadRequestException("يوجد أكثر من حساب بهذا الرقم؛ اختر الحساب بمعرّفه");
+    const user = matches[0];
     if (!user) throw new NotFoundException("لا يوجد مستخدم بهذا الرقم أو اسم المستخدم");
+    if (body.enabled && user.isBlocked) throw new BadRequestException("لا يمكن إضافة حساب موقوف إلى فريق الدعم");
     if (user.role === "super_admin") throw new BadRequestException("مالك النظام يملك صلاحية الدعم دائماً");
     await db.collection("support_agents").updateOne({ userId: String(user._id) }, { $set: { enabled: body.enabled, updatedAt: new Date(), updatedBy: actor.userId } }, { upsert: true });
     this.realtime.disconnectUser(String(user._id));

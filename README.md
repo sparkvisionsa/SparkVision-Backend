@@ -50,3 +50,28 @@ Microsoft 365 cloud conversion is not configured by this repository.
 ## Healthcheck
 
 - `GET /health`
+
+## Support agents
+
+Super admins can manage support access from the support or developer inbox.
+Support access permits handling and assigning both kinds of requests; company
+roles stay unchanged. Existing UUID user IDs and MongoDB ObjectIds are supported.
+
+To check the two support accounts against the database configured in `.env.local`
+or `.env`, then grant access to the existing accounts:
+
+```bash
+npm run build
+npm run support:agents -- 579228782 596220001
+npm run support:agents -- --apply 579228782 596220001
+```
+
+The command accepts Saudi numbers with or without `0` / `+966`, checks that each
+number matches exactly one unblocked account, and can be rerun safely. It creates
+no login accounts or passwords. Open sessions pick up access on their next support
+request; refresh the page to update the controls.
+
+Deploy the backend together with the frontend: `GET /api/support/agents` and
+`PATCH /api/support/tickets/:id` must reach the updated Nest server. The ticket list
+response now includes status `counts` for its kind, product, search and assignee
+filters, independently of the selected status and page.

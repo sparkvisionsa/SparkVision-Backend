@@ -44,8 +44,10 @@ async function createSupportFixture(port = 0) {
   for (const [name, company, role, phone] of [
     ["owner", companyA, "company_admin", "0500000001"], ["colleague", companyA, "valuer", "0500000002"],
     ["outsider", companyB, "company_admin", "0500000003"], ["agent", null, "user", "0500000004"], ["admin", null, "super_admin", "support-test-admin"],
+    ["legacyAgent", null, "user", "0500000005"],
+    ["supportOne", null, "valuer", "+966579228782"], ["supportTwo", null, "valuer", "+966596220001"],
   ]) {
-    const _id = new ObjectId(); const sid = randomUUID(); const identity = randomUUID(); const csrf = randomUUID();
+    const _id = name === "admin" || name === "legacyAgent" ? randomUUID() : new ObjectId(); const sid = randomUUID(); const identity = randomUUID(); const csrf = randomUUID();
     await db.collection("users").insertOne({ _id, username: name, usernameLower: name, phone, passwordHash: "unused", role, company, isBlocked: false, createdAt: now, updatedAt: now });
     if (company) await db.collection("user_company_memberships").insertOne({ userId: _id, companyId: company, role, productIds: ["machine-valuation", "real-estate-valuation"], createdAt: now, updatedAt: now });
     await db.collection("sessions").insertOne({ _id: sid, userId: _id, activeCompanyId: company, identityId: identity, isActive: true, endTime: null, lastSeenAt: now, startTime: now, firstVisitAt: now, durationMs: 0, device: { type: "desktop", os: "Windows", browser: "Chrome" }, geo: { ipAddress: "127.0.0.1" }, userAgent: "support-test" });

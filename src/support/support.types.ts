@@ -59,6 +59,8 @@ export interface SupportNotification {
   readAt: Date | null;
 }
 export const idSchema = z.string().regex(/^[a-f\d]{24}$/i);
+// User accounts created before the MongoDB migration retain their UUIDs.
+export const supportUserIdSchema = z.union([idSchema, z.string().uuid()]);
 export const clientIdSchema = z.string().min(8).max(100).regex(/^[\w-]+$/);
 export const safePage = z.string().max(500).refine(v => v.startsWith("/") && !v.startsWith("//") && !/[\\\r\n]/.test(v));
 export const createTicketSchema = z.object({
@@ -78,7 +80,7 @@ export const messageSchema = z.object({
 export const updateTicketSchema = z.object({
   status: z.enum(statuses).optional(),
   priority: z.enum(["normal", "high", "urgent"]).optional(),
-  assigneeId: idSchema.nullable().optional(),
+  assigneeId: supportUserIdSchema.nullable().optional(),
   // Some native form controls serialise their value as a string. Coercion
   // keeps an otherwise valid assignment from being rejected by Zod.
   revision: z.coerce.number().int().nonnegative().default(0),

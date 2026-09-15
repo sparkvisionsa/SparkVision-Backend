@@ -90,6 +90,103 @@ test("developer requests stay out of the support inbox and create private notifi
   assert.equal(typeof summary.data.notificationUnread, "number");
 });
 
+test("status counts follow kind, company, search, product and assignee across all pages", async () => {
+  const { ObjectId } = require("mongodb");
+  const subject = `counts-${randomUUID()}`;
+  const row = (kind, status, extra = {}) => ({
+    _id: new ObjectId(), number: randomUUID(), clientId: randomUUID(), subject,
+    ownerId: fixture.users.owner.id, companyId: fixture.users.owner.companyId,
+    kind, status, product: "general", updatedAt: new Date(), assigneeId: null, ...extra,
+  });
+  const rows = [
+    ...Array.from({ length: 31 }, (_, i) => row("ticket", "open", { assigneeId: i === 0 ? fixture.users.admin.id : null })),
+    row("ticket", "closed"), row("bug", "open"), row("idea", "planned"),
+    row("ticket", "resolved", { product: "machine-valuation" }),
+    row("ticket", "waiting_user", { ownerId: fixture.users.outsider.id, companyId: fixture.users.outsider.companyId }),
+    row("ticket", "closed", { ownerId: fixture.users.colleague.id }),
+  ];
+  await fixture.db.collection("support_tickets").insertMany(rows);
+  try {
+    for (const who of ["owner", "agent", "admin", "outsider"]) {
+      const staff = who === "agent" || who === "admin";
+      const expected = staff ? { open: 31, closed: 2, waiting_user: 1 } : who === "owner" ? { open: 31, closed: 1 } : { waiting_user: 1 };
+      const base = `/tickets?q=${subject}&kind=ticket&product=general`;
+      const all = await fixture.request(who, base);
+      assert.equal(all.status, 200);
+      assert.deepEqual(all.data.counts, expected);
+      assert.equal(all.data.total, Object.values(expected).reduce((a, b) => a + b, 0));
+      assert.ok(all.data.tickets.every(ticket => ticket.kind === "ticket"));
+      const closed = await fixture.request(who, `${base}&status=closed`);
+      assert.deepEqual(closed.data.counts, expected);
+      assert.equal(closed.data.total, expected.closed ?? 0);
+      const second = await fixture.request(who, `${base}&page=2`);
+      assert.deepEqual(second.data.counts, expected);
+      assert.equal(second.data.hasMore, false);
+      assert.equal(second.data.tickets.length, Math.max(0, all.data.total - 30));
+      const developer = await fixture.request(who, `/tickets?q=${subject}&kind=developer`);
+      assert.deepEqual(developer.data.counts, who === "outsider" ? {} : { open: 1, planned: 1 });
+      assert.ok(developer.data.tickets.every(ticket => ticket.kind !== "ticket"));
+      const noMatches = await fixture.request(who, `/tickets?q=${subject}-missing&kind=ticket`);
+      assert.deepEqual(noMatches.data.counts, {});
+    }
+    const products = await fixture.request("owner", `/tickets?q=${subject}&kind=ticket`);
+    assert.deepEqual(products.data.counts, { open: 31, closed: 1, resolved: 1 });
+    const mine = await fixture.request("admin", `/tickets?q=${subject}&kind=ticket&mine=1`);
+    assert.deepEqual(mine.data.counts, { open: 1 });
+    assert.equal(mine.data.total, 1);
+    assert.deepEqual((await fixture.request("agent", `/tickets?q=${subject}&kind=ticket&mine=1`)).data.counts, {});
+  } finally {
+    await fixture.db.collection("support_tickets").deleteMany({ _id: { $in: rows.map(row => row._id) } });
+  }
+});
+
+test("super admins with legacy UUIDs can assign both inboxes to themselves or enabled support users", async () => {
+  const { ObjectId } = require("mongodb");
+  const patchAgent = body => fixture.request("admin", "/agents", { method: "PATCH", body: JSON.stringify(body) });
+  for (const phone of ["579228782", "0596220001", "٠٥٧٩٢٢٨٧٨٢", "+966 59 622 0001", "legacyAgent"]) {
+    assert.equal((await patchAgent({ phone, enabled: true })).status, 200);
+  }
+  const directory = await fixture.request("admin", "/agents");
+  assert.equal(directory.status, 200);
+  for (const who of ["admin", "agent", "legacyAgent", "supportOne", "supportTwo"]) {
+    assert.ok(directory.data.agents.some(agent => agent.id === fixture.users[who].id), who);
+    assert.equal((await fixture.request(who, "/summary")).data.staff, true);
+  }
+  for (const kind of ["ticket", "bug", "idea"]) {
+    const created = await create("outsider", { kind });
+    assert.equal(created.status, 201);
+    const id = created.data.ticket._id;
+    let revision = 0;
+    const update = assigneeId => fixture.request("admin", `/tickets/${id}`, { method: "PATCH", body: JSON.stringify({ assigneeId, revision: String(revision) }) });
+    for (const who of ["admin", "agent", "legacyAgent", "supportOne", "supportTwo"]) {
+      const assigned = await update(fixture.users[who].id);
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
+      assert.equal(assigned.data.ticket.assigneeId, fixture.users[who].id);
+      revision = assigned.data.ticket.revision;
+    }
+    assert.equal((await update(fixture.users.owner.id)).status, 400);
+    assert.equal((await update(randomUUID())).status, 400);
+    assert.equal((await update("invalid-user-id")).status, 400);
+    const unassigned = await update(null);
+    assert.equal(unassigned.status, 200);
+    assert.equal(unassigned.data.ticket.assigneeId, null);
+  }
+  assert.equal((await patchAgent({ userId: fixture.users.legacyAgent.id, enabled: false })).status, 200);
+  assert.equal((await fixture.request("legacyAgent", "/agents")).status, 403);
+  await fixture.db.collection("users").updateOne({ _id: new ObjectId(fixture.users.supportTwo.id) }, { $set: { isBlocked: true } });
+  try {
+    assert.equal((await patchAgent({ phone: "596220001", enabled: true })).status, 400);
+    assert.ok(!(await fixture.request("admin", "/agents")).data.agents.some(agent => agent.id === fixture.users.supportTwo.id));
+  } finally {
+    await fixture.db.collection("users").updateOne({ _id: new ObjectId(fixture.users.supportTwo.id) }, { $set: { isBlocked: false } });
+  }
+  for (const who of ["supportOne", "supportTwo"]) {
+    assert.equal((await patchAgent({ userId: fixture.users[who].id, enabled: false })).status, 200);
+  }
+  const unknown = await patchAgent({ phone: "599999999", enabled: true });
+  assert.equal(unknown.status, 404);
+});
+
 test("read receipts only mark the specific delivered messages, including concurrent new replies", async () => {
   const created = await create(); const id = created.data.ticket._id;
   const first = await fixture.request("agent", `/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ text: "أول رد", clientId: randomUUID() }) });
