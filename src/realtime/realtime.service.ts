@@ -16,7 +16,7 @@ export class RealtimeService implements OnModuleDestroy {
   attach(server: HttpServer) {
     const origins = (process.env.CORS_ORIGINS ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3000").split(",").map(x => x.trim());
     this.io = new Server(server, {
-      path: "/api/realtime/socket.io", maxHttpBufferSize: 16_384,
+      path: "/api/realtime/socket.io", addTrailingSlash: false, maxHttpBufferSize: 16_384,
       cors: { origin: origins, credentials: true },
       // Also protect WebSocket handshakes, which do not enforce CORS themselves.
       allowRequest: (req, done) => {

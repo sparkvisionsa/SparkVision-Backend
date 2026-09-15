@@ -8,8 +8,14 @@ before(async () => { fixture = await createSupportFixture(); }, { timeout: 180_0
 after(async () => { if (fixture) await fixture.close(); });
 const create = async (who = "owner", body = {}) => fixture.request(who, "/tickets", { method: "POST", body: JSON.stringify({ subject: "اختبار محادثة الدعم", text: "أحتاج مساعدة في التقرير", clientId: randomUUID(), ...body }) });
 const connect = who => new Promise((resolve, reject) => {
-  const socket = io(fixture.origin, { path: "/api/realtime/socket.io", transports: ["websocket"], extraHeaders: { cookie: fixture.users[who].cookie }, reconnection: false });
+  const socket = io(fixture.origin, { path: "/api/realtime/socket.io", addTrailingSlash: false, transports: ["websocket"], extraHeaders: { cookie: fixture.users[who].cookie }, reconnection: false });
   socket.once("connect", () => resolve(socket)); socket.once("connect_error", error => { socket.close(); reject(error); });
+});
+
+test("Socket.IO accepts the canonical path without a trailing slash", async () => {
+  const response = await fetch(`${fixture.origin}/api/realtime/socket.io?EIO=4&transport=polling`, { headers: { cookie: fixture.users.owner.cookie } });
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /"sid"/);
 });
 
 test("authentication and CSRF are required, and users cannot impersonate staff", async () => {
@@ -113,6 +119,22 @@ test("uploads reject spoofed files, protect recordings, and implement byte range
   assert.equal(invalid.status, 416);
   const another = await create("outsider");
   assert.equal((await fixture.request("outsider", `/tickets/${another.data.ticket._id}/messages`, { method: "POST", body: JSON.stringify({ attachments: [fileId], clientId: randomUUID() }) })).status, 400);
+});
+
+test("chunked uploads assemble recordings without a large proxy request", async () => {
+  const created = await create(); const id = created.data.ticket._id;
+  const bytes = new Uint8Array(4 * 1024 * 1024 + 17); bytes.set([0x1a, 0x45, 0xdf, 0xa3]);
+  const started = await fixture.request("owner", `/tickets/${id}/files/uploads`, { method: "POST", body: JSON.stringify({ name: "large.webm", size: bytes.length }) });
+  assert.equal(started.status, 201);
+  const { uploadId, chunkSize } = started.data;
+  let offset = 0;
+  while (offset < bytes.length) {
+    const chunk = bytes.slice(offset, Math.min(offset + chunkSize, bytes.length));
+    const response = await fixture.request("owner", `/tickets/${id}/files/uploads/${uploadId}`, { method: "PATCH", headers: { "content-type": "application/octet-stream", "x-upload-length": String(chunk.length), "x-upload-offset": String(offset) }, body: chunk });
+    assert.equal(response.status, 200); offset = response.data.offset;
+  }
+  const completed = await fixture.request("owner", `/tickets/${id}/files/uploads/${uploadId}/complete`, { method: "POST", body: JSON.stringify({}) });
+  assert.equal(completed.status, 201); assert.equal(completed.data.file.size, bytes.length);
 });
 
 test("sockets authenticate, reject unauthorized subscriptions, and deliver real-time messages", async () => {

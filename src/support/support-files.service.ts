@@ -2,15 +2,22 @@ import { BadRequestException, Injectable, NotFoundException, OnModuleDestroy, On
 import { GridFSBucket, ObjectId } from "mongodb";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Response } from "express";
+import type { Request } from "express";
 import { SupportService, type SupportFile } from "./support.service";
 import { idSchema, type SupportActor } from "./support.types";
 
 export const SUPPORT_MAX_FILE_BYTES = 100 * 1024 * 1024;
+export const SUPPORT_UPLOAD_CHUNK_BYTES = 3 * 1024 * 1024;
 export const SUPPORT_TEMP_DIR = join(tmpdir(), "spark-support-uploads");
+type SupportUpload = {
+  _id: string; ticketId: string; uploaderId: string; name: string; size: number;
+  offset: number; path: string; state: "active" | "writing"; createdAt: Date; expiresAt: Date;
+};
 export function detectSupportMime(header: Buffer): string | null {
   if (header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
   if (header.subarray(4, 8).toString() === "ftyp") return "video/mp4";
@@ -41,6 +48,74 @@ export class SupportFilesService implements OnModuleInit, OnModuleDestroy {
     void this.cleanup();
   }
   onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
+  async beginUpload(actor: SupportActor, ticketId: string, body: unknown) {
+    await this.support.ticket(actor, ticketId);
+    const input = body && typeof body === "object" ? body as Record<string, unknown> : {};
+    const size = Number(input.size);
+    if (!Number.isSafeInteger(size) || size < 1 || size > SUPPORT_MAX_FILE_BYTES) {
+      throw new BadRequestException("حجم الملف يجب أن يكون بين 1 بايت و100 ميجابايت");
+    }
+    const name = String(input.name ?? "recording.webm").replace(/[\\/\r\n\u0000-\u001f]/g, "_").slice(0, 160) || "recording.webm";
+    const id = randomUUID();
+    await mkdir(SUPPORT_TEMP_DIR, { recursive: true });
+    const path = join(SUPPORT_TEMP_DIR, `upload-${id}.tmp`);
+    const handle = await open(path, "wx");
+    await handle.close();
+    const upload: SupportUpload = { _id: id, ticketId, uploaderId: actor.userId, name, size, offset: 0, path, state: "active", createdAt: new Date(), expiresAt: new Date(Date.now() + 24 * 3600_000) };
+    try { await (await this.support.db()).collection<SupportUpload>("support_uploads").insertOne(upload); }
+    catch (error) { await rm(path, { force: true }); throw error; }
+    return { uploadId: id, chunkSize: SUPPORT_UPLOAD_CHUNK_BYTES };
+  }
+  async appendUpload(actor: SupportActor, ticketId: string, uploadId: string, req: Request) {
+    if (!/^[a-f\d-]{36}$/i.test(uploadId)) throw new NotFoundException("جلسة الرفع غير موجودة");
+    const length = Number(req.headers["x-upload-length"]);
+    const offset = Number(req.headers["x-upload-offset"]);
+    if (!Number.isSafeInteger(length) || length < 1 || length > SUPPORT_UPLOAD_CHUNK_BYTES || !Number.isSafeInteger(offset) || offset < 0) {
+      throw new BadRequestException("جزء الرفع غير صالح");
+    }
+    const db = await this.support.db();
+    const upload = await db.collection<SupportUpload>("support_uploads").findOneAndUpdate(
+      { _id: uploadId, ticketId, uploaderId: actor.userId, offset, state: "active", expiresAt: { $gt: new Date() } },
+      { $set: { state: "writing" } }, { returnDocument: "before" },
+    );
+    if (!upload) throw new BadRequestException("تعذر متابعة الرفع؛ أعد المحاولة من البداية");
+    if (offset + length > upload.size) {
+      await db.collection<SupportUpload>("support_uploads").updateOne({ _id: uploadId }, { $set: { state: "active" } });
+      throw new BadRequestException("حجم أجزاء الملف أكبر من الحجم المعلن");
+    }
+    const handle = await open(upload.path, "r+");
+    let written = 0;
+    try {
+      for await (const value of req) {
+        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        written += chunk.length;
+        if (written > length) throw new BadRequestException("حجم جزء الرفع غير صالح");
+        await handle.write(chunk, 0, chunk.length, offset + written - chunk.length);
+      }
+      if (written !== length) throw new BadRequestException("لم يصل جزء الرفع كاملاً");
+      await db.collection<SupportUpload>("support_uploads").updateOne(
+        { _id: uploadId, state: "writing" }, { $set: { state: "active", offset: offset + written } },
+      );
+      return { offset: offset + written };
+    } catch (error) {
+      await db.collection<SupportUpload>("support_uploads").deleteOne({ _id: uploadId });
+      await rm(upload.path, { force: true }).catch(() => undefined);
+      throw error;
+    } finally { await handle.close(); }
+  }
+  async completeUpload(actor: SupportActor, ticketId: string, uploadId: string) {
+    const db = await this.support.db();
+    const upload = await db.collection<SupportUpload>("support_uploads").findOne({ _id: uploadId, ticketId, uploaderId: actor.userId, state: "active" });
+    if (!upload || upload.offset !== upload.size) throw new BadRequestException("لم يكتمل رفع الملف");
+    await db.collection<SupportUpload>("support_uploads").deleteOne({ _id: uploadId });
+    return this.upload(actor, ticketId, { path: upload.path, size: upload.size, originalname: upload.name } as Express.Multer.File);
+  }
+  async cancelUpload(actor: SupportActor, ticketId: string, uploadId: string) {
+    const db = await this.support.db();
+    const upload = await db.collection<SupportUpload>("support_uploads").findOneAndDelete({ _id: uploadId, ticketId, uploaderId: actor.userId });
+    if (upload) await rm(upload.path, { force: true }).catch(() => undefined);
+    return { ok: true };
+  }
   async upload(actor: SupportActor, ticketId: string, file: Express.Multer.File) {
     try {
       await this.support.ticket(actor, ticketId);
@@ -95,11 +170,16 @@ export class SupportFilesService implements OnModuleInit, OnModuleDestroy {
       const cutoff = new Date(Date.now() - 24 * 3600_000);
       await mkdir(SUPPORT_TEMP_DIR, { recursive: true });
       for (const entry of await readdir(SUPPORT_TEMP_DIR, { withFileTypes: true })) {
-        if (!entry.isFile() || !/^[a-f\d-]+\.tmp$/i.test(entry.name)) continue;
+        if (!entry.isFile() || !/^(?:upload-)?[a-f\d-]+\.tmp$/i.test(entry.name)) continue;
         const path = join(SUPPORT_TEMP_DIR, entry.name);
         if ((await stat(path)).mtime < cutoff) await rm(path, { force: true });
       }
       const db = await this.support.db();
+      const expiredUploads = await db.collection<SupportUpload>("support_uploads").find({ expiresAt: { $lt: new Date() } }).limit(100).toArray();
+      for (const upload of expiredUploads) {
+        await db.collection<SupportUpload>("support_uploads").deleteOne({ _id: upload._id });
+        await rm(upload.path, { force: true }).catch(() => undefined);
+      }
       const bucket = new GridFSBucket(db, { bucketName: "support_media" });
       const abandoned = await db.collection<SupportFile>("support_files").find({ attached: false, createdAt: { $lt: cutoff } }).limit(100).toArray();
       for (const file of abandoned) {

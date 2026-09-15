@@ -60,6 +60,23 @@ export class SupportController {
     if (!file) throw new BadRequestException("اختر ملفاً");
     return this.files.upload(req.supportActor, id, file);
   }
+  @Post("tickets/:id/files/uploads")
+  @UseGuards(SupportUploadGuard)
+  beginUpload(@Req() req: SupportRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.files.beginUpload(req.supportActor, id, body);
+  }
+  @Patch("tickets/:id/files/uploads/:uploadId")
+  appendUpload(@Req() req: SupportRequest, @Param("id") id: string, @Param("uploadId") uploadId: string) {
+    return this.files.appendUpload(req.supportActor, id, uploadId, req);
+  }
+  @Post("tickets/:id/files/uploads/:uploadId/complete")
+  completeUpload(@Req() req: SupportRequest, @Param("id") id: string, @Param("uploadId") uploadId: string) {
+    return this.files.completeUpload(req.supportActor, id, uploadId);
+  }
+  @Delete("tickets/:id/files/uploads/:uploadId")
+  cancelUpload(@Req() req: SupportRequest, @Param("id") id: string, @Param("uploadId") uploadId: string) {
+    return this.files.cancelUpload(req.supportActor, id, uploadId);
+  }
   @Get("files/:id")
   download(@Req() req: SupportRequest, @Param("id") id: string, @Res() res: Response) { return this.files.download(req.supportActor, id, req.headers.range, res); }
   @Delete("files/:id")
