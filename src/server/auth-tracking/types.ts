@@ -345,6 +345,17 @@ export interface CompanyDoc {
    * يُستخدم في الزيادة الذرية عند إنشاء مشروع لإنتاج `displayNumber`.
    */
   projectSequenceCounter?: number;
+  /** صيغة الرقم المرجعي (بادئة + طول + نوع الجزء التسلسلي). */
+  serialNumbering?: {
+    referenceNumber?: {
+      valueType?: "numbers" | "letters" | "mixed";
+      length?: number;
+      hasPrefix?: boolean;
+      prefixKind?: "letters" | "year" | "month" | "day";
+      prefixKinds?: Array<"letters" | "year" | "month" | "day">;
+      prefixLetters?: string;
+    };
+  };
   createdAt: Date;
   updatedAt: Date;
   createdByUserId: ObjectId;

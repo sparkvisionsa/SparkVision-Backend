@@ -362,11 +362,11 @@ export class ClientsMongoService {
   ): Promise<ClientScope> {
     const context = await resolveRequestContext(request);
     if (!context.user || context.isUserBlocked || context.user.isBlocked) {
-      throw new ForbiddenException({ message: "Authentication required" });
+      throw new ForbiddenException({ message: "سجّل الدخول للمتابعة" });
     }
     const isSuperAdmin = context.user.role === "super_admin";
     if (!context.company && !isSuperAdmin) {
-      throw new ForbiddenException({ message: "Company context required" });
+      throw new ForbiddenException({ message: "اختر شركة للمتابعة" });
     }
     const companyId = context.company
       ? new Types.ObjectId(context.company._id.toString())
@@ -377,7 +377,7 @@ export class ClientsMongoService {
         ? context.companyMembership.productIds
         : context.company?.valueTechProductIds;
       if (!allowed?.includes(productId)) {
-        throw new ForbiddenException({ message: "No access to this product" });
+        throw new ForbiddenException({ message: "لا تملك صلاحية الوصول إلى هذا المنتج" });
       }
     }
     return { companyId, productId };
@@ -960,7 +960,7 @@ export class ClientsMongoService {
         $and: [this.scopedClientFilter(scope, true)],
       })
       .exec();
-    if (!existing) throw new NotFoundException({ message: "Client not found" });
+    if (!existing) throw new NotFoundException({ message: "العميل غير موجود" });
     const raw = existing.toObject() as unknown as Record<string, unknown>;
     const productIds = normalizeProductIds(
       raw.productIds,
@@ -1012,7 +1012,7 @@ export class ClientsMongoService {
         $and: [this.scopedClientFilter(scope, true)],
       })
       .exec();
-    if (!existing) throw new NotFoundException({ message: "Client not found" });
+    if (!existing) throw new NotFoundException({ message: "العميل غير موجود" });
     const raw = existing.toObject() as unknown as Record<string, unknown>;
     const productIds = normalizeProductIds(
       raw.productIds,

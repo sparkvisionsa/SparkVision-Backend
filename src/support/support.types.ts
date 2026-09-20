@@ -58,11 +58,13 @@ export interface SupportNotification {
   createdAt: Date;
   readAt: Date | null;
 }
-export const idSchema = z.string().regex(/^[a-f\d]{24}$/i);
+export const idSchema = z.string().regex(/^[a-f\d]{24}$/i, "معرّف غير صالح. حدّث الصفحة ثم أعد المحاولة");
 // User accounts created before the MongoDB migration retain their UUIDs.
 export const supportUserIdSchema = z.union([idSchema, z.string().uuid()]);
-export const clientIdSchema = z.string().min(8).max(100).regex(/^[\w-]+$/);
-export const safePage = z.string().max(500).refine(v => v.startsWith("/") && !v.startsWith("//") && !/[\\\r\n]/.test(v));
+// حقول تقنية لا يكتبها المستخدم؛ رسالتها تدله على الحل بدل وصف القاعدة.
+const CLIENT_ID_HINT = "تعذّر تجهيز الطلب. حدّث الصفحة ثم أعد المحاولة";
+export const clientIdSchema = z.string({ required_error: CLIENT_ID_HINT, invalid_type_error: CLIENT_ID_HINT }).min(8, CLIENT_ID_HINT).max(100, CLIENT_ID_HINT).regex(/^[\w-]+$/, CLIENT_ID_HINT);
+export const safePage = z.string().max(500).refine(v => v.startsWith("/") && !v.startsWith("//") && !/[\\\r\n]/.test(v), "تعذّر تحديد الصفحة الحالية. حدّث الصفحة ثم أعد المحاولة");
 export const createTicketSchema = z.object({
   subject: z.string().trim().min(3).max(160),
   text: z.string().trim().max(8000).default(""),

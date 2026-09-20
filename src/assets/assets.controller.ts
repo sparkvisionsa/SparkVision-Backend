@@ -18,6 +18,7 @@ import {
 } from "@nestjs/common";
 import type { Response } from "express";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { arabicValidationExceptionFactory } from "@/common/validation-error-message";
 import { decodeUploadFilename } from "@/machine-valuation/sheet-rows.util";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "./asset-import.constants";
 import { AssetImportService, isAssetImportMultipartAllowed } from "./asset-import.service";
@@ -46,6 +47,7 @@ import {
   new ValidationPipe({
     transform: true,
     whitelist: true,
+    exceptionFactory: arabicValidationExceptionFactory,
   }),
 )
 export class AssetsController {

@@ -9,6 +9,7 @@ import {
 import type { Response } from "express";
 import { ZodError } from "zod";
 import { HttpError } from "@/server/auth-tracking/service";
+import { zodRequestMessage } from "./zod-request-message";
 
 @Catch()
 export class ApiErrorFilter implements ExceptionFilter {
@@ -52,7 +53,8 @@ export class ApiErrorFilter implements ExceptionFilter {
     if (exception instanceof ZodError) {
       response.status(HttpStatus.BAD_REQUEST).json({
         error: "invalid_payload",
-        message: "Invalid request payload.",
+        // الواجهات تعرض `message` مباشرة للمستخدم، فيجب أن يشرح الحقل والقاعدة.
+        message: zodRequestMessage(exception),
         details: {
           issues: exception.issues,
         },

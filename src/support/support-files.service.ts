@@ -12,7 +12,12 @@ import { SupportService, type SupportFile } from "./support.service";
 import { idSchema, type SupportActor } from "./support.types";
 
 export const SUPPORT_MAX_FILE_BYTES = 100 * 1024 * 1024;
+/** الرفع المُقطَّع يتسع لتسجيل شاشة كامل مدته ساعة قادم من "كن مطور". */
+export const SUPPORT_MAX_CHUNKED_BYTES = 512 * 1024 * 1024;
 export const SUPPORT_UPLOAD_CHUNK_BYTES = 3 * 1024 * 1024;
+function sizeLimitMessage(maxBytes: number) {
+  return `حجم الملف يجب أن يكون بين 1 بايت و${Math.round(maxBytes / 1024 / 1024)} ميجابايت`;
+}
 export const SUPPORT_TEMP_DIR = join(tmpdir(), "spark-support-uploads");
 type SupportUpload = {
   _id: string; ticketId: string; uploaderId: string; name: string; size: number;
@@ -52,8 +57,8 @@ export class SupportFilesService implements OnModuleInit, OnModuleDestroy {
     await this.support.ticket(actor, ticketId);
     const input = body && typeof body === "object" ? body as Record<string, unknown> : {};
     const size = Number(input.size);
-    if (!Number.isSafeInteger(size) || size < 1 || size > SUPPORT_MAX_FILE_BYTES) {
-      throw new BadRequestException("حجم الملف يجب أن يكون بين 1 بايت و100 ميجابايت");
+    if (!Number.isSafeInteger(size) || size < 1 || size > SUPPORT_MAX_CHUNKED_BYTES) {
+      throw new BadRequestException(sizeLimitMessage(SUPPORT_MAX_CHUNKED_BYTES));
     }
     const name = String(input.name ?? "recording.webm").replace(/[\\/\r\n\u0000-\u001f]/g, "_").slice(0, 160) || "recording.webm";
     const id = randomUUID();
@@ -108,7 +113,7 @@ export class SupportFilesService implements OnModuleInit, OnModuleDestroy {
     const upload = await db.collection<SupportUpload>("support_uploads").findOne({ _id: uploadId, ticketId, uploaderId: actor.userId, state: "active" });
     if (!upload || upload.offset !== upload.size) throw new BadRequestException("لم يكتمل رفع الملف");
     await db.collection<SupportUpload>("support_uploads").deleteOne({ _id: uploadId });
-    return this.upload(actor, ticketId, { path: upload.path, size: upload.size, originalname: upload.name } as Express.Multer.File);
+    return this.upload(actor, ticketId, { path: upload.path, size: upload.size, originalname: upload.name } as Express.Multer.File, SUPPORT_MAX_CHUNKED_BYTES);
   }
   async cancelUpload(actor: SupportActor, ticketId: string, uploadId: string) {
     const db = await this.support.db();
@@ -116,10 +121,10 @@ export class SupportFilesService implements OnModuleInit, OnModuleDestroy {
     if (upload) await rm(upload.path, { force: true }).catch(() => undefined);
     return { ok: true };
   }
-  async upload(actor: SupportActor, ticketId: string, file: Express.Multer.File) {
+  async upload(actor: SupportActor, ticketId: string, file: Express.Multer.File, maxBytes = SUPPORT_MAX_FILE_BYTES) {
     try {
       await this.support.ticket(actor, ticketId);
-      if (!file?.size || file.size > SUPPORT_MAX_FILE_BYTES) throw new BadRequestException("حجم الملف يجب أن يكون بين 1 بايت و100 ميجابايت");
+      if (!file?.size || file.size > maxBytes) throw new BadRequestException(sizeLimitMessage(maxBytes));
       const handle = await open(file.path, "r");
       const header = Buffer.alloc(32);
       try { await handle.read(header, 0, 32, 0); } finally { await handle.close(); }

@@ -17,6 +17,12 @@ import { getMongoDb } from "@/server/mongodb";
 import { getAuthCollections } from "@/server/auth-tracking/collections";
 import type { UserDoc, UserProfileDoc } from "@/server/auth-tracking/types";
 import {
+  formatReferenceNumber,
+  resolveSerialNumberingSettings,
+  toProjectSerialApiFields,
+  trimReferenceNumber,
+} from "@/organization/serial-numbering";
+import {
   MV_FILES_BUCKET,
   MV_FILES_FILES_COLLECTION,
   MV_PROJECTS_COLLECTION,
@@ -5360,11 +5366,20 @@ export class MachineValuationService implements OnModuleInit {
    */
   private async ensureDisplayNumberForProject(
     db: Db,
-    project: { _id: ObjectId; companyId?: ObjectId | string; displayNumber?: number },
+    project: {
+      _id: ObjectId;
+      companyId?: ObjectId | string;
+      displayNumber?: number;
+      referenceNumber?: string | null;
+      createdAt?: Date;
+      reportData?: MvProjectReportData;
+    },
   ): Promise<number | null> {
-    if (typeof project.displayNumber === "number" && Number.isFinite(project.displayNumber)) {
-      return project.displayNumber;
-    }
+    const existingDisplay =
+      typeof project.displayNumber === "number" && Number.isFinite(project.displayNumber)
+        ? project.displayNumber
+        : null;
+    const existingReference = trimReferenceNumber(project.referenceNumber);
     const companyIdRaw = project.companyId;
     let companyOid: ObjectId | null = null;
     if (companyIdRaw instanceof ObjectId) {
@@ -5372,22 +5387,72 @@ export class MachineValuationService implements OnModuleInit {
     } else if (typeof companyIdRaw === "string" && companyIdRaw.trim()) {
       companyOid = tryParseObjectId(companyIdRaw.trim());
     }
+
+    const persistSerialFields = async (displayNumber: number, referenceNumber: string | null) => {
+      const $set: Record<string, unknown> = { displayNumber };
+      const already = trimReferenceNumber(project.referenceNumber);
+      if (referenceNumber && !already) {
+        $set.referenceNumber = referenceNumber;
+        project.referenceNumber = referenceNumber;
+        const currentReportRef = trimReferenceNumber(project.reportData?.reportReference);
+        if (!currentReportRef) {
+          $set["reportData.reportReference"] = referenceNumber;
+          project.reportData = { ...(project.reportData ?? {}), reportReference: referenceNumber };
+        }
+      }
+      await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne({ _id: project._id }, { $set });
+    };
+
+    const formatForCompany = async (displayNumber: number, at: Date) => {
+      const already = trimReferenceNumber(project.referenceNumber);
+      if (already) return already;
+      if (!companyOid) return null;
+      try {
+        const company = await getAuthCollections(db).companies.findOne(
+          { _id: companyOid },
+          { projection: { serialNumbering: 1 } },
+        );
+        const settings = resolveSerialNumberingSettings(company?.serialNumbering);
+        return formatReferenceNumber(settings.referenceNumber, displayNumber, at);
+      } catch (err) {
+        this.logger.warn(
+          `formatReferenceNumber failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }
+    };
+
+    if (existingDisplay != null) {
+      if (!existingReference && companyOid) {
+        const createdAt = project.createdAt instanceof Date ? project.createdAt : new Date();
+        const formatted = await formatForCompany(existingDisplay, createdAt);
+        if (formatted) {
+          try {
+            await persistSerialFields(existingDisplay, formatted);
+          } catch {
+            // best-effort backfill
+          }
+        }
+      }
+      return existingDisplay;
+    }
     if (!companyOid) return null;
     try {
-      // Count older projects (created before this one) within the same company
-      // to deterministically assign a number compatible with list ordering.
       const projectDoc = await db
         .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
-        .findOne({ _id: project._id }, { projection: { createdAt: 1 } });
+        .findOne({ _id: project._id }, { projection: { createdAt: 1, reportData: 1, referenceNumber: 1 } });
       const createdAt = projectDoc?.createdAt instanceof Date ? projectDoc.createdAt : new Date(0);
+      if (projectDoc?.reportData) project.reportData = projectDoc.reportData;
+      if (!project.referenceNumber && projectDoc?.referenceNumber) {
+        project.referenceNumber = projectDoc.referenceNumber;
+      }
       const olderCount = await db
         .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
         .countDocuments({ companyId: companyOid, createdAt: { $lt: createdAt } });
       const next = olderCount + 1;
-      await db
-        .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
-        .updateOne({ _id: project._id }, { $set: { displayNumber: next } });
-      // Sync the company counter if it is behind, so future creations stay monotonic.
+      const formatted = await formatForCompany(next, createdAt);
+      await persistSerialFields(next, formatted);
+      project.displayNumber = next;
       try {
         await getAuthCollections(db).companies.updateOne(
           { _id: companyOid, $or: [{ projectSequenceCounter: { $exists: false } }, { projectSequenceCounter: { $lt: next } }] },
@@ -5415,6 +5480,7 @@ export class MachineValuationService implements OnModuleInit {
       _id: string;
       companyId: string | null;
       displayNumber: number | null;
+      referenceNumber?: string | null;
       createdAt: string;
     },
   >(rows: T[]): T[] {
@@ -5464,12 +5530,14 @@ export class MachineValuationService implements OnModuleInit {
       name: 1,
       companyId: 1,
       displayNumber: 1,
+      referenceNumber: 1,
       createdAt: 1,
       updatedAt: 1,
       userId: 1,
       workflowStatus: 1,
       reportType: 1,
       reportData: {
+        reportDataModelId: 1,
         valuationMethod: 1,
         valuationPurpose: 1,
         valuePremise: 1,
@@ -5714,6 +5782,7 @@ export class MachineValuationService implements OnModuleInit {
             typeof p.displayNumber === "number" && Number.isFinite(p.displayNumber)
               ? p.displayNumber
               : null,
+          referenceNumber: trimReferenceNumber(p.referenceNumber),
           createdAt: mvProjectDateToIso(p.createdAt),
           updatedAt: mvProjectDateToIso(p.updatedAt),
           subProjectCount:
@@ -5802,12 +5871,14 @@ export class MachineValuationService implements OnModuleInit {
      */
     const companiesCollection = getAuthCollections(db).companies;
     let displayNumber: number | undefined;
+    let serialNumberingRaw: unknown;
     try {
       const seqDoc = await companiesCollection.findOneAndUpdate(
         { _id: resolvedCompanyId },
         { $inc: { projectSequenceCounter: 1 }, $set: { updatedAt: now } },
-        { returnDocument: "after", projection: { projectSequenceCounter: 1 } },
+        { returnDocument: "after", projection: { projectSequenceCounter: 1, serialNumbering: 1 } },
       );
+      serialNumberingRaw = seqDoc && typeof seqDoc === "object" ? seqDoc.serialNumbering : undefined;
       if (seqDoc) {
         const counter =
           typeof seqDoc.projectSequenceCounter === "number" && Number.isFinite(seqDoc.projectSequenceCounter)
@@ -5840,6 +5911,22 @@ export class MachineValuationService implements OnModuleInit {
       );
     }
 
+    let referenceNumber: string | null = null;
+    if (typeof displayNumber === "number") {
+      try {
+        const settings = resolveSerialNumberingSettings(serialNumberingRaw);
+        referenceNumber = formatReferenceNumber(settings.referenceNumber, displayNumber, now);
+      } catch (err) {
+        this.logger.warn(
+          `createProject: reference number format failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const initialReportData: MvProjectReportData = referenceNumber
+      ? { reportReference: referenceNumber }
+      : {};
+
     const doc: Omit<MvProjectDoc, "_id"> = {
       name: n,
       companyId: resolvedCompanyId,
@@ -5847,12 +5934,13 @@ export class MachineValuationService implements OnModuleInit {
       updatedAt: now,
       workflowStatus: "new",
       reportType,
-      reportData: {},
+      reportData: initialReportData,
       locations,
       contacts,
       inspectionAssignments: [],
       inspectorFiles: [],
       ...(typeof displayNumber === "number" ? { displayNumber } : {}),
+      ...(referenceNumber ? { referenceNumber } : {}),
       ...(uid ? { userId: uid } : {}),
     };
     const { insertedId } = await db.collection(MV_PROJECTS_COLLECTION).insertOne(doc);
@@ -5865,12 +5953,12 @@ export class MachineValuationService implements OnModuleInit {
       _id: insertedId.toString(),
       name: n,
       companyId: resolvedCompanyId.toString(),
-      displayNumber: displayNumber ?? null,
+      ...toProjectSerialApiFields({ displayNumber: displayNumber ?? null, referenceNumber }),
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       workflowStatus: "new" as const,
       reportType,
-      reportData: {},
+      reportData: initialReportData,
       locations,
       contacts,
       sheetCount: 0,
@@ -5922,6 +6010,11 @@ export class MachineValuationService implements OnModuleInit {
     );
 
     const reportData = sanitizeReportData(source.reportData);
+    const createdReference =
+      created.referenceNumber?.trim() || created.reportData?.reportReference?.trim() || "";
+    if (createdReference) {
+      reportData.reportReference = createdReference;
+    }
     const updated = await this.updateProject(created._id, ctx, { reportData });
     return {
       ok: true as const,
@@ -5968,10 +6061,12 @@ export class MachineValuationService implements OnModuleInit {
           companyId: 1,
           userId: 1,
           displayNumber: 1,
+          referenceNumber: 1,
           createdAt: 1,
           updatedAt: 1,
           workflowStatus: 1,
           reportType: 1,
+          reportData: 1,
           locations: 1,
           contacts: 1,
           inspectionAssignments: 1,
@@ -5982,6 +6077,12 @@ export class MachineValuationService implements OnModuleInit {
     this.assertProjectInScope(target, ctx);
 
     const reportData = sanitizeReportData(source.reportData);
+    const keepReference =
+      trimReferenceNumber(target.referenceNumber) ||
+      trimReferenceNumber(target.reportData?.reportReference);
+    if (keepReference) {
+      reportData.reportReference = keepReference;
+    }
     if (!hasMeaningfulSanitizedReportData(reportData)) {
       return { ok: false as const, empty: true as const, project: null };
     }
@@ -5997,6 +6098,7 @@ export class MachineValuationService implements OnModuleInit {
           companyId: 1,
           userId: 1,
           displayNumber: 1,
+          referenceNumber: 1,
           createdAt: 1,
           updatedAt: 1,
           workflowStatus: 1,
@@ -6023,7 +6125,10 @@ export class MachineValuationService implements OnModuleInit {
             : updated.companyId != null && String(updated.companyId).trim() !== ""
               ? String(updated.companyId).trim()
               : null,
-        displayNumber: updatedDisplayNumber,
+        ...toProjectSerialApiFields({
+          displayNumber: updatedDisplayNumber,
+          referenceNumber: updated.referenceNumber,
+        }),
         createdAt: mvProjectDateToIso(updated.createdAt),
         updatedAt: mvProjectDateToIso(updated.updatedAt),
         workflowStatus: projectWorkflowStatus(updated),
@@ -6191,7 +6296,10 @@ export class MachineValuationService implements OnModuleInit {
             : updated.companyId != null && String(updated.companyId).trim() !== ""
               ? String(updated.companyId).trim()
               : null,
-        displayNumber: updatedDisplayNumber,
+        ...toProjectSerialApiFields({
+          displayNumber: updatedDisplayNumber,
+          referenceNumber: updated.referenceNumber,
+        }),
         createdAt: mvProjectDateToIso(updated.createdAt),
         updatedAt: mvProjectDateToIso(updated.updatedAt),
         workflowStatus: projectWorkflowStatus(updated),
@@ -6279,7 +6387,10 @@ export class MachineValuationService implements OnModuleInit {
               : project.companyId != null && String(project.companyId).trim() !== ""
                 ? String(project.companyId).trim()
                 : null,
-          displayNumber: ensuredDisplayNumber,
+          ...toProjectSerialApiFields({
+            displayNumber: ensuredDisplayNumber,
+            referenceNumber: project.referenceNumber,
+          }),
           createdAt: mvProjectDateToIso(project.createdAt),
           updatedAt: mvProjectDateToIso(project.updatedAt),
           workflowStatus: projectWorkflowStatus(project),
@@ -6462,7 +6573,10 @@ export class MachineValuationService implements OnModuleInit {
             : project.companyId != null && String(project.companyId).trim() !== ""
               ? String(project.companyId).trim()
               : null,
-        displayNumber: ensuredDisplayNumber,
+        ...toProjectSerialApiFields({
+          displayNumber: ensuredDisplayNumber,
+          referenceNumber: project.referenceNumber,
+        }),
         createdAt: mvProjectDateToIso(project.createdAt),
         updatedAt: mvProjectDateToIso(project.updatedAt),
         workflowStatus: projectWorkflowStatus(project),

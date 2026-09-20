@@ -74,7 +74,7 @@ export class LocationsService {
   async createRegion(body: { titleAr?: string; titleEn?: string }) {
     const titleAr = (body.titleAr ?? "").trim();
     const titleEn = (body.titleEn ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
 
     const db = await getMongoDb();
     const now = new Date();
@@ -99,7 +99,7 @@ export class LocationsService {
       throw new NotFoundException({ message: "المنطقة غير موجودة" });
     const titleAr = (body.titleAr ?? "").trim();
     const titleEn = (body.titleEn ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
 
     const db = await getMongoDb();
     const row = await db
@@ -149,10 +149,10 @@ export class LocationsService {
     const titleAr = (body.titleAr ?? "").trim();
     const titleEn = (body.titleEn ?? "").trim();
     const regionId = (body.regionId ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
-    if (!regionId) throw new BadRequestException({ message: "regionId مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
+    if (!regionId) throw new BadRequestException({ message: "اختر المنطقة" });
     if (!ObjectId.isValid(regionId))
-      throw new BadRequestException({ message: "regionId غير صالح" });
+      throw new BadRequestException({ message: "المنطقة المختارة غير صالحة" });
 
     const db = await getMongoDb();
     const regionOk = await db
@@ -197,7 +197,7 @@ export class LocationsService {
       throw new NotFoundException({ message: "المدينة غير موجودة" });
     const titleAr = (body.titleAr ?? "").trim();
     const titleEn = (body.titleEn ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
 
     const db = await getMongoDb();
     const row = await db
@@ -261,9 +261,9 @@ export class LocationsService {
     const titleEn = (body.titleEn ?? "").trim();
     const regionId = (body.regionId ?? "").trim();
     const cityId = (body.cityId ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
-    if (!regionId) throw new BadRequestException({ message: "regionId مطلوب" });
-    if (!cityId) throw new BadRequestException({ message: "cityId مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
+    if (!regionId) throw new BadRequestException({ message: "اختر المنطقة" });
+    if (!cityId) throw new BadRequestException({ message: "اختر المدينة" });
 
     const db = await getMongoDb();
     const now = new Date();
@@ -303,7 +303,7 @@ export class LocationsService {
     if (!ObjectId.isValid(id))
       throw new NotFoundException({ message: "الحي غير موجود" });
     const titleAr = (body.titleAr ?? "").trim();
-    if (!titleAr) throw new BadRequestException({ message: "titleAr مطلوب" });
+    if (!titleAr) throw new BadRequestException({ message: "الاسم بالعربية مطلوب" });
 
     const db = await getMongoDb();
     const row = await db

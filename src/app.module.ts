@@ -18,6 +18,7 @@ import { LocationsModule } from "./location/locations.module";
 import { MachineValuationModule } from "./machine-valuation/machine-valuation.module";
 import { AssetsModule } from "./assets/assets.module";
 import { TransactionsModule } from "./transactions/transactions.module";
+import { HelperToolsModule } from "./helper-tools/helper-tools.module";
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { TransactionsModule } from "./transactions/transactions.module";
     MachineValuationModule,
     AssetsModule,
     TransactionsModule,
+    HelperToolsModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],

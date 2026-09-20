@@ -35,4 +35,6 @@ declare module "@nestjs/throttler" {
   export class ThrottlerGuard implements CanActivate {
     canActivate(context: ExecutionContext): boolean | Promise<boolean>;
   }
+
+  export function SkipThrottle(skip?: Record<string, boolean>): MethodDecorator & ClassDecorator;
 }

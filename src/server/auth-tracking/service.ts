@@ -28,6 +28,7 @@ import {
   type RequestContext,
 } from "./context";
 import { tryParseObjectId } from "@/common/object-id.util";
+import { zodRequestMessage } from "@/common/zod-request-message";
 import { hashPassword, randomId, verifyPassword } from "./crypto";
 import { consumeRateLimit } from "./rate-limit";
 import { deleteCachedSession, writeCachedSession } from "./session-store";
@@ -76,6 +77,11 @@ import {
   buildDefaultCompanyReportDefaults,
   buildDefaultCompanyReportSectionModels,
 } from "./company-report-defaults.constants";
+import {
+  formatReferenceNumber,
+  resolveSerialNumberingSettings,
+  sanitizePrefixLetters,
+} from "@/organization/serial-numbering";
 
 const COMPANY_MEMBERSHIP_ROLE_LABELS_AR: Record<CompanyMembershipRole, string> = {
   company_admin: "مدير الشركة",
@@ -179,6 +185,16 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * خطأ تحقّق يشرح للمستخدم الحقل والقاعدة بالعربية بدل رسالة تقنية عامة.
+ * `details.issues` تبقى للتشخيص في سجلات المتصفح.
+ */
+function invalidPayload(error: z.ZodError): HttpError {
+  return new HttpError(400, "invalid_payload", zodRequestMessage(error), {
+    issues: error.flatten(),
+  });
+}
+
 type UsersCollection = ReturnType<typeof getAuthCollections>["users"];
 
 function normalizePhoneIdentifier(value?: string | null): string | undefined {
@@ -280,7 +296,7 @@ const loginSchema = z.object({
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["phone"],
-      message: "Phone number is required.",
+      message: "أدخل رقم الجوال أو اسم المستخدم.",
     });
   }
 });
@@ -1408,7 +1424,7 @@ export async function loginUser(
   }
   const parsed = loginSchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid login payload.");
+    throw invalidPayload(parsed.error);
   }
   const payload = parsed.data;
   const limiter = consumeRateLimit(`${context.ipAddress}:login`, {
@@ -1603,7 +1619,7 @@ export async function updateUserProfile(request: Request, body: unknown) {
 
   const parsed = profileSchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid profile payload.");
+    throw invalidPayload(parsed.error);
   }
 
   const payload = parsed.data;
@@ -3395,7 +3411,7 @@ export function resolveCompanyReportDefaults(
 const reportDefaultsImageDataUrlSchema = z
   .union([
     z.string().max(REPORT_DEFAULTS_IMAGE_DATA_URL_MAX_CHARS).refine(isReportDefaultsImageReference, {
-      message: "image must be a data URL or a persisted report template upload URL",
+      message: "الصورة يجب أن تكون ملفاً صالحاً أو رابط تحميل محفوظاً في النظام",
     }),
     z.null(),
   ])
@@ -3487,7 +3503,7 @@ const wordTemplateItemSchema = z
     fileUrl: z
       .union([
         z.string().max(REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS).refine(isReportDefaultsWordTemplateUrl, {
-          message: "word template URL must be a persisted company .docx upload URL",
+          message: "رابط قالب Word يجب أن يكون رابط تحميل محفوظاً بامتداد .docx",
         }),
         z.literal(""),
         z.null(),
@@ -3501,7 +3517,7 @@ const wordTemplateItemSchema = z
         z
           .string()
           .max(REPORT_DEFAULTS_WORD_TEMPLATE_DATA_URL_MAX_CHARS)
-          .refine((value) => value.startsWith("data:"), { message: "word template must be a data URL" }),
+          .refine((value) => value.startsWith("data:"), { message: "ارفع ملف قالب Word صالحاً" }),
         z.literal(""),
         z.null(),
       ])
@@ -3525,7 +3541,7 @@ const pptxTemplateItemSchema = z
     fileUrl: z
       .union([
         z.string().max(REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS).refine(isReportDefaultsPptxTemplateUrl, {
-          message: "PowerPoint template URL must be a persisted company .pptx upload URL",
+          message: "رابط قالب PowerPoint يجب أن يكون رابط تحميل محفوظاً بامتداد .pptx",
         }),
         z.literal(""),
         z.null(),
@@ -3539,7 +3555,7 @@ const pptxTemplateItemSchema = z
         z
           .string()
           .max(REPORT_DEFAULTS_PPTX_TEMPLATE_DATA_URL_MAX_CHARS)
-          .refine((value) => value.startsWith("data:"), { message: "PowerPoint template must be a data URL" }),
+          .refine((value) => value.startsWith("data:"), { message: "ارفع ملف قالب PowerPoint صالحاً" }),
         z.literal(""),
         z.null(),
       ])
@@ -3703,7 +3719,7 @@ const updateCompanyBrandingSchema = z
   .object({
     logoDataUrl: z
       .union([
-        z.string().max(900_000).refine((s) => s.startsWith("data:image/"), { message: "logo must be data URL" }),
+        z.string().max(900_000).refine((s) => s.startsWith("data:image/"), { message: "شعار الشركة يجب أن يكون صورة صالحة" }),
         z.literal(""),
         z.null(),
       ])
@@ -3711,7 +3727,7 @@ const updateCompanyBrandingSchema = z
     commercialRegistration: z.string().trim().max(32).optional(),
   })
   .refine((v) => v.logoDataUrl !== undefined || v.commercialRegistration !== undefined, {
-    message: "Provide logoDataUrl or commercialRegistration.",
+    message: "لا يوجد تغيير للحفظ؛ حدّث شعار الشركة أو رقم السجل التجاري",
   });
 
 const updateMemberSignatureBodySchema = z.object({
@@ -3721,7 +3737,7 @@ const updateMemberSignatureBodySchema = z.object({
       .string()
       .max(700_000)
       .refine((s) => s === "" || s.startsWith("data:image/"), {
-        message: "signature must be data URL or empty",
+        message: "التوقيع يجب أن يكون صورة صالحة أو فارغاً",
       }),
     z.null(),
   ]),
@@ -3797,7 +3813,7 @@ const createReportOnlySignatorySchema = z.object({
     .min(2)
     .max(160)
     .refine((value) => isSafeValuationReportName(value), {
-      message: "Report display name must be a name, not a phone number.",
+      message: "اكتب اسم معدّ التقرير بالحروف، لا رقم جوال",
     }),
   jobTitle: z.string().trim().max(160).optional().or(z.literal("")),
   membershipNo: z.string().trim().max(80).optional().or(z.literal("")),
@@ -3810,7 +3826,7 @@ const updateReportOnlySignatorySchema = z.object({
     .min(2)
     .max(160)
     .refine((value) => isSafeValuationReportName(value), {
-      message: "Report display name must be a name, not a phone number.",
+      message: "اكتب اسم معدّ التقرير بالحروف، لا رقم جوال",
     })
     .optional(),
   jobTitle: z.string().trim().max(160).optional().or(z.literal("")),
@@ -3823,7 +3839,7 @@ const updateReportOnlySignatorySignatureSchema = z.object({
       .string()
       .max(700_000)
       .refine((s) => s === "" || s.startsWith("data:image/"), {
-        message: "signature must be data URL or empty",
+        message: "التوقيع يجب أن يكون صورة صالحة أو فارغاً",
       }),
     z.null(),
   ]),
@@ -3844,7 +3860,7 @@ const createCompanySchema = z.object({
   password: z.string().min(8).max(128),
   email: z.string().email().optional().or(z.literal("")),
   phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
-    message: "Phone number must include country code.",
+    message: "أدخل رقم الجوال مع مفتاح الدولة، مثل +9665xxxxxxxx",
   }),
   valueTechProductIds: z.array(valueTechProductIdSchema).default([]),
 });
@@ -3898,12 +3914,12 @@ const createCompanyUserSchema = z.object({
   email: z.union([z.string().email(), z.literal("")]).optional(),
   valuationReportDisplayName: z.string().trim().max(160).refine(
     (value) => value === "" || isSafeValuationReportName(value),
-    { message: "Report display name must be a name, not a phone number." },
+    { message: "اكتب اسم معدّ التقرير بالحروف، لا رقم جوال" },
   ).optional().or(z.literal("")),
   valuationReportJobTitle: z.string().trim().max(160).optional().or(z.literal("")),
   valuationReportMembershipNo: z.string().trim().max(80).optional().or(z.literal("")),
   phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
-    message: "Phone number must include country code.",
+    message: "أدخل رقم الجوال مع مفتاح الدولة، مثل +9665xxxxxxxx",
   }),
 });
 
@@ -3914,12 +3930,12 @@ const updateCompanyUserByCompanyAdminBodySchema = z
     email: z.union([z.string().email(), z.literal("")]).optional(),
     valuationReportDisplayName: z.string().trim().max(160).refine(
       (value) => value === "" || isSafeValuationReportName(value),
-      { message: "Report display name must be a name, not a phone number." },
+      { message: "اكتب اسم معدّ التقرير بالحروف، لا رقم جوال" },
     ).optional().or(z.literal("")),
     valuationReportJobTitle: z.string().trim().max(160).optional().or(z.literal("")),
     valuationReportMembershipNo: z.string().trim().max(80).optional().or(z.literal("")),
     phone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
-      message: "Phone number must include country code.",
+      message: "أدخل رقم الجوال مع مفتاح الدولة، مثل +9665xxxxxxxx",
     }).optional(),
     newPassword: z.string().min(8).max(128).optional(),
   })
@@ -3960,7 +3976,7 @@ export async function createCompanyBySuperAdmin(request: Request, body: unknown)
 
   const parsed = createCompanySchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid company payload.");
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4340,6 +4356,114 @@ export async function getCompanyReportDefaultsForMember(request: Request) {
   };
 }
 
+const updateCompanySerialNumberingSchema = z.object({
+  referenceNumber: z.object({
+    valueType: z.enum(["numbers", "letters", "mixed"]),
+    length: z.number({ invalid_type_error: "أدخل طول الرقم المرجعي." }).int().min(1).max(12),
+    hasPrefix: z.boolean(),
+    prefixKind: z.enum(["letters", "year", "month", "day"]).optional(),
+    prefixKinds: z.array(z.enum(["letters", "year", "month", "day"])).max(4).optional(),
+    prefixLetters: z.string().max(8).optional(),
+  }).superRefine((value, ctx) => {
+    if (!value.hasPrefix) return;
+    const kinds = (value.prefixKinds?.length ? value.prefixKinds : value.prefixKind ? [value.prefixKind] : [])
+      .filter((kind, index, list) => list.indexOf(kind) === index);
+    if (kinds.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["prefixKinds"],
+        message: "اختر نوعاً واحداً على الأقل للبادئة.",
+      });
+      return;
+    }
+    if (!kinds.includes("letters")) return;
+    const letters = sanitizePrefixLetters(value.prefixLetters);
+    if (!letters) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["prefixLetters"],
+        message: "أدخل أحرف البادئة مثل NX.",
+      });
+    }
+  }),
+});
+
+export async function getCompanySerialNumberingForCompanyAdmin(request: Request) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+
+  const db = await getMongoDb();
+  const companyId = context.company!._id;
+  const company = await getAuthCollections(db).companies.findOne(
+    { _id: companyId },
+    { projection: { serialNumbering: 1, projectSequenceCounter: 1 } },
+  );
+  const settings = resolveSerialNumberingSettings(company?.serialNumbering);
+  const currentCounter =
+    typeof company?.projectSequenceCounter === "number" && Number.isFinite(company.projectSequenceCounter)
+      ? Math.max(0, Math.trunc(company.projectSequenceCounter))
+      : 0;
+  const nextSequence = currentCounter + 1;
+  const now = new Date();
+  return {
+    context,
+    payload: {
+      settings,
+      currentCounter,
+      nextSequence,
+      preview: formatReferenceNumber(settings.referenceNumber, 1, now),
+      nextPreview: formatReferenceNumber(settings.referenceNumber, nextSequence, now),
+    },
+  };
+}
+
+export async function updateCompanySerialNumberingByCompanyAdmin(request: Request, body: unknown) {
+  const context = await resolveRequestContext(request);
+  assertCompanyAdminUser(context);
+  assertCsrf(request);
+
+  const parsed = updateCompanySerialNumberingSchema.safeParse(coerceRequestJsonBody(body));
+  if (!parsed.success) {
+    throw invalidPayload(parsed.error);
+  }
+
+  const settings = resolveSerialNumberingSettings({
+    referenceNumber: {
+      ...parsed.data.referenceNumber,
+      prefixLetters: sanitizePrefixLetters(parsed.data.referenceNumber.prefixLetters),
+    },
+  });
+
+  const db = await getMongoDb();
+  const companyId = context.company!._id;
+  await getAuthCollections(db).companies.updateOne(
+    { _id: companyId },
+    { $set: { serialNumbering: settings, updatedAt: new Date() } as Partial<CompanyDoc> },
+  );
+
+  const company = await getAuthCollections(db).companies.findOne(
+    { _id: companyId },
+    { projection: { projectSequenceCounter: 1 } },
+  );
+  const currentCounter =
+    typeof company?.projectSequenceCounter === "number" && Number.isFinite(company.projectSequenceCounter)
+      ? Math.max(0, Math.trunc(company.projectSequenceCounter))
+      : 0;
+  const nextSequence = currentCounter + 1;
+  const now = new Date();
+  return {
+    context,
+    payload: {
+      ok: true as const,
+      settings,
+      currentCounter,
+      nextSequence,
+      preview: formatReferenceNumber(settings.referenceNumber, 1, now),
+      nextPreview: formatReferenceNumber(settings.referenceNumber, nextSequence, now),
+    },
+  };
+}
+
 /**
  * Returns the persisted (and seed-filled) report defaults for the current
  * company admin so that the dashboard form is pre-populated and editable.
@@ -4376,17 +4500,7 @@ export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request
 
   const parsed = updateCompanyReportDefaultsSchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
-      (msgs ?? []).map((m) => `${key}: ${m}`),
-    );
-    const hint =
-      fieldLines.join("; ") ||
-      (flat.formErrors?.length ? flat.formErrors.join("; ") : "") ||
-      "Invalid payload.";
-    throw new HttpError(400, "invalid_payload", hint, {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4477,15 +4591,7 @@ export async function updateCompanyBrandingByCompanyAdmin(request: Request, body
 
   const parsed = updateCompanyBrandingSchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
-      (msgs ?? []).map((m) => `${key}: ${m}`),
-    );
-    const hint =
-      fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid payload.";
-    throw new HttpError(400, "invalid_payload", hint, {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4518,15 +4624,7 @@ export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: 
 
   const parsed = updateMemberSignatureBodySchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
-      (msgs ?? []).map((m) => `${key}: ${m}`),
-    );
-    const hint =
-      fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid payload.";
-    throw new HttpError(400, "invalid_payload", hint, {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const requestedTargetOid = tryParseObjectId(parsed.data.userId);
@@ -4596,10 +4694,7 @@ export async function createCompanyReportOnlySignatory(request: Request, body: u
 
   const parsed = createReportOnlySignatorySchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    throw new HttpError(400, "invalid_payload", "Invalid report preparer payload.", {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4673,10 +4768,7 @@ export async function updateCompanyReportOnlySignatory(
 
   const parsed = updateReportOnlySignatorySchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    throw new HttpError(400, "invalid_payload", "Invalid report preparer payload.", {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4754,10 +4846,7 @@ export async function updateCompanyReportOnlySignatorySignature(
 
   const parsed = updateReportOnlySignatorySignatureSchema.safeParse(coerceRequestJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    throw new HttpError(400, "invalid_payload", "Invalid signature payload.", {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -4841,15 +4930,7 @@ export async function createCompanyUserByCompanyAdmin(request: Request, body: un
 
   const parsed = createCompanyUserSchema.safeParse(sanitizeCompanyUserJsonBody(body));
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
-      (msgs ?? []).map((m) => `${key}: ${m}`),
-    );
-    const hint =
-      fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid user payload.";
-    throw new HttpError(400, "invalid_payload", hint, {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -5075,15 +5156,7 @@ export async function updateCompanyUserByCompanyAdmin(
     sanitizeCompanyUserUpdateJsonBody(body)
   );
   if (!parsed.success) {
-    const flat = parsed.error.flatten();
-    const fieldLines = Object.entries(flat.fieldErrors).flatMap(([key, msgs]) =>
-      (msgs ?? []).map((m) => `${key}: ${m}`)
-    );
-    const hint =
-      fieldLines.join("; ") || (flat.formErrors?.length ? flat.formErrors.join("; ") : "") || "Invalid update.";
-    throw new HttpError(400, "invalid_payload", hint, {
-      issues: flat,
-    } as Record<string, unknown>);
+    throw invalidPayload(parsed.error);
   }
 
   const targetOid = tryParseObjectId(userId);
@@ -5366,7 +5439,7 @@ const updateCompanyBySuperAdminSchema = z.object({
   valueTechProductIds: z.array(valueTechProductIdSchema).optional(),
   adminEmail: z.union([z.string().email(), z.literal("")]).optional(),
   adminPhone: z.string().trim().min(6).max(32).refine(isValidPhoneIdentifier, {
-    message: "Phone number must include country code.",
+    message: "أدخل رقم الجوال مع مفتاح الدولة، مثل +9665xxxxxxxx",
   }).optional(),
   adminNewPassword: z.string().min(8).max(128).optional(),
 });
@@ -5476,7 +5549,7 @@ export async function updateCompanyBySuperAdmin(
 
   const parsed = updateCompanyBySuperAdminSchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid update payload.");
+    throw invalidPayload(parsed.error);
   }
 
   const db = await getMongoDb();
@@ -5748,7 +5821,7 @@ export async function setActiveCompanyForUser(request: Request, body: unknown) {
 
   const parsed = setActiveCompanySchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "companyId required.");
+    throw new HttpError(400, "invalid_payload", "اختر شركة صالحة أولاً.");
   }
   const oid = tryParseObjectId(parsed.data.companyId);
   if (!oid) {
@@ -5810,7 +5883,7 @@ export async function updateAdminConfigPayload(request: Request, body: unknown) 
 
   const parsed = adminConfigSchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid config payload.");
+    throw invalidPayload(parsed.error);
   }
 
   const updates = parsed.data;
@@ -6216,7 +6289,7 @@ export async function updateAdminUserState(request: Request, body: unknown) {
 
   const parsed = adminUserActionSchema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "invalid_payload", "Invalid user action payload.");
+    throw invalidPayload(parsed.error);
   }
 
   const payload = parsed.data;

@@ -23,12 +23,14 @@ import {
   getCurrentCompanyUserSignature,
   getCompanyReportDefaultsForCompanyAdmin,
   getCompanyReportDefaultsForMember,
+  getCompanySerialNumberingForCompanyAdmin,
   listCompaniesForSuperAdmin,
   listCompanyUsersForCompanyAdmin,
   updateCompanyBrandingByCompanyAdmin,
   updateCompanyBySuperAdmin,
   updateCompanyMemberReportSignatureByCompanyAdmin,
   updateCompanyReportDefaultsByCompanyAdmin,
+  updateCompanySerialNumberingByCompanyAdmin,
   updateCompanyReportOnlySignatory,
   updateCompanyReportOnlySignatorySignature,
   updateCompanyUserByCompanyAdmin,
@@ -147,6 +149,27 @@ export class OrganizationController {
     @Res({ passthrough: true }) res: Response
   ) {
     const result = await getCompanyReportDefaultsForCompanyAdmin(req);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Get("company/admin/serial-numbering")
+  async companyAdminSerialNumbering(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await getCompanySerialNumberingForCompanyAdmin(req);
+    applyContextCookies(res, result.context);
+    return result.payload;
+  }
+
+  @Patch("company/admin/serial-numbering")
+  async patchCompanySerialNumbering(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: unknown
+  ) {
+    const result = await updateCompanySerialNumberingByCompanyAdmin(req, body);
     applyContextCookies(res, result.context);
     return result.payload;
   }
