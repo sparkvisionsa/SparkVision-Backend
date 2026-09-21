@@ -294,7 +294,7 @@ export interface MvProjectDoc {
    * المستندات القديمة قد لا تحوي القيمة وتُحسب عند العرض من ترتيب `createdAt`.
    */
   displayNumber?: number;
-  /** الرقم المرجعي المنسّق حسب إعدادات الشركة، مثل NX-000001. */
+  /** الرقم المرجعي المنسّق حسب إعدادات الشركة، مثل SV000001. */
   referenceNumber?: string | null;
   /** اختياري؛ المستندات القديمة تُعامل كـ `new` */
   workflowStatus?: MvProjectWorkflowStatus;

@@ -4364,6 +4364,7 @@ const updateCompanySerialNumberingSchema = z.object({
     prefixKind: z.enum(["letters", "year", "month", "day"]).optional(),
     prefixKinds: z.array(z.enum(["letters", "year", "month", "day"])).max(4).optional(),
     prefixLetters: z.string().max(8).optional(),
+    separatePrefix: z.boolean().optional(),
   }).superRefine((value, ctx) => {
     if (!value.hasPrefix) return;
     const kinds = (value.prefixKinds?.length ? value.prefixKinds : value.prefixKind ? [value.prefixKind] : [])
@@ -4382,7 +4383,7 @@ const updateCompanySerialNumberingSchema = z.object({
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["prefixLetters"],
-        message: "أدخل أحرف البادئة مثل NX.",
+        message: "أدخل أحرف البادئة مثل SV.",
       });
     }
   }),
@@ -4431,6 +4432,7 @@ export async function updateCompanySerialNumberingByCompanyAdmin(request: Reques
     referenceNumber: {
       ...parsed.data.referenceNumber,
       prefixLetters: sanitizePrefixLetters(parsed.data.referenceNumber.prefixLetters),
+      separatePrefix: parsed.data.referenceNumber.separatePrefix === true,
     },
   });
 

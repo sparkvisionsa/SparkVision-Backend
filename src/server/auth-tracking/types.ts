@@ -354,6 +354,7 @@ export interface CompanyDoc {
       prefixKind?: "letters" | "year" | "month" | "day";
       prefixKinds?: Array<"letters" | "year" | "month" | "day">;
       prefixLetters?: string;
+      separatePrefix?: boolean;
     };
   };
   createdAt: Date;

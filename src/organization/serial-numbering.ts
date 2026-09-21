@@ -16,8 +16,10 @@ export type ReferenceNumberPattern = {
   hasPrefix: boolean;
   /** أنواع البادئة المختارة بالترتيب: حروف ثم سنة ثم شهر ثم يوم. */
   prefixKinds: ReferencePrefixKind[];
-  /** أحرف البادئة عندما يكون نوعها حروفاً، مثل NX. */
+  /** أحرف البادئة عندما يكون نوعها حروفاً، مثل SV. */
   prefixLetters: string;
+  /** عند true تُدرج شرطة (-) بين أجزاء البادئة والرقم المتسلسل. */
+  separatePrefix: boolean;
 };
 
 export type CompanySerialNumberingSettings = {
@@ -30,6 +32,7 @@ export const DEFAULT_REFERENCE_NUMBER_PATTERN: ReferenceNumberPattern = {
   hasPrefix: false,
   prefixKinds: ["letters"],
   prefixLetters: "",
+  separatePrefix: false,
 };
 
 export const DEFAULT_SERIAL_NUMBERING_SETTINGS: CompanySerialNumberingSettings = {
@@ -50,7 +53,7 @@ function isPrefixKind(value: unknown): value is ReferencePrefixKind {
 export function sanitizePrefixLetters(value: unknown): string {
   if (typeof value !== "string") return "";
   return value
-    .replace(/[^A-Za-z0-9]/g, "")
+    .replace(/[^A-Za-z]/g, "")
     .toUpperCase()
     .slice(0, MAX_PREFIX_LETTERS);
 }
@@ -86,6 +89,7 @@ export function sanitizeReferenceNumberPattern(raw: unknown): ReferenceNumberPat
     hasPrefix: source.hasPrefix === true,
     prefixKinds,
     prefixLetters: sanitizePrefixLetters(source.prefixLetters),
+    separatePrefix: source.separatePrefix === true,
   };
 }
 
@@ -134,6 +138,10 @@ function twoDigit(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+function prefixGlue(pattern: ReferenceNumberPattern) {
+  return pattern.separatePrefix ? "-" : "";
+}
+
 export function resolveReferencePrefix(pattern: ReferenceNumberPattern, at: Date = new Date()): string {
   if (!pattern.hasPrefix) return "";
   const kinds =
@@ -150,7 +158,7 @@ export function resolveReferencePrefix(pattern: ReferenceNumberPattern, at: Date
       if (letters) parts.push(letters);
     }
   }
-  return parts.join("-");
+  return parts.join(prefixGlue(pattern));
 }
 
 export function formatReferenceNumber(
@@ -160,7 +168,9 @@ export function formatReferenceNumber(
 ): string {
   const body = encodeSerialBody(pattern, sequence);
   const prefix = resolveReferencePrefix(pattern, at);
-  return prefix ? `${prefix}-${body}` : body;
+  if (!prefix) return body;
+  const glue = prefixGlue(pattern);
+  return glue ? `${prefix}${glue}${body}` : `${prefix}${body}`;
 }
 
 export function trimReferenceNumber(value: unknown): string | null {

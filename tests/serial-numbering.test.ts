@@ -15,7 +15,7 @@ test("numeric serial pads from the left and starts at 1", () => {
   assert.equal(formatReferenceNumber(pattern, 12, at), "000012");
 });
 
-test("letter prefix NX with 6 digits matches NX-000001", () => {
+test("letter prefix NX with 6 digits matches NX000001", () => {
   const pattern = sanitizeReferenceNumberPattern({
     valueType: "numbers",
     length: 6,
@@ -23,7 +23,7 @@ test("letter prefix NX with 6 digits matches NX-000001", () => {
     prefixKind: "letters",
     prefixLetters: "nx",
   });
-  assert.equal(formatReferenceNumber(pattern, 1, at), "NX-000001");
+  assert.equal(formatReferenceNumber(pattern, 1, at), "NX000001");
 });
 
 test("year prefix uses the last two digits of the year", () => {
@@ -34,7 +34,7 @@ test("year prefix uses the last two digits of the year", () => {
     prefixKind: "year",
   });
   assert.equal(resolveReferencePrefix(pattern, at), "26");
-  assert.equal(formatReferenceNumber(pattern, 1, at), "26-000001");
+  assert.equal(formatReferenceNumber(pattern, 1, at), "26000001");
 });
 
 test("month and day prefixes are zero-padded", () => {
@@ -50,8 +50,8 @@ test("month and day prefixes are zero-padded", () => {
     hasPrefix: true,
     prefixKind: "day",
   });
-  assert.equal(formatReferenceNumber(month, 1, at), "09-000001");
-  assert.equal(formatReferenceNumber(day, 1, at), "19-000001");
+  assert.equal(formatReferenceNumber(month, 1, at), "09000001");
+  assert.equal(formatReferenceNumber(day, 1, at), "19000001");
 });
 
 test("letter serials stay unique when padded to a fixed width", () => {
@@ -65,13 +65,25 @@ test("letter serials stay unique when padded to a fixed width", () => {
   assert.equal(formatReferenceNumber(pattern, 27, at), "AAAABA");
 });
 
-test("combined letter and year prefixes join with hyphens", () => {
+test("combined letter and year prefixes join without separators", () => {
   const pattern = sanitizeReferenceNumberPattern({
     valueType: "numbers",
     length: 6,
     hasPrefix: true,
     prefixKinds: ["letters", "year"],
     prefixLetters: "NX",
+  });
+  assert.equal(formatReferenceNumber(pattern, 1, at), "NX26000001");
+});
+
+test("hyphen separator sits between prefix parts and the serial body", () => {
+  const pattern = sanitizeReferenceNumberPattern({
+    valueType: "numbers",
+    length: 6,
+    hasPrefix: true,
+    prefixKinds: ["letters", "year"],
+    prefixLetters: "NX",
+    separatePrefix: true,
   });
   assert.equal(formatReferenceNumber(pattern, 1, at), "NX-26-000001");
 });
