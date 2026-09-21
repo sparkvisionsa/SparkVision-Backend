@@ -908,6 +908,17 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
   };
 }
 
+function reportDataWithSerialReference(
+  reportData: unknown,
+  referenceNumber?: string | null,
+): MvProjectReportData {
+  const sanitized = sanitizeReportData(reportData);
+  if (trimReferenceNumber(sanitized.reportReference)) return sanitized;
+  const serial = trimReferenceNumber(referenceNumber);
+  if (serial) sanitized.reportReference = serial;
+  return sanitized;
+}
+
 /** حقول مختصرة من reportData لحساب تقدّم المشروع في قائمة المشاريع دون نقل HTML الكامل. */
 function pickReportDataProgressSummary(raw: unknown): MvProjectReportData | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -5391,14 +5402,15 @@ export class MachineValuationService implements OnModuleInit {
     const persistSerialFields = async (displayNumber: number, referenceNumber: string | null) => {
       const $set: Record<string, unknown> = { displayNumber };
       const already = trimReferenceNumber(project.referenceNumber);
-      if (referenceNumber && !already) {
-        $set.referenceNumber = referenceNumber;
-        project.referenceNumber = referenceNumber;
-        const currentReportRef = trimReferenceNumber(project.reportData?.reportReference);
-        if (!currentReportRef) {
-          $set["reportData.reportReference"] = referenceNumber;
-          project.reportData = { ...(project.reportData ?? {}), reportReference: referenceNumber };
-        }
+      const resolvedReference = already ?? trimReferenceNumber(referenceNumber);
+      if (resolvedReference && !already) {
+        $set.referenceNumber = resolvedReference;
+        project.referenceNumber = resolvedReference;
+      }
+      const currentReportRef = trimReferenceNumber(project.reportData?.reportReference);
+      if (!currentReportRef && resolvedReference) {
+        $set["reportData.reportReference"] = resolvedReference;
+        project.reportData = { ...(project.reportData ?? {}), reportReference: resolvedReference };
       }
       await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne({ _id: project._id }, { $set });
     };
@@ -5423,6 +5435,7 @@ export class MachineValuationService implements OnModuleInit {
     };
 
     if (existingDisplay != null) {
+      const currentReportRef = trimReferenceNumber(project.reportData?.reportReference);
       if (!existingReference && companyOid) {
         const createdAt = project.createdAt instanceof Date ? project.createdAt : new Date();
         const formatted = await formatForCompany(existingDisplay, createdAt);
@@ -5431,7 +5444,16 @@ export class MachineValuationService implements OnModuleInit {
             await persistSerialFields(existingDisplay, formatted);
           } catch {
             // best-effort backfill
+            if (!currentReportRef) {
+              project.reportData = { ...(project.reportData ?? {}), reportReference: formatted };
+            }
           }
+        }
+      } else if (existingReference && !currentReportRef) {
+        try {
+          await persistSerialFields(existingDisplay, existingReference);
+        } catch {
+          project.reportData = { ...(project.reportData ?? {}), reportReference: existingReference };
         }
       }
       return existingDisplay;
@@ -6133,7 +6155,7 @@ export class MachineValuationService implements OnModuleInit {
         updatedAt: mvProjectDateToIso(updated.updatedAt),
         workflowStatus: projectWorkflowStatus(updated),
         reportType: projectReportType(updated),
-        reportData: sanitizeReportData(updated.reportData),
+        reportData: reportDataWithSerialReference(updated.reportData, updated.referenceNumber),
         locations: sanitizeProjectLocations(updated.locations, false),
         contacts: sanitizeProjectContacts(updated.contacts, false),
         inspectionAssignments: sanitizeInspectionAssignments(
@@ -6193,7 +6215,14 @@ export class MachineValuationService implements OnModuleInit {
     }
 
     if (b.reportData !== undefined) {
-      $set.reportData = sanitizeReportData(b.reportData);
+      const sanitized = sanitizeReportData(b.reportData);
+      if (!trimReferenceNumber(sanitized.reportReference)) {
+        const keep =
+          trimReferenceNumber(currentProject.reportData?.reportReference) ||
+          trimReferenceNumber(currentProject.referenceNumber);
+        if (keep) sanitized.reportReference = keep;
+      }
+      $set.reportData = sanitized;
     }
 
     let nextLocationsForContactMerge: MvProjectLocation[] | null = null;
@@ -6304,7 +6333,7 @@ export class MachineValuationService implements OnModuleInit {
         updatedAt: mvProjectDateToIso(updated.updatedAt),
         workflowStatus: projectWorkflowStatus(updated),
         reportType: projectReportType(updated),
-        reportData: sanitizeReportData(updated.reportData),
+        reportData: reportDataWithSerialReference(updated.reportData, updated.referenceNumber),
         locations: sanitizeProjectLocations(updated.locations, false),
         contacts: sanitizeProjectContacts(updated.contacts, false),
         inspectionAssignments: sanitizeInspectionAssignments(
@@ -6395,7 +6424,7 @@ export class MachineValuationService implements OnModuleInit {
           updatedAt: mvProjectDateToIso(project.updatedAt),
           workflowStatus: projectWorkflowStatus(project),
           reportType: projectReportType(project),
-          reportData: sanitizeReportData(project.reportData),
+          reportData: reportDataWithSerialReference(project.reportData, project.referenceNumber),
           locations: sanitizeProjectLocations(project.locations, false),
           contacts: sanitizeProjectContacts(project.contacts, false),
           inspectionAssignments: sanitizeInspectionAssignments(
@@ -6581,7 +6610,7 @@ export class MachineValuationService implements OnModuleInit {
         updatedAt: mvProjectDateToIso(project.updatedAt),
         workflowStatus: projectWorkflowStatus(project),
         reportType: projectReportType(project),
-        reportData: sanitizeReportData(project.reportData),
+        reportData: reportDataWithSerialReference(project.reportData, project.referenceNumber),
         locations: sanitizeProjectLocations(project.locations, false),
         contacts: sanitizeProjectContacts(project.contacts, false),
         inspectionAssignments: sanitizeInspectionAssignments(
