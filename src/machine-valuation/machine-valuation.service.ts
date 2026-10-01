@@ -4,11 +4,15 @@ import {
   ForbiddenException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   OnModuleInit,
   UnauthorizedException,
 } from "@nestjs/common";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { assetUploadImageId, mongoAssetPhotos, mongoAssetHasImage } from "./asset-upload-idempotency";
+import { assetMediaRevision } from "./asset-media-realtime";
+import { ATTACHMENT_FIELDS, attachmentWorkspaceUpdate } from "./attachment-workspace";
 import { PassThrough, Readable } from "node:stream";
 import ZipStream from "zip-stream";
 import { tryCoerceToObjectId, tryParseObjectId } from "@/common/object-id.util";
@@ -657,7 +661,7 @@ const MV_REPORT_CUSTOM_FIELD_TYPES = new Set<MvReportCustomFieldType>([
 function sanitizeReportCustomFields(value: unknown): MvReportCustomField[] {
   if (!Array.isArray(value)) return [];
   const fields: MvReportCustomField[] = [];
-  for (const [index, item] of value.slice(0, 80).entries()) {
+  for (const [index, item] of value.slice(0, 120).entries()) {
     const data =
       item && typeof item === "object" && !Array.isArray(item)
         ? (item as Record<string, unknown>)
@@ -1483,13 +1487,15 @@ function parsePicAssetImageReportSelections(raw: unknown): Map<string, boolean> 
 function applyPicAssetImageReportSelections(
   raw: unknown,
   selections: ReadonlyMap<string, boolean>,
-): { next: unknown; changed: boolean } {
+): { next: unknown; changed: boolean; matched: number } {
   let changed = false;
+  let matched = 0;
   const next = mapPicAssetImagesStructure(raw, (image) => {
     const includeInReport = picAssetImageSelectionKeys(image)
       .map((key) => selections.get(key))
       .find((value): value is boolean => typeof value === "boolean");
     if (includeInReport === undefined) return image;
+    matched++;
 
     const current =
       image && typeof image === "object" && !(image instanceof ObjectId)
@@ -1509,7 +1515,7 @@ function applyPicAssetImageReportSelections(
     }
     return image;
   });
-  return { next, changed };
+  return { next, changed, matched };
 }
 
 /**
@@ -2858,6 +2864,7 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
 
 type PicAssetWithMediaCounts = PicAssetMongoDoc & {
   imageCount?: number;
+  photoCount?: number;
   voiceNoteCount?: number;
 };
 
@@ -2877,9 +2884,10 @@ function serializePicAssetSummary(pic: PicAssetWithMediaCounts) {
       : full.voiceNotes.length;
   return {
     ...full,
-    images: [] as typeof full.images,
+    images: full.images.slice(0, 1),
     voiceNotes: [] as typeof full.voiceNotes,
     imageCount: imgN,
+    photoCount: pic.photoCount ?? imgN,
     voiceNoteCount: vnN,
   };
 }
@@ -3374,6 +3382,7 @@ async function fetchExternalAssetImageBuffer(
 interface MvUploadProjectFilesOptions {
   scope?: string;
   relativePaths?: string[];
+  uploadKeys?: string[];
   imageOnly?: boolean;
   /**
    * عند true وتهيئة DigitalOcean Spaces: رفع المحتوى إلى Spaces وتسجيل ‎spacesKey‎ في ‎fs.files‎ (بدون أجزاء GridFS).
@@ -4028,6 +4037,39 @@ export class MachineValuationService implements OnModuleInit {
   private readonly assetImagesDownloadJobs = new Map<string, MvAssetImagesDownloadProgress>();
 
   constructor(private readonly inspectorSpaces: DigitalOceanSpacesService) {}
+
+  async assertAttachmentAccess(projectId: string, ctx: MvAccessContext, readOnly = false) {
+    if (!ctx.userId || (!readOnly && ctx.userRole === "inspector")) throw new ForbiddenException("لا تملك صلاحية تعديل مرفقات التقرير.");
+    await this.loadProjectForAccess(await getMongoDb(), toId(projectId), ctx);
+  }
+
+  async getAttachmentWorkspaces(projectId: string, ctx: MvAccessContext) {
+    const project = await this.loadProjectForAccess(await getMongoDb(), toId(projectId), ctx);
+    // No asset tree, image backfill or report rendering is needed to show attachments.
+    return { project: {
+      _id: project._id.toString(), name: project.name, updatedAt: project.updatedAt, reportData: project.reportData,
+      valuationAccountingWorkspace: sanitizeValuationAccountingWorkspaceForClient(project.valuationAccountingWorkspace) ?? { version: 1, sources: [], images: [] },
+      clientDocumentsWorkspace: sanitizeClientDocumentsWorkspaceForClient(project.clientDocumentsWorkspace) ?? { version: 1, sources: [], images: [] },
+      sceCertificateWorkspace: sanitizeSceCertificateWorkspaceForClient(project.sceCertificateWorkspace) ?? { version: 1, sources: [], images: [] },
+    } };
+  }
+
+  private readonly assetRevisionCache = new Map<string, { expires: number; value: Promise<string> }>();
+  async getAssetMediaRevision(projectId: string, ctx: MvAccessContext) {
+    const db = await getMongoDb(), pid = toId(projectId);
+    await this.loadProjectForAccess(db, pid, ctx);
+    let row = this.assetRevisionCache.get(projectId);
+    if (!row || row.expires < Date.now()) {
+      if (this.assetRevisionCache.size > 128) this.assetRevisionCache.clear();
+      row = { expires: Number.POSITIVE_INFINITY, value: assetMediaRevision(db, pid) };
+      this.assetRevisionCache.set(projectId, row);
+      const current = row;
+      void current.value.then(() => { current.expires = Date.now() + 2000; }, () => {
+        if (this.assetRevisionCache.get(projectId) === current) this.assetRevisionCache.delete(projectId);
+      });
+    }
+    return { revision: await row.value };
+  }
 
   private updateAssetImagesDownloadJob(
     id: string | undefined,
@@ -6187,6 +6229,7 @@ export class MachineValuationService implements OnModuleInit {
       contacts?: unknown;
       inspectionAssignments?: unknown;
       valuationAccountingWorkspace?: unknown | null;
+      attachmentKnownIds?: Partial<Record<string, { sources: string[]; images: string[] }>>;
       valuationReadyExcelWorkspace?: unknown | null;
       clientDocumentsWorkspace?: unknown | null;
       sceCertificateWorkspace?: unknown | null;
@@ -6307,9 +6350,18 @@ export class MachineValuationService implements OnModuleInit {
       throw new BadRequestException("No project fields to update");
     }
 
+    const pipelineSet: Record<string, unknown> = Object.fromEntries(Object.entries($set).map(([key, value]) => [key, { $literal: value }]));
+    for (const field of ATTACHMENT_FIELDS) {
+      if (!$set[field]) continue;
+      const known = b.attachmentKnownIds?.[field];
+      if (!known) continue;
+      if (!Array.isArray(known.sources) || !Array.isArray(known.images) ||
+          [...known.sources, ...known.images].some(id => typeof id !== "string")) throw new BadRequestException("Invalid attachment snapshot");
+      pipelineSet[field] = attachmentWorkspaceUpdate(field, $set[field] as Record<string, unknown>, known);
+    }
     const updated = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOneAndUpdate(
       { _id },
-      { $set },
+      [{ $set: pipelineSet }],
       { returnDocument: "after" },
     );
     if (!updated) throw new NotFoundException("Project not found");
@@ -6496,6 +6548,7 @@ export class MachineValuationService implements OnModuleInit {
               {
                 $addFields: {
                   imageCount: mongoPicAssetImagesCount("$images"),
+                  photoCount: { $size: mongoAssetPhotos() },
                   voiceNoteCount: mongoSafeArraySize("$voiceNotes"),
                   mainImage: {
                     $cond: [
@@ -6506,7 +6559,8 @@ export class MachineValuationService implements OnModuleInit {
                   },
                 },
               },
-              { $project: { images: 0, voiceNotes: 0 } },
+              { $set: { images: { $slice: [mongoAssetPhotos(), 1] } } },
+              { $project: { voiceNotes: 0 } },
             ])
             .toArray()) as PicAssetWithMediaCounts[])
         : ((await db
@@ -7941,10 +7995,12 @@ export class MachineValuationService implements OnModuleInit {
       const employer = sanitizeEmployerValue(b.employer);
       $set.employer = employer;
     }
+    let validMediaNoop = false;
     if (b.images !== undefined) {
       const nextImages = normalizePicAssetMediaArrayForPatch(b.images as unknown, "images");
       const reconciled = reconcileCategorizedPicAssetImagesPatch(pic.images, nextImages);
       if (reconciled) {
+        validMediaNoop = true;
         if (reconciled.changed) $set.images = reconciled.next as never;
       } else if (isPicAssetCategorizedImagesObject(pic.images) && Array.isArray(nextImages)) {
         throw new BadRequestException(
@@ -7958,6 +8014,10 @@ export class MachineValuationService implements OnModuleInit {
       const selections = parsePicAssetImageReportSelections(b.imageReportSelections);
       const baseImages = $set.images ?? pic.images;
       const applied = applyPicAssetImageReportSelections(baseImages, selections);
+      if (applied.matched === 0) {
+        throw new BadRequestException("Selected images no longer exist in this asset. Refresh the image selection.");
+      }
+      validMediaNoop = true;
       if (applied.changed) $set.images = applied.next as never;
     }
     if (b.voiceNotes !== undefined) {
@@ -7967,7 +8027,7 @@ export class MachineValuationService implements OnModuleInit {
       ) as never;
     }
 
-    if (Object.keys($set).length === 0) {
+    if (Object.keys($set).length === 0 && !validMediaNoop) {
       throw new BadRequestException("No valid fields to update");
     }
     /** ‎rawData‎ لقطة إكسل العميل — أي تحديث لبيانات الأصل يبقى في الجذر فقط. */
@@ -7981,15 +8041,19 @@ export class MachineValuationService implements OnModuleInit {
         delete $set[key];
       }
     }
-    $set.isAssetFolder = true;
-    $set.updatedAt = now;
-
     const picId = (pic as PicAssetMongoDoc)._id;
-    const nextPic = (await pa.findOneAndUpdate(
-      { _id: picId, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-      { $set },
-      { returnDocument: "after" },
-    )) as PicAssetMongoDoc | null;
+    // A repeated report selection is a successful idempotent request. Avoid
+    // changing updatedAt or triggering a database change event for an unchanged asset.
+    let nextPic = pic as PicAssetMongoDoc | null;
+    if (Object.keys($set).length > 0) {
+      $set.isAssetFolder = true;
+      $set.updatedAt = now;
+      nextPic = (await pa.findOneAndUpdate(
+        { _id: picId, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
+        { $set },
+        { returnDocument: "after" },
+      )) as PicAssetMongoDoc | null;
+    }
     if (!nextPic) throw new NotFoundException("photo folder asset not found");
 
     // مزامنة includeInReport على مرايا GridFS حتى يحترم إعداد التقرير ودمج Word التحديد
@@ -9687,6 +9751,10 @@ export class MachineValuationService implements OnModuleInit {
     if (!Array.isArray(files) || files.length === 0) {
       throw new BadRequestException("At least one file is required");
     }
+    if (options.uploadKeys?.length && (options.uploadKeys.length !== files.length ||
+      options.uploadKeys.some(key => !/^[a-zA-Z0-9-]{16,80}$/.test(key)))) {
+      throw new BadRequestException("Invalid upload keys");
+    }
 
     const db = await getMongoDb();
     const pid = toId(projectId);
@@ -9767,7 +9835,23 @@ export class MachineValuationService implements OnModuleInit {
           };
 
           if (folderIsPicAsset && sid) {
-            const imageId = new ObjectId();
+            const uploadKey = options.uploadKeys?.[index];
+            const imageId = uploadKey
+              ? assetUploadImageId(projectId, sid.toString(), ctx.userId ?? "", uploadKey)
+              : new ObjectId();
+            const existingImage = uploadKey
+              ? flattenPicAssetImagesRaw(picAssetFolder?.images).find(image =>
+                  image && typeof image === "object" &&
+                  String((image as { _id?: unknown })._id) === imageId.toString()) as
+                    { url?: string; publicId?: string; createdAt?: Date } | undefined
+              : undefined;
+            if (existingImage?.url) {
+              return mapStoredFileDoc({
+                _id: imageId, filename: fileName, length: data.length,
+                uploadDate: existingImage.createdAt ?? now,
+                metadata: { ...metadata, storage: "digitalocean", spacesKey: existingImage.publicId, sourceUrl: existingImage.url },
+              });
+            }
             let uploaded: { key: string; url: string };
             try {
               uploaded = await this.inspectorSpaces.uploadAssetImage({
@@ -9782,7 +9866,7 @@ export class MachineValuationService implements OnModuleInit {
               this.logger.error(
                 `uploadProjectFiles Spaces (asset image): ${err instanceof Error ? err.message : String(err)}`,
               );
-              throw new BadRequestException("فشل رفع صورة الأصل إلى DigitalOcean Spaces.");
+              throw new ServiceUnavailableException("فشل رفع صورة الأصل إلى DigitalOcean Spaces. ستتم إعادة المحاولة.");
             }
 
             const imageDoc = {
@@ -9794,10 +9878,14 @@ export class MachineValuationService implements OnModuleInit {
               mimeType: metadata.mimeType,
               includeInReport: true,
             };
-            await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
-              { _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
-              buildAppendPicAssetImageUpdate(null, imageDoc, now) as never,
+            const append = buildAppendPicAssetImageUpdate(null, imageDoc, now);
+            const fields = append[0].$set as Record<string, unknown>;
+            // Atomic guard also covers concurrent retries after a lost HTTP response.
+            fields.images = { $cond: [mongoAssetHasImage(imageId), "$images", fields.images] };
+            const saved = await db.collection<AssetDoc>(ASSETS_COLLECTION).updateOne(
+              { _id: sid, projectId: pid, ...MV_PHOTO_FOLDER_FILTER }, append as never,
             );
+            if (!saved.matchedCount) throw new NotFoundException("Upload asset no longer exists");
 
             return mapStoredFileDoc({
               _id: imageId,

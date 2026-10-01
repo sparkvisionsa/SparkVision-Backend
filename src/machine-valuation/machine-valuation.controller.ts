@@ -15,6 +15,7 @@ import {
   UploadedFile,
   UploadedFiles,
   UseInterceptors,
+  UnauthorizedException,
 } from "@nestjs/common";
 import { FileInterceptor, FilesInterceptor } from "@nestjs/platform-express";
 import { memoryStorage } from "multer";
@@ -24,8 +25,15 @@ import type { Request, Response } from "express";
 import { MachineValuationService } from "./machine-valuation.service";
 import { FileParserService } from "./file-parser.service";
 import { MvRealtimeService, type MvRealtimeEventType } from "./mv-realtime.service";
+import { AttachmentUploadService } from "./attachment-upload.service";
 import { WordTemplateMergeService } from "./word-template-merge.service";
 import { PptxTemplateMergeService } from "./pptx-template-merge.service";
+import {
+  DATA_EXTRACTION_MAX_FILE_BYTES,
+  DATA_EXTRACTION_MAX_FILES,
+  DataExtractionService,
+} from "./data-extraction.service";
+import { DataExtractionHistoryService } from "./data-extraction-history.service";
 import {
   ASSET_IMPORT_MAX_FILE_BYTES,
   VALUATION_EXCEL_MAX_FILE_BYTES,
@@ -58,21 +66,156 @@ function bodyStringArray(value: unknown): string[] {
   return [];
 }
 
+function extractionTargetLabels(value: unknown): string[] {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => typeof item === "string" ? item.trim().slice(0, 180) : "")
+      .filter(Boolean)
+      .filter((item, index, items) => items.indexOf(item) === index)
+      .slice(0, 120);
+  } catch {
+    return [];
+  }
+}
+
 @Controller("mv")
 export class MachineValuationController {
   constructor(
     private readonly mvService: MachineValuationService,
     private readonly fileParser: FileParserService,
     private readonly mvRealtime: MvRealtimeService,
+    private readonly attachments: AttachmentUploadService,
     private readonly wordTemplateMerge: WordTemplateMergeService,
     private readonly pptxTemplateMerge: PptxTemplateMergeService,
+    private readonly dataExtraction: DataExtractionService,
+    private readonly extractionHistory: DataExtractionHistoryService,
   ) {}
 
   private publishRealtime(projectId: string, type: MvRealtimeEventType, reason: string) {
     this.mvRealtime.publish(projectId, type, reason);
   }
 
+  @Post("data-extraction")
+  @UseInterceptors(
+    FilesInterceptor("files", DATA_EXTRACTION_MAX_FILES, {
+      storage: memoryStorage(),
+      limits: { fileSize: DATA_EXTRACTION_MAX_FILE_BYTES },
+    }),
+  )
+  async extractDocumentData(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @UploadedFiles() files: Express.Multer.File[],
+    @Body() body: { targetFields?: unknown },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    if (!context.user) {
+      throw new UnauthorizedException("يجب تسجيل الدخول لاستخدام استخراج البيانات.");
+    }
+    const result = await this.dataExtraction.extract(files ?? [], {
+      targetFieldLabels: extractionTargetLabels(body?.targetFields),
+    });
+    const documents = await this.extractionHistory.save(files ?? [], result.documents, toMvAccess(context));
+    return { ...result, documents };
+  }
+
+  @Get("data-extraction/history")
+  async listExtractionHistory(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Query("cursor") cursor?: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.extractionHistory.list(toMvAccess(context), cursor);
+  }
+
+  @Get("data-extraction/history/:id")
+  async getExtractionHistory(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.extractionHistory.get(id, toMvAccess(context));
+  }
+
+  @Patch("data-extraction/history/:id")
+  async updateExtractionHistory(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string, @Body() body: unknown) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.extractionHistory.update(id, body, toMvAccess(context));
+  }
+
+  @Delete("data-extraction/history/:id")
+  async deleteExtractionHistory(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.extractionHistory.remove(id, toMvAccess(context));
+  }
+
+  @Get("data-extraction/history/:id/:variant")
+  async getExtractionFile(@Req() req: Request, @Res() res: Response, @Param("id") id: string, @Param("variant") variant: string) {
+    if (!["file", "thumbnail", "preview"].includes(variant)) throw new BadRequestException("نوع المعاينة غير صالح.");
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const file = await this.extractionHistory.file(id, variant === "file" ? "original" : variant as "thumbnail" | "preview", toMvAccess(context));
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Type", file.mimeType);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(file.fileName)}`);
+    await pipeline(file.stream, res);
+  }
+
   /* ───────── Projects ───────── */
+
+  @Post("projects/:pid/attachment-jobs/:jobId")
+  async beginAttachment(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string, @Body() body: any) {
+    return this.attachments.begin(pid, jobId, body, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Post("projects/:pid/attachment-jobs/:jobId/plan")
+  async planAttachment(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string, @Body() body: any) {
+    return this.attachments.plan(pid, jobId, body, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Post("projects/:pid/attachment-jobs/:jobId/pages")
+  @UseInterceptors(FileInterceptor("file", { storage: memoryStorage(), limits: { fileSize: ASSET_IMPORT_MAX_FILE_BYTES } }))
+  async saveAttachmentPage(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string, @UploadedFile() file: Express.Multer.File, @Body("metadata") metadata: string) {
+    return this.attachments.page(pid, jobId, metadata, file, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Post("projects/:pid/attachment-jobs/:jobId/original/:sourceId")
+  @UseInterceptors(FileInterceptor("file", { storage: memoryStorage(), limits: { fileSize: ASSET_IMPORT_MAX_FILE_BYTES } }))
+  async saveAttachmentOriginal(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string, @Param("sourceId") sourceId: string, @UploadedFile() file: Express.Multer.File) {
+    return this.attachments.original(pid, jobId, sourceId, file, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Post("projects/:pid/attachment-jobs/:jobId/complete")
+  async completeAttachment(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string) {
+    return this.attachments.complete(pid, jobId, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Delete("projects/:pid/attachment-jobs/:jobId")
+  async cancelAttachment(@Req() req: Request, @Param("pid") pid: string, @Param("jobId") jobId: string) {
+    return this.attachments.cancel(pid, jobId, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Get("projects/:pid/attachment-jobs")
+  async pendingAttachments(@Req() req: Request, @Param("pid") pid: string) {
+    return this.attachments.pending(pid, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Get("projects/:pid/attachment-workspaces")
+  async attachmentWorkspaces(@Param("pid") pid: string, @Req() req: Request) {
+    return this.mvService.getAttachmentWorkspaces(pid, toMvAccess(await resolveRequestContext(req)));
+  }
+
+  @Get("projects/:pid/asset-media-revision")
+  async assetMediaRevision(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("pid") pid: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.mvService.getAssetMediaRevision(pid, toMvAccess(context));
+  }
 
   @Get("projects")
   async listProjects(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
@@ -675,6 +818,7 @@ export class MachineValuationController {
       {
         scope: "asset-images",
         relativePaths: paths,
+        uploadKeys: bodyStringArray((req.body as { uploadKeys?: unknown })?.uploadKeys),
         imageOnly: true,
       },
     );
@@ -969,6 +1113,7 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
+    await this.attachments.assertReady(projectId, toMvAccess(context));
     return this.wordTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body, res);
   }
 
@@ -997,6 +1142,7 @@ export class MachineValuationController {
   ) {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
+    await this.attachments.assertReady(projectId, toMvAccess(context));
     return this.pptxTemplateMerge.mergeAndRespond(projectId, toMvAccess(context), body ?? {}, res);
   }
 

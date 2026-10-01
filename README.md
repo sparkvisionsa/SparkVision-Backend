@@ -1,5 +1,20 @@
 # Spark Vision Backend
 
+Machine valuation attachment uploads use persisted `mv_attachment_uploads` jobs,
+stable per-page file identifiers and MongoDB file leases. Completion verifies
+both report workspace references and stored file records. Word/PowerPoint
+template export rejects projects with unfinished attachment jobs. No migration
+or additional environment variables are needed. Run
+`npm run test:attachment-upload-resume` to verify the three attachment workspaces,
+storage failures, retry receipts and concurrent editor snapshot preservation
+against an isolated MongoDB instance.
+
+Asset media changes are watched directly in MongoDB and emitted to Socket.IO
+company rooms. Replica sets support this immediate notification path; standalone
+MongoDB or interrupted sockets retain the frontend revision-polling fallback.
+`npm run test:asset-media-realtime` tests direct nested database writes through a
+real change stream and Socket.IO connection, including tenant isolation.
+
 Standalone NestJS API for Spark Vision.
 
 ## Run

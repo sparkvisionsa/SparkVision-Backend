@@ -13,6 +13,9 @@ export class RealtimeInterceptor implements NestInterceptor {
     const path = req.originalUrl.split("?")[0];
     const resource = /^\/api\/(mv|transactions|organization|clients|assets)(?:\/|$)/.exec(path)?.[1];
     if (!resource || !["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next.handle();
+    // Plans and original documents do not change visible report images. Publish
+    // pages/completion instead of triggering project reloads for every checkpoint.
+    if (/\/attachment-jobs\/[^/]+\/(?:plan|original\/[^/]+)$/.test(path)) return next.handle();
     return next.handle().pipe(tap(() => {
       // Invalidations carry no records, only a hint to refetch through authorized APIs.
       void resolveRequestContext(req).then(actor => {

@@ -112,6 +112,9 @@ export class RealtimeService implements OnModuleDestroy {
     const rooms = companyId ? [`company:${companyId}`, "system:admins"] : [`user:${userId}:personal`, "system:admins"];
     this.io?.to(rooms).emit("resource:changed", { resource, projectId, at: new Date().toISOString() });
   }
+  assetsInvalidated() {
+    this.io?.emit("resource:changed", { resource: "assets", at: new Date().toISOString() });
+  }
   disconnectUser(userId: string) {
     for (const socket of this.io?.sockets.sockets.values() ?? []) {
       if ((socket.data.actor as SupportActor)?.userId === userId) socket.disconnect(true);

@@ -41,6 +41,7 @@ RUN apt-get update \
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/assets/fonts ./assets/fonts
+COPY --from=builder /app/assets/ocr ./assets/ocr
 COPY --from=builder /app/docx-worker ./docx-worker
 COPY --from=builder /app/pdf-worker ./pdf-worker
 COPY --from=builder /app/pptx-worker ./pptx-worker
