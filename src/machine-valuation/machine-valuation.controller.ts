@@ -66,17 +66,36 @@ function bodyStringArray(value: unknown): string[] {
   return [];
 }
 
-function extractionTargetLabels(value: unknown): string[] {
+function extractionTargets(value: unknown): { labels: string[]; dateLabels: string[] } {
   try {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item) => typeof item === "string" ? item.trim().slice(0, 180) : "")
-      .filter(Boolean)
-      .filter((item, index, items) => items.indexOf(item) === index)
-      .slice(0, 120);
+    if (!Array.isArray(parsed)) return { labels: [], dateLabels: [] };
+    const labels: string[] = [];
+    const dateLabels: string[] = [];
+    const seen = new Set<string>();
+    for (const item of parsed) {
+      const label = (
+        typeof item === "string"
+          ? item
+          : item && typeof item === "object" && !Array.isArray(item)
+            ? String((item as { label?: unknown }).label ?? "")
+            : ""
+      )
+        .trim()
+        .slice(0, 180);
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      labels.push(label);
+      const type =
+        item && typeof item === "object" && !Array.isArray(item)
+          ? String((item as { type?: unknown }).type ?? "")
+          : "";
+      if (type === "date") dateLabels.push(label);
+      if (labels.length >= 120) break;
+    }
+    return { labels, dateLabels };
   } catch {
-    return [];
+    return { labels: [], dateLabels: [] };
   }
 }
 
@@ -115,8 +134,10 @@ export class MachineValuationController {
     if (!context.user) {
       throw new UnauthorizedException("يجب تسجيل الدخول لاستخدام استخراج البيانات.");
     }
+    const targets = extractionTargets(body?.targetFields);
     const result = await this.dataExtraction.extract(files ?? [], {
-      targetFieldLabels: extractionTargetLabels(body?.targetFields),
+      targetFieldLabels: targets.labels,
+      targetDateLabels: targets.dateLabels,
     });
     const documents = await this.extractionHistory.save(files ?? [], result.documents, toMvAccess(context));
     return { ...result, documents };

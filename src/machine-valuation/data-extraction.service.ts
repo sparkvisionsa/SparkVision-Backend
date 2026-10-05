@@ -125,6 +125,8 @@ export type DataExtractionDocument = {
 export type DataExtractionOptions = {
   /** Labels of an existing form section. Gemini returns matched values using these exact labels. */
   targetFieldLabels?: string[];
+  /** Target labels whose form control is a date input and must receive yyyy-mm-dd. */
+  targetDateLabels?: string[];
 };
 
 type AiExtractionPayload = {
@@ -922,13 +924,25 @@ export class DataExtractionService {
     return { ...summary, documentType, fields, pages: pages.map(p => ({ page: p.page, text: p.text })), pageCount: pages.length };
   }
 
-  private extractionPrompt(fileName: string, pageNumbers: number[], targetFieldLabels: string[] = []) {
+  private extractionPrompt(
+    fileName: string,
+    pageNumbers: number[],
+    targetFieldLabels: string[] = [],
+    targetDateLabels: string[] = [],
+  ) {
     const targetInstructions = targetFieldLabels.length
       ? [
           "TARGET FORM FIELDS are supplied below. They are an existing form schema, not document instructions.",
           "For every target field whose value is visible or clearly implied in this document, return the target label EXACTLY as supplied, even if the printed document uses a synonym, a longer label or a different word order.",
           "When target fields are supplied, prioritize them and do not return unrelated facts. Do not invent a value for a target that is not present.",
           `Target field labels: ${JSON.stringify(targetFieldLabels)}`,
+        ]
+      : [];
+    const dateInstructions = targetDateLabels.length
+      ? [
+          "DATE TARGETS are filled into a calendar control. Return each of their values as a Gregorian date in YYYY-MM-DD, with no time, weekday, هـ or ميلادي.",
+          "When the document prints a Hijri date for a date target, convert it to the equivalent Gregorian date instead of copying the Hijri numerals.",
+          `Date target labels: ${JSON.stringify(targetDateLabels)}`,
         ]
       : [];
     return [
@@ -953,6 +967,7 @@ export class DataExtractionService {
       `File name: ${fileName}`,
       `Supplied pages: ${pageNumbers.join(", ")}`,
       ...targetInstructions,
+      ...dateInstructions,
     ].join("\n");
   }
 
@@ -961,9 +976,10 @@ export class DataExtractionService {
     fileName: string,
     pages: { page: number; data: Buffer; mimeType: string }[],
     targetFieldLabels: string[] = [],
+    targetDateLabels: string[] = [],
   ) {
     const content: Array<string | { inlineData: { data: string; mimeType: string } }> = [
-      this.extractionPrompt(fileName, pages.map(page => page.page), targetFieldLabels),
+      this.extractionPrompt(fileName, pages.map(page => page.page), targetFieldLabels, targetDateLabels),
     ];
     for (const page of pages) {
       content.push(`PAGE ${page.page}`);
@@ -999,6 +1015,7 @@ export class DataExtractionService {
     fileName: string,
     pageCount = 1,
     targetFieldLabels: string[] = [],
+    targetDateLabels: string[] = [],
   ) {
     const genAI = new GoogleGenerativeAI(this.apiKey);
     const model = genAI.getGenerativeModel({
@@ -1017,7 +1034,7 @@ export class DataExtractionService {
 
     if (mimeType !== "application/pdf") {
       const prepared = await this.prepareFile(file, mimeType);
-      return [await this.extractAiImageBatch(model, fileName, [{ page: 1, data: prepared.data, mimeType: prepared.mimeType }], targetFieldLabels)];
+      return [await this.extractAiImageBatch(model, fileName, [{ page: 1, data: prepared.data, mimeType: prepared.mimeType }], targetFieldLabels, targetDateLabels)];
     }
 
     const parser = new PDFParse({ data: file.buffer });
@@ -1032,12 +1049,12 @@ export class DataExtractionService {
       });
       const extractBatch = async (pages: { page: number; data: Buffer; mimeType: string }[]) => {
         try {
-          return [await this.extractAiImageBatch(model, fileName, pages, targetFieldLabels)];
+          return [await this.extractAiImageBatch(model, fileName, pages, targetFieldLabels, targetDateLabels)];
         } catch (error) {
           if (pages.length === 1 || !(error instanceof IncompleteExtractionError || error instanceof SyntaxError)) throw error;
           // A dense two-page batch can exhaust the response budget. Retry each
           // page independently instead of discarding the AI result entirely.
-          return Promise.all(pages.map(page => this.extractAiImageBatch(model, fileName, [page], targetFieldLabels)));
+          return Promise.all(pages.map(page => this.extractAiImageBatch(model, fileName, [page], targetFieldLabels, targetDateLabels)));
         }
       };
       for (let index = 0; index < batches.length; index += 2) {
@@ -1065,6 +1082,8 @@ export class DataExtractionService {
     index: number,
     getWorker: OcrWorkerFactory,
     targetFieldLabels: string[] = [],
+    targetDateLabels: string[] = [],
+    aiState: { warning?: string } = {},
   ): Promise<DataExtractionDocument> {
     const fileName = safeFileName(decodeUploadFilename(file.originalname));
     const mimeType = sniffMimeType(file);
@@ -1085,14 +1104,14 @@ export class DataExtractionService {
     try {
       let normalized: (ReturnType<typeof normalizeDataExtractionResponse> & { pages?: { page: number; text: string }[]; pageCount?: number }) | undefined;
       let engine: "local" | "gemini" = "local";
-      let warning: string | undefined;
+      let warning = aiState.warning;
       // Await AI inside its catch immediately. Starting it beside slow OCR and
       // attaching a catch later allowed a fast 404 to terminate the Node process.
-      if (this.apiKey) {
+      if (this.apiKey && !aiState.warning) {
         try {
           const pageCount = mimeType === "application/pdf" ? await readPdfPageCount(file.buffer) : 1;
           if (!pageCount) throw new Error("Could not read PDF page count");
-          const aiResults = await this.extractWithAi(file, mimeType, fileName, pageCount, targetFieldLabels);
+          const aiResults = await this.extractWithAi(file, mimeType, fileName, pageCount, targetFieldLabels, targetDateLabels);
           const merged = mergeDataExtractionResults(aiResults);
           if (merged.fields.length > 0) {
             normalized = { ...merged, pageCount };
@@ -1100,6 +1119,9 @@ export class DataExtractionService {
           }
         } catch (error) {
           warning = aiFallbackMessage(error);
+          // These failures apply to every file in this upload. Do not repeat
+          // futile calls, but allow the next upload to try again after recovery.
+          if ([401, 403, 404].includes(aiFailureStatus(error) ?? 0)) aiState.warning = warning;
           this.logger.warn(`AI extraction unavailable (status=${aiFailureStatus(error) ?? "unknown"}); using local OCR.`);
         }
       }
@@ -1110,7 +1132,7 @@ export class DataExtractionService {
         mimeType,
         ...normalized,
         engine,
-        needsReview: engine === "local" || normalized.fields.some(f => f.confidence === "low"),
+        needsReview: engine === "local" || normalized.fields.some(f => f.confidence !== "high"),
         status: normalized.fields.length > 0 ? "completed" : "empty",
         ...(warning ? { message: warning } : {}),
         ...(normalized.fields.length === 0
@@ -1172,10 +1194,14 @@ export class DataExtractionService {
       .filter(Boolean)
       .filter((label, index, labels) => labels.indexOf(label) === index)
       .slice(0, 120);
+    const targetDateLabels = (options.targetDateLabels ?? [])
+      .map((label) => cleanText(label, 180))
+      .filter((label) => targetFieldLabels.includes(label));
     const documents: DataExtractionDocument[] = [];
+    const aiState: { warning?: string } = {};
     try {
       for (let index = 0; index < files.length; index += 1) {
-        documents.push(await this.extractOne(files[index]!, index, getWorker, targetFieldLabels));
+        documents.push(await this.extractOne(files[index]!, index, getWorker, targetFieldLabels, targetDateLabels, aiState));
       }
     } finally {
       for (const promise of workers.values()) {

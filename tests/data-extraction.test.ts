@@ -72,6 +72,41 @@ test("empty AI results use local OCR and a failed OCR does not stop later files"
   assert.equal(documents[1].status, "completed");
 });
 
+test("permanent provider errors skip remaining AI calls in a batch and recover on the next upload", async () => {
+  const service = new DataExtractionService();
+  const internals = service as any;
+  internals.apiKey = "test-only";
+  internals.extractLocally = async () => mockLocal();
+  for (const status of [401, 403, 404]) {
+    let calls = 0;
+    internals.extractWithAi = async () => { calls++; throw Object.assign(new Error("provider failure"), { status }); };
+    const { documents } = await service.extract([mockImage(), mockImage(), mockImage()]);
+    assert.equal(calls, 1);
+    assert.ok(documents.every(doc => doc.engine === "local" && doc.message && doc.needsReview));
+    await service.extract([mockImage()]);
+    assert.equal(calls, 2, "next upload must not inherit the previous failure");
+  }
+});
+
+test("transient failures do not disable AI for later files and medium confidence needs review", async () => {
+  const service = new DataExtractionService();
+  const internals = service as any;
+  internals.apiKey = "test-only";
+  internals.extractLocally = async () => mockLocal();
+  let calls = 0;
+  internals.extractWithAi = async () => {
+    if (++calls === 1) throw Object.assign(new Error("temporary failure"), { status: 503 });
+    return [normalizeDataExtractionResponse(JSON.stringify({ fields: [
+      { label: "اسم الشركة", value: "شركة المثال", confidence: "medium", category: "organization" },
+    ] }))];
+  };
+  const { documents } = await service.extract([mockImage(), mockImage()]);
+  assert.equal(calls, 2);
+  assert.equal(documents[1].engine, "gemini");
+  assert.equal(documents[1].needsReview, true);
+  assert.equal(documents[1].message, undefined);
+});
+
 test("Gemini request retries transient errors once, uses a deadline, and never retries a 404", async () => {
   const internals = new DataExtractionService() as any;
   let calls = 0;
