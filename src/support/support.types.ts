@@ -31,7 +31,7 @@ export interface SupportTicket {
   staffUnread: number;
   revision: number;
   clientId: string;
-  history: { at: Date; by: string; status?: SupportStatus; assigneeName?: string | null }[];
+  history: { at: Date; by: string; status?: SupportStatus; assigneeName?: string | null; subjectChanged?: boolean }[];
 }
 export interface SupportMessage {
   _id: ObjectId;
@@ -80,13 +80,14 @@ export const messageSchema = z.object({
   clientId: clientIdSchema,
 }).refine(v => v.text.length > 0 || v.attachments.length > 0, "اكتب رسالة أو أرفق ملفاً");
 export const updateTicketSchema = z.object({
+  subject: z.string().trim().min(3).max(160).optional(),
   status: z.enum(statuses).optional(),
   priority: z.enum(["normal", "high", "urgent"]).optional(),
   assigneeId: supportUserIdSchema.nullable().optional(),
   // Some native form controls serialise their value as a string. Coercion
   // keeps an otherwise valid assignment from being rejected by Zod.
   revision: z.coerce.number().int().nonnegative().default(0),
-}).refine(value => value.status !== undefined || value.priority !== undefined || value.assigneeId !== undefined, "اختر تحديثاً واحداً على الأقل");
+}).refine(value => value.subject !== undefined || value.status !== undefined || value.priority !== undefined || value.assigneeId !== undefined, "اختر تحديثاً واحداً على الأقل");
 export const notificationReadSchema = z.object({
   ids: z.array(idSchema).max(100).optional(),
 });

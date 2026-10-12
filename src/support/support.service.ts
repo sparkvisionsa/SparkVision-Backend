@@ -11,6 +11,51 @@ export interface SupportFile {
   _id: ObjectId; ticketId: string; uploaderId: string; fileId: ObjectId;
   name: string; mime: string; size: number; createdAt: Date; attached: boolean;
 }
+
+const AUTO_TICKET_SUBJECT_WORDS = 3;
+const TITLE_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "i", "in", "is", "it", "my", "of", "on", "or", "please", "the", "this", "to", "was", "with", "you", "your",
+  "أنا", "انت", "أنتم", "أن", "او", "أو", "الى", "إلى", "التي", "الذي", "عن", "على", "في", "من", "مع", "بعد", "قبل", "عند", "لدي", "لديكم", "هذا", "هذه", "ذلك", "تلك", "ثم", "كما", "لكن", "لان", "لأن", "لا", "لم", "لن", "ما", "ماذا", "كيف", "هل", "يرجى", "اريد", "أريد", "احتاج", "أحتاج", "المساعدة", "يمكن", "استطيع", "أستطيع", "مشكلة", "المشكلة", "طلب", "الدعم", "فقط", "جدا", "جداً",
+]);
+
+/**
+ * The support form has one description field. Derive its inbox title here as
+ * well as in the browser so a stale client or a direct API call cannot store a
+ * full description as the ticket subject.
+ */
+function ticketSubjectFromDescription(value: string, fallback: string) {
+  const tokens = (value.match(/[\p{L}\p{N}]+/gu) ?? []).map((raw, index) => {
+    const stopKey = raw.toLocaleLowerCase().replace(/[\u064B-\u065F\u0670]/g, "");
+    return {
+      raw: raw.slice(0, 48),
+      key: stopKey.replace(/^ال(?=\p{L})/u, ""),
+      stopKey,
+      index,
+    };
+  });
+  const candidates = tokens.filter((token) => token.raw.length >= 2 && !TITLE_STOP_WORDS.has(token.stopKey));
+  const pool = candidates.length >= AUTO_TICKET_SUBJECT_WORDS ? candidates : tokens;
+  if (!pool.length) return fallback;
+
+  const firstByKey = new Map<string, (typeof pool)[number]>();
+  const frequency = new Map<string, number>();
+  for (const token of pool) {
+    if (!firstByKey.has(token.key)) firstByKey.set(token.key, token);
+    frequency.set(token.key, (frequency.get(token.key) ?? 0) + 1);
+  }
+  const subject = [...firstByKey.values()]
+    .sort((left, right) =>
+      ((frequency.get(right.key) ?? 0) * 100 + right.raw.length) -
+      ((frequency.get(left.key) ?? 0) * 100 + left.raw.length) ||
+      left.index - right.index,
+    )
+    .slice(0, AUTO_TICKET_SUBJECT_WORDS)
+    .sort((left, right) => left.index - right.index)
+    .map((token) => token.raw)
+    .join(" ");
+  return subject.length >= 3 ? subject : fallback;
+}
+
 @Injectable()
 export class SupportService {
   private indexes?: Promise<void>;
@@ -126,10 +171,13 @@ export class SupportService {
     const _id = new ObjectId();
     const now = new Date();
     const counter = await db.collection<{ _id: string; value: number }>("support_counters").findOneAndUpdate({ _id: "tickets" }, { $inc: { value: 1 } }, { upsert: true, returnDocument: "after" });
+    const subject = body.kind === "ticket" && body.text
+      ? ticketSubjectFromDescription(body.text, body.subject)
+      : body.subject;
     const ticket: SupportTicket = {
       _id, number: `SV-${String(counter!.value).padStart(6, "0")}`, ownerId: actor.userId,
       companyId: actor.companyId, companyName: actor.companyName, ownerName: actor.name, ownerPhone: actor.phone,
-      subject: body.subject, product: body.product, kind: body.kind, priority: body.priority, page: body.page.split(/[?#]/)[0],
+      subject, product: body.product, kind: body.kind, priority: body.priority, page: body.page.split(/[?#]/)[0],
       status: "open", assigneeId: null, assigneeName: null, createdAt: now, updatedAt: now,
       lastMessage: "", lastMessageAt: now, ownerUnread: 0, staffUnread: 0, revision: 0, clientId: body.clientId,
       history: [{ at: now, by: actor.name, status: "open" }],
@@ -208,6 +256,7 @@ export class SupportService {
     if (!actor.staff && (body.priority !== undefined || body.assigneeId !== undefined)) throw new ForbiddenException("صلاحية الدعم مطلوبة");
     const db = await this.db();
     const patch: Partial<SupportTicket> = { updatedAt: new Date() };
+    if (body.subject !== undefined) patch.subject = body.subject;
     if (body.status) patch.status = body.status;
     if (body.priority) patch.priority = body.priority;
     if (body.assigneeId !== undefined) {
@@ -217,7 +266,7 @@ export class SupportService {
     }
     const updated = await db.collection<SupportTicket>("support_tickets").findOneAndUpdate({ _id: ticket._id, revision: body.revision }, {
       $set: patch, $inc: { revision: 1 },
-      $push: { history: { $each: [{ at: new Date(), by: actor.name, ...(body.status ? { status: body.status } : {}), ...(body.assigneeId !== undefined ? { assigneeName: patch.assigneeName } : {}) }], $slice: -500 } },
+      $push: { history: { $each: [{ at: new Date(), by: actor.name, ...(body.status ? { status: body.status } : {}), ...(body.assigneeId !== undefined ? { assigneeName: patch.assigneeName } : {}), ...(body.subject !== undefined ? { subjectChanged: true } : {}) }], $slice: -500 } },
     }, { returnDocument: "after" });
     if (!updated) throw new ConflictException("تم تحديث التذكرة؛ حدّثها ثم حاول مجدداً");
     this.realtime.ticketChanged(updated, "updated", actor.userId);
