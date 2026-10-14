@@ -1,5 +1,6 @@
 import { Injectable, InternalServerErrorException, Logger } from "@nestjs/common";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
@@ -233,6 +234,25 @@ export class DigitalOceanSpacesService {
     if (!normalizedKey) return;
     const client = this.requireClient();
     await client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: normalizedKey }));
+  }
+
+  async copyAssetImage(params: {
+    sourceKey: string;
+    projectId: string;
+    assetId: string;
+    imageId: string;
+    fileName: string;
+  }): Promise<{ key: string; url: string }> {
+    const client = this.requireClient();
+    const key = this.buildAssetImageKey(params.projectId, params.assetId, params.imageId, params.fileName);
+    const encodedSource = params.sourceKey.split("/").map(encodeURIComponent).join("/");
+    await client.send(new CopyObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      CopySource: `${this.bucket}/${encodedSource}`,
+      ACL: "public-read",
+    }));
+    return { key, url: this.publicUrlForKey(key) };
   }
 
   async getObjectStream(

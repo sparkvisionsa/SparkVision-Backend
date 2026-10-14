@@ -6,6 +6,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
   OnModuleInit,
+  OnModuleDestroy,
   UnauthorizedException,
 } from "@nestjs/common";
 import { readFile } from "node:fs/promises";
@@ -91,7 +92,7 @@ import {
   rowValuesToRecords,
 } from "./sheet-rows.util";
 import { mvProjectSharesCompany } from "./mv-project-scope.util";
-import { ASSETS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/collections";
+import { ASSETS_COLLECTION, ASSET_IMPORTS_COLLECTION, ASSET_COLUMN_CONFIGS_COLLECTION, ASSET_AUDIT_LOGS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/collections";
 import { reserveValTechIds } from "@/assets/asset-sequence";
 import { isAppAssetSource, resolveAssetSource } from "@/assets/asset-source";
 import type { AssetDoc } from "@/assets/types";
@@ -1381,6 +1382,27 @@ function flattenPicAssetImagesRaw(raw: unknown): unknown[] {
     if (typeof value === "object") out.push(value);
   }
   return out;
+}
+
+function assetImageImportLeaves(raw: unknown): unknown[] {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw.flatMap(assetImageImportLeaves);
+  if (raw instanceof ObjectId || typeof raw === "string") return [raw];
+  if (typeof raw !== "object") return [];
+  if ("url" in raw || "fileId" in raw || "_id" in raw) return [raw];
+  return Object.values(raw).flatMap(assetImageImportLeaves);
+}
+
+const PROJECT_ARCHIVE_COMPANY_RESTORE_DAYS = 30;
+
+function addArchiveDays(value: Date, days: number): Date {
+  return new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function addArchiveYears(value: Date, years: number): Date {
+  const result = new Date(value);
+  result.setUTCFullYear(result.getUTCFullYear() + years);
+  return result;
 }
 
 function isPicAssetCategorizedImagesObject(raw: unknown): raw is Record<string, unknown> {
@@ -4032,11 +4054,22 @@ function runAssetImageBackfill(
 }
 
 @Injectable()
-export class MachineValuationService implements OnModuleInit {
+export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MachineValuationService.name);
+  private archivePurgeTimer?: ReturnType<typeof setInterval>;
   private readonly assetImagesDownloadJobs = new Map<string, MvAssetImagesDownloadProgress>();
+  private readonly assetImageImportJobs = new Map<string, {
+    id: string; sourceProjectId: string; targetProjectId: string; userId: string;
+    mode: "copy" | "move"; state: "running" | "completed" | "failed";
+    foldersTotal: number; foldersDone: number; imagesTotal: number; imagesDone: number;
+    error?: string; updatedAt: number;
+  }>();
 
   constructor(private readonly inspectorSpaces: DigitalOceanSpacesService) {}
+
+  onModuleDestroy() {
+    if (this.archivePurgeTimer) clearInterval(this.archivePurgeTimer);
+  }
 
   async assertAttachmentAccess(projectId: string, ctx: MvAccessContext, readOnly = false) {
     if (!ctx.userId || (!readOnly && ctx.userRole === "inspector")) throw new ForbiddenException("لا تملك صلاحية تعديل مرفقات التقرير.");
@@ -4404,6 +4437,11 @@ export class MachineValuationService implements OnModuleInit {
     await mvCol.createIndex({ companyId: 1 }).catch(() => undefined);
     await mvCol.createIndex({ companyId: 1, createdAt: -1 }).catch(() => undefined);
     await mvCol.createIndex({ userId: 1 }).catch(() => undefined);
+    await mvCol.createIndex({ deletedAt: 1, purgeAt: 1 }).catch(() => undefined);
+    await mvCol.updateMany(
+      { deletedAt: { $type: "date" } } as Filter<MvProjectDoc>,
+      [{ $set: { purgeAt: { $dateAdd: { startDate: "$deletedAt", unit: "year", amount: 1 } } } }] as never,
+    ).catch((error) => this.logger.warn(`archive retention migration: ${String(error)}`));
     await mvCol
       .updateMany(
         { $or: [{ locations: { $exists: false } }, { locations: null }] } as Filter<MvProjectDoc>,
@@ -4690,6 +4728,11 @@ export class MachineValuationService implements OnModuleInit {
     }
 
     await this.migratePhotosTreeSubProjectsToItems(db);
+    void this.purgeExpiredProjects().catch(error => this.logger.error(`archive purge: ${String(error)}`));
+    this.archivePurgeTimer = setInterval(() => {
+      void this.purgeExpiredProjects().catch(error => this.logger.error(`archive purge: ${String(error)}`));
+    }, 60 * 60 * 1000);
+    this.archivePurgeTimer.unref?.();
   }
 
   /**
@@ -4805,7 +4848,7 @@ export class MachineValuationService implements OnModuleInit {
     ctx: MvAccessContext,
   ): Promise<MvProjectMongoDoc> {
     const project = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne({ _id: projectId });
-    if (!project) throw new NotFoundException("Project not found");
+    if (!project || project.deletedAt) throw new NotFoundException("Project not found");
     this.assertProjectInScope(project, ctx);
     return project;
   }
@@ -5620,14 +5663,14 @@ export class MachineValuationService implements OnModuleInit {
     let projects: MvProjectMongoDoc[];
     if (ctx.isSuperAdmin) {
       projects = (await col
-        .find({})
+        .find({ deletedAt: null })
         .project(projectListProject)
         .sort({ createdAt: -1 })
         .toArray()) as MvProjectMongoDoc[];
     } else if (ctx.companyId) {
       const filter = this.buildProjectsVisibleToCompanyFilter(ctx.companyId);
       projects = (await col
-        .find(filter)
+        .find({ ...filter, deletedAt: null })
         .project(projectListProject)
         .sort({ createdAt: -1 })
         .toArray()) as MvProjectMongoDoc[];
@@ -7117,24 +7160,177 @@ export class MachineValuationService implements OnModuleInit {
   async deleteProject(id: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const _id = toId(id);
-    const projectSnapshot = await this.loadProjectForAccess(db, _id, ctx);
-    const inspectorEntries = normalizeInspectorFilesArray(projectSnapshot.inspectorFiles);
-    for (const entry of inspectorEntries) {
+    await this.loadProjectForAccess(db, _id, ctx);
+    const deletedAt = new Date();
+    const purgeAt = addArchiveYears(deletedAt, 1);
+    const result = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+      { _id, deletedAt: null },
+      { $set: { deletedAt, purgeAt, deletedBy: tryParseObjectId(ctx.userId ?? "") ?? null } },
+    );
+    if (!result.modifiedCount) throw new NotFoundException("Project not found");
+    return { ok: true, deletedAt: deletedAt.toISOString(), purgeAt: purgeAt.toISOString() };
+  }
+
+  async listProjectArchive(ctx: MvAccessContext) {
+    if (!ctx.userId || (!ctx.isSuperAdmin && !ctx.companyId)) throw new ForbiddenException("غير مصرح بعرض أرشيف المشاريع.");
+    const db = await getMongoDb();
+    const scope = ctx.isSuperAdmin ? {} : this.buildProjectsVisibleToCompanyFilter(ctx.companyId!);
+    const col = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+    const [activeCount, deleted] = await Promise.all([
+      col.countDocuments({ ...scope, deletedAt: null }),
+      col.find({ ...scope, deletedAt: { $type: "date" } },
+        { projection: { name: 1, companyId: 1, displayNumber: 1, referenceNumber: 1, deletedAt: 1, purgeAt: 1 } })
+        .sort({ deletedAt: -1 }).toArray(),
+    ]);
+    const companyIds = [...new Set(deleted.map(row => row.companyId?.toString()).filter((id): id is string => !!id && ObjectId.isValid(id)))]
+      .map(id => new ObjectId(id));
+    const companies = companyIds.length > 0
+      ? await getAuthCollections(db).companies.find(
+        { _id: { $in: companyIds } }, { projection: { name: 1 } },
+      ).toArray()
+      : [];
+    const companyNames = new Map(companies.map(company => [company._id.toString(), company.name]));
+    const now = new Date();
+    return {
+      totalCount: activeCount + deleted.length,
+      activeCount,
+      deletedCount: deleted.length,
+      canRestore: ctx.isSuperAdmin || ctx.userRole === "company_admin",
+      canPermanentlyDelete: ctx.isSuperAdmin || ctx.userRole === "company_admin",
+      projects: deleted.map(row => ({
+        _id: row._id.toString(), name: row.name,
+        companyName: row.companyId ? companyNames.get(row.companyId.toString()) ?? null : null,
+        displayNumber: row.displayNumber ?? null,
+        referenceNumber: row.referenceNumber ?? null,
+        deletedAt: row.deletedAt!.toISOString(),
+        companyRestoreUntil: addArchiveDays(row.deletedAt!, PROJECT_ARCHIVE_COMPANY_RESTORE_DAYS).toISOString(),
+        purgeAt: addArchiveYears(row.deletedAt!, 1).toISOString(),
+        canRestore: ctx.isSuperAdmin
+          ? addArchiveYears(row.deletedAt!, 1) > now
+          : ctx.userRole === "company_admin" &&
+            addArchiveDays(row.deletedAt!, PROJECT_ARCHIVE_COMPANY_RESTORE_DAYS) > now,
+      })),
+    };
+  }
+
+  async restoreProject(id: string, ctx: MvAccessContext) {
+    if (!ctx.userId || (!ctx.isSuperAdmin && ctx.userRole !== "company_admin")) {
+      throw new ForbiddenException("استعادة المشاريع متاحة لمدير الشركة فقط.");
+    }
+    const db = await getMongoDb();
+    const _id = toId(id);
+    const project = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne({ _id });
+    if (!project || !project.deletedAt) throw new NotFoundException("المشروع المحذوف غير موجود.");
+    this.assertProjectInScope(project, ctx);
+    const now = new Date();
+    const restoreUntil = ctx.isSuperAdmin
+      ? addArchiveYears(project.deletedAt, 1)
+      : addArchiveDays(project.deletedAt, PROJECT_ARCHIVE_COMPANY_RESTORE_DAYS);
+    if (restoreUntil <= now) {
+      throw new BadRequestException(ctx.isSuperAdmin
+        ? "انتهت مهلة استعادة المشروع للسوبر أدمن (سنة واحدة)."
+        : "انتهت مهلة استعادة المشروع لمدير الشركة (30 يومًا)."
+      );
+    }
+    const restored = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+      { _id, deletedAt: project.deletedAt, purgingAt: null },
+      { $unset: { deletedAt: "", purgeAt: "", deletedBy: "", purgingAt: "" } },
+    );
+    if (!restored.modifiedCount) throw new BadRequestException("تعذر استعادة المشروع؛ قد تكون عملية الحذف النهائي بدأت.");
+    return { ok: true };
+  }
+
+  async permanentlyDeleteProject(id: string, ctx: MvAccessContext) {
+    if (!ctx.userId || (!ctx.isSuperAdmin && ctx.userRole !== "company_admin")) {
+      throw new ForbiddenException("الحذف النهائي للمشاريع متاح لمدير الشركة فقط.");
+    }
+    const db = await getMongoDb();
+    const _id = toId(id);
+    const project = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne(
+      { _id, deletedAt: { $type: "date" } },
+    );
+    if (!project) throw new NotFoundException("المشروع غير موجود في الأرشيف.");
+    this.assertProjectInScope(project, ctx);
+
+    const claimedAt = new Date();
+    const claimed = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOneAndUpdate(
+      {
+        _id,
+        deletedAt: project.deletedAt,
+        $or: [
+          { purgingAt: null },
+          { purgingAt: { $lte: new Date(claimedAt.getTime() - 60 * 60 * 1000) } },
+        ],
+      },
+      { $set: { purgingAt: claimedAt } },
+      { returnDocument: "after" },
+    );
+    if (!claimed) {
+      throw new BadRequestException("تعذر بدء الحذف النهائي؛ قد تكون هناك عملية حذف أخرى قيد التنفيذ.");
+    }
+
+    try {
+      await this.purgeProjectData(db, claimed);
+      return { ok: true };
+    } catch (error) {
+      await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+        { _id, purgingAt: claimedAt },
+        { $unset: { purgingAt: "" } },
+      );
+      this.logger.error(`permanent delete project ${_id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServiceUnavailableException("تعذر حذف المشروع نهائيًا. حاول مرة أخرى.");
+    }
+  }
+
+  async purgeExpiredProjects() {
+    const db = await getMongoDb();
+    const col = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+    const now = new Date();
+    const retentionCutoff = new Date(now);
+    retentionCutoff.setUTCFullYear(retentionCutoff.getUTCFullYear() - 1);
+    const expired = await col.find({ deletedAt: { $type: "date", $lte: retentionCutoff }, purgeAt: { $lte: now } },
+      { projection: { _id: 1 } }).limit(50).toArray();
+    for (const candidate of expired) {
+      const claimed = await col.findOneAndUpdate(
+        { _id: candidate._id, deletedAt: { $type: "date", $lte: retentionCutoff }, purgeAt: { $lte: now },
+          $or: [{ purgingAt: null }, { purgingAt: { $lte: new Date(now.getTime() - 60 * 60 * 1000) } }] },
+        { $set: { purgingAt: now } },
+        { returnDocument: "after" },
+      );
+      if (!claimed) continue;
+      try {
+        await this.purgeProjectData(db, claimed);
+      } catch (error) {
+        await col.updateOne({ _id: claimed._id, purgingAt: now }, { $unset: { purgingAt: "" } });
+        this.logger.error(`purge project ${claimed._id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private async purgeProjectData(db: Db, project: MvProjectMongoDoc) {
+    const projectId = project._id;
+    for (const entry of normalizeInspectorFilesArray(project.inspectorFiles)) {
       await this.deleteInspectorBlobFromStores(db, entry);
     }
-    await db.collection(MV_SHEETS_COLLECTION).deleteMany({ projectId: _id });
-    await this.deleteStoredFiles(db, {
-      "metadata.projectId": _id,
-      "metadata.scope": { $ne: "mv-inspector" },
-    });
-    await db
-      .collection<AssetDoc>(ASSETS_COLLECTION)
-      .deleteMany({ projectId: _id, ...MV_PHOTO_FOLDER_FILTER });
-    await db.collection(MV_ITEMS_COLLECTION).deleteMany({ projectId: _id });
-    await db.collection(MV_SUBPROJECTS_COLLECTION).deleteMany({ projectId: _id });
-    const del = await db.collection(MV_PROJECTS_COLLECTION).deleteOne({ _id });
-    if (del.deletedCount === 0) throw new NotFoundException("Project not found");
-    return { ok: true };
+    const projectAssets = await db.collection<AssetDoc>(ASSETS_COLLECTION)
+      .find({ projectId }, { projection: { images: 1 } }).toArray();
+    const imageKeys = new Set<string>();
+    for (const asset of projectAssets) {
+      for (const image of assetImageImportLeaves(asset.images)) {
+        if (!image || typeof image !== "object" || image instanceof ObjectId) continue;
+        const ref = image as { publicId?: unknown; url?: unknown };
+        if (typeof ref.publicId === "string" && typeof ref.url === "string" &&
+          ref.url === this.inspectorSpaces.publicUrlForKey(ref.publicId)) imageKeys.add(ref.publicId);
+      }
+    }
+    for (const key of imageKeys) await this.inspectorSpaces.deleteObject(key);
+    await this.deleteStoredFiles(db, { "metadata.projectId": projectId });
+    for (const name of [MV_SHEETS_COLLECTION, MV_ITEMS_COLLECTION, MV_SUBPROJECTS_COLLECTION,
+      "mv_attachment_uploads",
+      ASSETS_COLLECTION, ASSET_IMPORTS_COLLECTION, ASSET_COLUMN_CONFIGS_COLLECTION, ASSET_AUDIT_LOGS_COLLECTION]) {
+      await db.collection(name).deleteMany({ projectId });
+    }
+    await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).deleteOne({ _id: projectId, purgingAt: project.purgingAt });
   }
 
   /* ───────── Sub-Projects ───────── */
@@ -9985,6 +10181,407 @@ export class MachineValuationService implements OnModuleInit {
     }
 
     return uploaded;
+  }
+
+  async listAssetImageImportSources(targetProjectId: string, ctx: MvAccessContext) {
+    if (!ctx.userId || ctx.userRole === "inspector") throw new ForbiddenException("غير مصرح باستيراد صور المشاريع.");
+    const db = await getMongoDb();
+    const targetId = toId(targetProjectId);
+    const target = await this.loadProjectForAccess(db, targetId, ctx);
+    if (!target.companyId) return [];
+    const projectRows = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+      .find({ ...this.buildProjectsVisibleToCompanyFilter(String(target.companyId)), _id: { $ne: targetId }, deletedAt: null })
+      .project<{ _id: ObjectId; name: string; referenceNumber?: string | null; displayNumber?: number | null;
+        reportData?: { clientName?: string | null }; createdAt?: Date }>({
+        name: 1, referenceNumber: 1, displayNumber: 1, "reportData.clientName": 1, createdAt: 1,
+      })
+      .sort({ createdAt: -1 }).toArray();
+    if (projectRows.length === 0) return [];
+    const ids = projectRows.map(project => project._id);
+    const [items, subs, assets, files] = await Promise.all([
+      db.collection<MvItemDoc>(MV_ITEMS_COLLECTION).find({ projectId: { $in: ids } }).toArray(),
+      db.collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION).find({ projectId: { $in: ids } }).toArray(),
+      db.collection<AssetDoc>(ASSETS_COLLECTION).find({ projectId: { $in: ids }, ...MV_PHOTO_FOLDER_FILTER }).toArray(),
+      db.collection<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>(MV_FILES_FILES_COLLECTION)
+        .find({ "metadata.projectId": { $in: ids }, "metadata.scope": "asset-images" }).toArray(),
+    ]);
+    const roots = new Map<string, string>();
+    for (const row of [...subs, ...items]) {
+      if (row.name === DEFAULT_PHOTOS_SUBFOLDER_NAME && !getParentIdFromDoc(row as MvSubProjectMongoDoc)) {
+        roots.set(row.projectId.toString(), row._id.toString());
+      }
+    }
+    const children = new Map<string, Array<{ id: ObjectId; asset?: AssetDoc }>>();
+    const addChild = (projectId: ObjectId, parent: ObjectId | null | undefined,
+      child: { id: ObjectId; asset?: AssetDoc }) => {
+      if (!parent) return;
+      const key = `${projectId}:${parent}`;
+      children.set(key, [...(children.get(key) ?? []), child]);
+    };
+    for (const row of [...items, ...subs]) addChild(row.projectId,
+      getParentIdFromDoc(row as MvSubProjectMongoDoc), { id: row._id });
+    for (const row of assets) addChild(row.projectId, row.parent, { id: row._id, asset: row });
+    const filesByProject = new Map<string, typeof files>();
+    for (const file of files) {
+      const pid = file.metadata?.projectId.toString();
+      if (!pid) continue;
+      filesByProject.set(pid, [...(filesByProject.get(pid) ?? []), file]);
+    }
+    return projectRows.map(project => {
+      const pid = project._id.toString();
+      const rootId = roots.get(pid);
+      const seen = new Set<string>(rootId ? [rootId] : []);
+      const queue = rootId ? [...(children.get(`${pid}:${rootId}`) ?? [])] : [];
+      const reachableAssets: AssetDoc[] = [];
+      let folderCount = 0;
+      while (queue.length > 0) {
+        const node = queue.shift()!;
+        const id = node.id.toString();
+        if (seen.has(id)) continue;
+        seen.add(id);
+        folderCount += 1;
+        if (node.asset) reachableAssets.push(node.asset);
+        queue.push(...(children.get(`${pid}:${id}`) ?? []));
+      }
+      const assetIds = new Set(reachableAssets.map(asset => asset._id.toString()));
+      const imageUrls = new Set<string>();
+      const imageIds = new Set<string>();
+      let imageCount = 0;
+      for (const asset of reachableAssets) {
+        for (const image of assetImageImportLeaves(asset.images)) {
+          imageCount += 1;
+          if (image instanceof ObjectId) imageIds.add(image.toString());
+          else if (typeof image === "string") {
+            if (ObjectId.isValid(image)) imageIds.add(image);
+            else imageUrls.add(image);
+          } else if (image && typeof image === "object") {
+            const ref = image as { _id?: unknown; url?: unknown };
+            if (ref._id) imageIds.add(String(ref._id));
+            if (typeof ref.url === "string") imageUrls.add(ref.url);
+          }
+        }
+      }
+      for (const file of filesByProject.get(pid) ?? []) {
+        const meta = file.metadata;
+        if (meta?.picAssetId && !assetIds.has(meta.picAssetId.toString())) continue;
+        if (meta?.sourceUrl && imageUrls.has(meta.sourceUrl)) continue;
+        if (imageIds.has(file._id.toString())) continue;
+        if (meta?.subProjectId && !seen.has(meta.subProjectId.toString())) continue;
+        imageCount += 1;
+      }
+      return { _id: pid, name: project.name, referenceNumber: trimReferenceNumber(project.referenceNumber),
+        displayNumber: project.displayNumber ?? null, reportData: { clientName: project.reportData?.clientName ?? null },
+        folderCount, imageCount };
+    });
+  }
+
+  async startAssetImageImport(
+    targetProjectId: string,
+    sourceProjectId: string,
+    mode: "copy" | "move",
+    ctx: MvAccessContext,
+  ) {
+    if (!ctx.userId || ctx.userRole === "inspector") throw new ForbiddenException("غير مصرح باستيراد صور المشاريع.");
+    if (mode !== "copy" && mode !== "move") throw new BadRequestException("اختر النسخ أو النقل.");
+    const targetId = toId(targetProjectId);
+    const sourceId = toId(sourceProjectId);
+    if (targetId.equals(sourceId)) throw new BadRequestException("اختر مشروعاً آخر للاستيراد.");
+    const db = await getMongoDb();
+    const [target, source] = await Promise.all([
+      this.loadProjectForAccess(db, targetId, ctx),
+      this.loadProjectForAccess(db, sourceId, ctx),
+    ]);
+    if (!source.companyId || !target.companyId || String(source.companyId) !== String(target.companyId)) {
+      throw new ForbiddenException("يمكن الاستيراد بين مشاريع الشركة نفسها فقط.");
+    }
+
+    const sourceRoot = await this.ensurePhotosRootFolder(db, sourceId);
+    const [items, subs, assets, allFiles] = await Promise.all([
+      db.collection<MvItemDoc>(MV_ITEMS_COLLECTION).find({ projectId: sourceId }).toArray(),
+      db.collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION).find({ projectId: sourceId }).toArray(),
+      db.collection<AssetDoc>(ASSETS_COLLECTION).find({ projectId: sourceId, ...MV_PHOTO_FOLDER_FILTER }).toArray(),
+      db.collection<{ _id: ObjectId; filename?: string; length?: number; metadata?: MvStoredFileMetadata }>(MV_FILES_FILES_COLLECTION)
+        .find({ "metadata.projectId": sourceId, "metadata.scope": "asset-images" }).toArray(),
+    ]);
+    type ImportNode = { id: ObjectId; parent: ObjectId | null; name: string; kind: "folder" | "asset"; asset?: AssetDoc };
+    const allNodes: ImportNode[] = [
+      ...items.filter(row => !row._id.equals(sourceRoot._id)).map(row => ({
+        id: row._id, parent: getParentIdFromDoc(row as MvSubProjectMongoDoc) ?? null, name: row.name, kind: "folder" as const,
+      })),
+      ...subs.filter(row => !row._id.equals(sourceRoot._id)).map(row => ({
+        id: row._id, parent: getParentIdFromDoc(row as MvSubProjectMongoDoc) ?? null, name: row.name, kind: "folder" as const,
+      })),
+      ...assets.map(row => ({ id: row._id, parent: row.parent ?? null, name: row.name ?? "", kind: "asset" as const, asset: row })),
+    ];
+    const children = new Map<string, ImportNode[]>();
+    for (const node of allNodes) {
+      if (!node.parent) continue;
+      const key = node.parent.toString();
+      children.set(key, [...(children.get(key) ?? []), node]);
+    }
+    const nodes: ImportNode[] = [];
+    const seen = new Set<string>([sourceRoot._id.toString()]);
+    const queue = [...(children.get(sourceRoot._id.toString()) ?? [])];
+    while (queue.length > 0) {
+      const node = queue.shift()!;
+      if (seen.has(node.id.toString())) continue;
+      seen.add(node.id.toString());
+      nodes.push(node);
+      queue.push(...(children.get(node.id.toString()) ?? []));
+    }
+    const sourceAssetIds = new Set(nodes.filter(node => node.kind === "asset").map(node => node.id.toString()));
+    const sourceImageUrls = new Set<string>();
+    const sourceImageIds = new Set<string>();
+    let assetImageCount = 0;
+    for (const node of nodes) {
+      if (!node.asset) continue;
+      for (const image of assetImageImportLeaves(node.asset.images)) {
+        if (image == null) continue;
+        assetImageCount += 1;
+        if (image instanceof ObjectId) sourceImageIds.add(image.toString());
+        else if (typeof image === "string") {
+          if (ObjectId.isValid(image)) sourceImageIds.add(image);
+          else sourceImageUrls.add(image);
+        } else if (typeof image === "object") {
+          const ref = image as { _id?: unknown; url?: unknown };
+          if (ref._id) sourceImageIds.add(String(ref._id));
+          if (typeof ref.url === "string") sourceImageUrls.add(ref.url);
+        }
+      }
+    }
+    const files = allFiles.filter(file => {
+      const meta = file.metadata;
+      if (meta?.picAssetId && !sourceAssetIds.has(meta.picAssetId.toString())) return false;
+      if (meta?.sourceUrl && sourceImageUrls.has(meta.sourceUrl)) return false;
+      if (sourceImageIds.has(file._id.toString())) return false;
+      return !meta?.subProjectId || seen.has(meta.subProjectId.toString());
+    });
+    if (nodes.length === 0 && files.length === 0) {
+      throw new BadRequestException("لا توجد مجلدات أصول أو صور في المشروع المصدر.");
+    }
+    if (assetImageCount > 0 && !this.inspectorSpaces.isReady()) {
+      throw new ServiceUnavailableException("تخزين صور الأصول غير متاح حالياً.");
+    }
+    const job = {
+      id: randomUUID(), sourceProjectId, targetProjectId, userId: ctx.userId,
+      mode, state: "running" as const, foldersTotal: nodes.length, foldersDone: 0,
+      imagesTotal: assetImageCount + files.length, imagesDone: 0, updatedAt: Date.now(),
+    };
+    for (const [key, previous] of this.assetImageImportJobs) {
+      if (previous.updatedAt < Date.now() - 24 * 60 * 60 * 1000) this.assetImageImportJobs.delete(key);
+    }
+    this.assetImageImportJobs.set(job.id, job);
+    void this.runAssetImageImport(job, source.name || "مشروع", sourceRoot._id, nodes, files, ctx)
+      .catch(error => {
+        this.logger.error(`asset image import ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
+        Object.assign(job, { state: "failed", error: error instanceof Error ? error.message : "تعذر استيراد الصور.", updatedAt: Date.now() });
+      });
+    return job;
+  }
+
+  async getAssetImageImport(targetProjectId: string, jobId: string, ctx: MvAccessContext) {
+    const job = this.assetImageImportJobs.get(jobId);
+    if (!job || job.targetProjectId !== targetProjectId || !ctx.userId || job.userId !== ctx.userId) {
+      throw new NotFoundException("عملية الاستيراد غير موجودة.");
+    }
+    await this.loadProjectForAccess(await getMongoDb(), toId(targetProjectId), ctx);
+    return job;
+  }
+
+  private async runAssetImageImport(
+    job: { id: string; sourceProjectId: string; targetProjectId: string; userId: string;
+      mode: "copy" | "move"; state: "running" | "completed" | "failed";
+      foldersTotal: number; foldersDone: number; imagesTotal: number; imagesDone: number;
+      error?: string; updatedAt: number },
+    sourceName: string,
+    sourceRootId: ObjectId,
+    nodes: Array<{ id: ObjectId; parent: ObjectId | null; name: string; kind: "folder" | "asset"; asset?: AssetDoc }>,
+    files: Array<{ _id: ObjectId; filename?: string; length?: number; metadata?: MvStoredFileMetadata }>,
+    ctx: MvAccessContext,
+  ) {
+    const db = await getMongoDb();
+    const sourceId = toId(job.sourceProjectId);
+    const targetId = toId(job.targetProjectId);
+    const targetRoot = await this.ensurePhotosRootFolder(db, targetId);
+    const [targetItems, targetSubs, targetAssets] = await Promise.all([
+      db.collection<MvItemDoc>(MV_ITEMS_COLLECTION)
+        .find({ projectId: targetId, parent: targetRoot._id }).project({ name: 1 }).toArray(),
+      db.collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
+        .find({ projectId: targetId, parent: targetRoot._id }).project({ name: 1 }).toArray(),
+      db.collection<AssetDoc>(ASSETS_COLLECTION)
+        .find({ projectId: targetId, parent: targetRoot._id, ...MV_PHOTO_FOLDER_FILTER }).project({ name: 1 }).toArray(),
+    ]);
+    const usedNames = new Set([...targetItems, ...targetSubs, ...targetAssets].map(row => row.name));
+    const baseName = `صور من ${sourceName}`;
+    let containerName = baseName;
+    for (let n = 2; usedNames.has(containerName); n++) containerName = `${baseName} (${n})`;
+    const container = await this.createSubProject(job.targetProjectId, containerName, ctx, targetRoot._id.toString(), { kind: "folder" });
+    const mappedIds = new Map<string, string>([[sourceRootId.toString(), container._id]]);
+    const copiedSourceKeys = new Set<string>();
+    const createdTargetKeys = new Set<string>();
+    let sourceCleanupStarted = false;
+    const markImage = () => { job.imagesDone += 1; job.updatedAt = Date.now(); };
+    const readGridImage = async (imageId: ObjectId) => {
+      const file = await db.collection<{ _id: ObjectId; metadata?: MvStoredFileMetadata }>(MV_FILES_FILES_COLLECTION)
+        .findOne({ _id: imageId, "metadata.projectId": sourceId });
+      if (!file) return null;
+      const stream = await this.openStoredProjectFileStream(db, file);
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream as AsyncIterable<Buffer | Uint8Array>) chunks.push(Buffer.from(chunk));
+      return { data: Buffer.concat(chunks), mimeType: file.metadata?.mimeType || "image/jpeg" };
+    };
+    const copyImage = async (image: unknown, targetAssetId: string, index: number, folderName: string): Promise<unknown> => {
+      const raw = image && typeof image === "object" && !(image instanceof ObjectId)
+        ? image as Record<string, unknown> : {};
+      const url = typeof image === "string" && !ObjectId.isValid(image) ? image : typeof raw.url === "string" ? raw.url : "";
+      const sourceKey = typeof raw.publicId === "string" ? raw.publicId : "";
+      // An image document's _id identifies the image record, not necessarily a GridFS file.
+      const oldId = image instanceof ObjectId ? image : typeof image === "string" && ObjectId.isValid(image)
+        ? new ObjectId(image) : tryParseObjectId(String(raw.fileId ?? raw.gridFsFileId ?? raw._id ?? ""));
+      const imageId = new ObjectId();
+      let urlFileName = "";
+      try { if (url) urlFileName = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? ""); }
+      catch { urlFileName = ""; }
+      const mimeExtension = imageExtensionFromMimeType(String(raw.mimeType ?? "image/jpeg")) ?? "jpg";
+      const fileName = sanitizeUploadedFileName(urlFileName || `${folderName}-${index}.${mimeExtension}`);
+      let uploaded: { key: string; url: string };
+      let mimeType = typeof raw.mimeType === "string" ? raw.mimeType : "image/jpeg";
+      if (sourceKey && url === this.inspectorSpaces.publicUrlForKey(sourceKey)) {
+        uploaded = await this.inspectorSpaces.copyAssetImage({ sourceKey, projectId: job.targetProjectId,
+          assetId: targetAssetId, imageId: imageId.toString(), fileName });
+        copiedSourceKeys.add(sourceKey);
+      } else {
+        const fetched = (url ? await fetchExternalAssetImageBuffer(url) : null)
+          ?? (oldId ? await readGridImage(oldId) : null);
+        if (!fetched) throw new BadRequestException("تعذر قراءة إحدى صور المشروع المصدر.");
+        mimeType = fetched.mimeType;
+        uploaded = await this.inspectorSpaces.uploadAssetImage({ projectId: job.targetProjectId,
+          assetId: targetAssetId, imageId: imageId.toString(), fileName, buffer: fetched.data, contentType: mimeType });
+      }
+      createdTargetKeys.add(uploaded.key);
+      markImage();
+      const { fileId: _sourceFileId, gridFsFileId: _sourceGridFsFileId, ...imageMetadata } = raw;
+      return { ...imageMetadata, _id: imageId, url: uploaded.url, publicId: uploaded.key,
+        mimeType, createdAt: raw.createdAt ?? new Date(),
+        ...(raw.thumbnailUrl ? { thumbnailUrl: null } : {}) };
+    };
+    const copyImages = async (raw: unknown, targetAssetId: string, folderName: string): Promise<unknown> => {
+      let index = 0;
+      const visit = async (value: unknown): Promise<unknown> => {
+        if (Array.isArray(value)) {
+          const copied: unknown[] = [];
+          for (const entry of value) copied.push(await visit(entry));
+          return copied;
+        }
+        if (value && typeof value === "object" && !(value instanceof ObjectId) &&
+          !("url" in value) && !("fileId" in value) && !("_id" in value)) {
+          const result: Record<string, unknown> = {};
+          for (const [key, entry] of Object.entries(value)) result[key] = await visit(entry);
+          return result;
+        }
+        if (value == null) return value;
+        index += 1;
+        return copyImage(value, targetAssetId, index, folderName);
+      };
+      return visit(raw);
+    };
+
+    try {
+    for (const node of nodes) {
+      const parentId = mappedIds.get(node.parent?.toString() ?? "");
+      if (!parentId) throw new BadRequestException("تعذر إنشاء شجرة مجلدات الصور.");
+      const created = await this.createSubProject(job.targetProjectId, node.name, ctx, parentId, { kind: node.kind });
+      mappedIds.set(node.id.toString(), created._id);
+      if (node.asset) {
+        const images = await copyImages(node.asset.images, created._id, node.name);
+        const targetAssetId = toId(created._id);
+        const shell = await db.collection<AssetDoc>(ASSETS_COLLECTION).findOne(
+          { _id: targetAssetId, projectId: targetId, ...MV_PHOTO_FOLDER_FILTER },
+        );
+        if (!shell) throw new BadRequestException("تعذر إنشاء الأصل في المشروع الحالي.");
+        // Keep the source asset's business data while assigning project-local IDs and ancestry.
+        const cloned: AssetDoc = {
+          ...node.asset,
+          _id: targetAssetId,
+          assetId: targetAssetId.toString(),
+          val_tech_id: shell.val_tech_id ?? null,
+          projectId: targetId,
+          parent: toId(parentId),
+          name: node.name,
+          images,
+          updatedAt: new Date(),
+        };
+        // These references belong to the source project's spreadsheet/tree.
+        delete cloned.importId;
+        delete (cloned as AssetDoc & { subProjectId?: ObjectId }).subProjectId;
+        await db.collection<AssetDoc>(ASSETS_COLLECTION).replaceOne(
+          { _id: targetAssetId, projectId: targetId, ...MV_PHOTO_FOLDER_FILTER }, cloned,
+        );
+      }
+      job.foldersDone += 1;
+      job.updatedAt = Date.now();
+    }
+
+    const targetBucket = this.getFilesBucket(db);
+    for (const file of files) {
+      const sourceMeta = file.metadata ?? { projectId: sourceId };
+      const targetPicId = sourceMeta.picAssetId ? mappedIds.get(sourceMeta.picAssetId.toString()) : undefined;
+      const targetSubId = sourceMeta.subProjectId ? mappedIds.get(sourceMeta.subProjectId.toString()) : undefined;
+      const oldPath = sourceMeta.relativePath || file.filename || "image";
+      const relativePath = sanitizeUploadedRelativePath(`${containerName}/${oldPath}`, file.filename || "image");
+      const metadata: MvStoredFileMetadata = {
+        ...sourceMeta, projectId: targetId, scope: "asset-images", relativePath,
+        folderPath: folderPathFromRelativePath(relativePath), updatedAt: new Date(),
+        ...(targetPicId ? { picAssetId: toId(targetPicId) } : {}),
+        ...(!targetPicId ? { subProjectId: toId(targetSubId ?? container._id) } : {}),
+      };
+      delete metadata.storage;
+      delete metadata.spacesKey;
+      delete metadata.sourceUrl;
+      if (!targetPicId) delete metadata.picAssetId;
+      if (targetPicId) delete metadata.subProjectId;
+      const sourceStream = await this.openStoredProjectFileStream(db, file);
+      await new Promise<void>((resolve, reject) => {
+        const upload = targetBucket.openUploadStream(file.filename || "image", { metadata });
+        sourceStream.on("error", reject);
+        upload.on("error", reject);
+        upload.on("finish", () => resolve());
+        sourceStream.pipe(upload);
+      });
+      markImage();
+    }
+
+    if (job.mode === "move") {
+      sourceCleanupStarted = true;
+      if (files.length > 0) await this.deleteStoredFiles(db, {
+        _id: { $in: files.map(file => file._id) }, "metadata.projectId": sourceId,
+      });
+      const nodeIds = new Set(nodes.map(node => node.id.toString()));
+      for (const node of nodes.filter(node => !node.parent || !nodeIds.has(node.parent.toString()))) {
+        await this.deleteSubProject(job.sourceProjectId, node.id.toString(), ctx);
+      }
+      for (const key of copiedSourceKeys) {
+        try { await this.inspectorSpaces.deleteObject(key); }
+        catch (error) { this.logger.warn(`asset image import cleanup: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    }
+    job.state = "completed";
+    job.updatedAt = Date.now();
+    } catch (error) {
+      if (!sourceCleanupStarted) {
+        try { await this.deleteSubProject(job.targetProjectId, container._id, ctx); }
+        catch (cleanupError) {
+          this.logger.warn(`asset image import rollback: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+        }
+        for (const key of createdTargetKeys) {
+          try { await this.inspectorSpaces.deleteObject(key); }
+          catch (cleanupError) {
+            this.logger.warn(`asset image import object rollback: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+          }
+        }
+      }
+      throw error;
+    }
   }
 
   private async openStoredProjectFileStream(

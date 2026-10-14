@@ -281,6 +281,10 @@ export interface MvProjectDoc {
   name: string;
   createdAt: Date;
   updatedAt: Date;
+  deletedAt?: Date | null;
+  purgeAt?: Date | null;
+  deletedBy?: ObjectId | null;
+  purgingAt?: Date | null;
   /**
    * منشئ المشروع — نفس `users._id` (يفضّل ObjectId في BSON).
    * قد يُخزَّن كنص hex في بيانات قديمة أو يدوية.

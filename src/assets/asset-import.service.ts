@@ -287,7 +287,7 @@ export class AssetImportService {
   private async ensureProjectExists(db: Awaited<ReturnType<typeof getMongoDb>>, projectId: ObjectId) {
     const project = await db
       .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
-      .findOne({ _id: projectId }, { projection: { _id: 1 } });
+      .findOne({ _id: projectId, deletedAt: null }, { projection: { _id: 1 } });
 
     if (!project) {
       throw new NotFoundException("المشروع غير موجود.");

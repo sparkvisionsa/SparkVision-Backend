@@ -20,7 +20,7 @@ export class AssetProjectAccessService {
   ) {
     const db = await getMongoDb();
     const project = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne(
-      { _id: projectId },
+      { _id: projectId, deletedAt: null },
       {
         projection: {
           _id: 1,

@@ -61,7 +61,8 @@ async function bootstrap() {
     if (
       (path.includes("/inspectorfiles/") && path.includes("/download")) ||
       path.endsWith("/asset-image-files/download") ||
-      (path.includes("/helper-tools/recordings/") && path.endsWith("/file"))
+      (path.includes("/helper-tools/recordings/") && path.endsWith("/file")) ||
+      (path.includes("/helper-tools/pdfs/") && path.endsWith("/file"))
     ) {
       req.headers["x-no-compression"] = "true";
     }

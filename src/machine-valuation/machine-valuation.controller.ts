@@ -245,6 +245,28 @@ export class MachineValuationController {
     return this.mvService.listProjects(toMvAccess(context));
   }
 
+  @Get("projects/archive")
+  async listProjectArchive(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.mvService.listProjectArchive(toMvAccess(context));
+  }
+
+  @Post("projects/:id/restore")
+  async restoreProject(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.restoreProject(id, toMvAccess(context));
+  }
+
+  @Delete("projects/:id/permanent")
+  async permanentlyDeleteProject(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.permanentlyDeleteProject(id, toMvAccess(context));
+  }
+
   @Get("project-workflow-statuses")
   listProjectWorkflowStatuses() {
     return this.mvService.listProjectWorkflowStatuses();
@@ -846,6 +868,56 @@ export class MachineValuationController {
     this.publishRealtime(projectId, "asset-images-changed", "asset-image-files:upload");
     this.publishRealtime(projectId, "asset-folders-changed", "asset-image-files:upload");
     return result;
+  }
+
+  @Post("projects/:pid/asset-image-imports")
+  async startProjectAssetImageImport(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("pid") projectId: string,
+    @Body() body: { sourceProjectId?: string; mode?: "copy" | "move" },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const job = await this.mvService.startAssetImageImport(
+      projectId, body?.sourceProjectId ?? "", body?.mode as "copy" | "move", toMvAccess(context),
+    );
+    this.publishRealtime(projectId, "asset-images-changed", "asset-image-import:start");
+    return job;
+  }
+
+  @Get("projects/:pid/asset-image-imports/sources")
+  async listProjectAssetImageImportSources(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("pid") projectId: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.mvService.listAssetImageImportSources(projectId, toMvAccess(context));
+  }
+
+  @Get("projects/:pid/asset-image-imports/:jobId")
+  async getProjectAssetImageImport(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("pid") projectId: string,
+    @Param("jobId") jobId: string,
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    const job = await this.mvService.getAssetImageImport(projectId, jobId, toMvAccess(context));
+    if (job.state === "completed") {
+      this.publishRealtime(projectId, "asset-images-changed", "asset-image-import:complete");
+      this.publishRealtime(projectId, "asset-folders-changed", "asset-image-import:complete");
+      if (job.mode === "move") {
+        this.publishRealtime(job.sourceProjectId, "asset-images-changed", "asset-image-import:move");
+        this.publishRealtime(job.sourceProjectId, "asset-folders-changed", "asset-image-import:move");
+      }
+    }
+    return job;
   }
 
   private async handleReorderProjectAssetImageFiles(
