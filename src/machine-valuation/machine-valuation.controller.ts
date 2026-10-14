@@ -1111,7 +1111,7 @@ export class MachineValuationController {
     res.setHeader("Content-Type", download.file.mimeType || "application/octet-stream");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="${encodeURIComponent(download.file.name)}"`,
+      `inline; filename="file"; filename*=UTF-8''${encodeURIComponent(download.file.name)}`,
     );
     return new Promise<void>((resolve, reject) => {
       download.stream.on("error", (error) => {
@@ -1283,7 +1283,7 @@ export class MachineValuationController {
     res.setHeader("Content-Type", download.file.mimeType || "application/octet-stream");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="${encodeURIComponent(download.file.name)}"`,
+      `inline; filename="file"; filename*=UTF-8''${encodeURIComponent(download.file.name)}`,
     );
 
     return new Promise<void>((resolve, reject) => {

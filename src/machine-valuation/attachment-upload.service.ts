@@ -8,6 +8,7 @@ import { assetUploadImageId } from "./asset-upload-idempotency";
 import { ATTACHMENT_FIELDS, attachmentWorkspaceUpdate, type AttachmentField } from "./attachment-workspace";
 import { MV_FILES_BUCKET, MV_FILES_FILES_COLLECTION, MV_PROJECTS_COLLECTION } from "./collections";
 import type { MvAccessContext } from "./types";
+import { decodeUploadFilename } from "./sheet-rows.util";
 
 type Job = { _id: string; projectId: ObjectId; userId: string; companyId: string | null; field: AttachmentField;
   sourceIds: string[]; plans: Record<string, number>; status: "pending" | "done" | "cancelled"; label: string; updatedAt: Date };
@@ -69,8 +70,9 @@ export class AttachmentUploadService {
       heartbeat.unref();
       try {
         if (!await collection.findOne({ _id: fileId })) {
-          const name = file.originalname.replace(/[\\/:*?"<>|]/g, "-");
-          const meta = { projectId: pid, mimeType: file.mimetype, originalFileName: file.originalname, updatedAt: new Date(), attachmentJobId: id };
+          const decodedName = decodeUploadFilename(file.originalname || "file");
+          const name = decodedName.replace(/[\\/:*?"<>|]/g, "-");
+          const meta = { projectId: pid, mimeType: file.mimetype, originalFileName: name, updatedAt: new Date(), attachmentJobId: id };
           if (this.spaces.isReady()) {
             const stored = await this.spaces.uploadInspectorFile({ projectId, entryId: fileId.toString(), fileName: name, buffer: file.buffer, contentType: file.mimetype });
             await collection.insertOne({ _id: fileId, filename: name, length: file.buffer.length, uploadDate: new Date(), metadata: { ...meta, storage: "digitalocean", spacesKey: stored.key } });

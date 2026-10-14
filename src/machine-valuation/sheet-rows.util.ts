@@ -31,9 +31,21 @@ export function rowValuesToRecords(
  */
 export function decodeUploadFilename(original: string): string {
   if (!original) return "";
+
+  const normalized = original.normalize("NFC");
+  // A name that already contains real Unicode (Arabic included) must not be
+  // forced through latin1. Doing so truncates every code point above 255.
+  if (Array.from(normalized).some((char) => char.codePointAt(0)! > 0xff)) {
+    return normalized;
+  }
+
   try {
-    return Buffer.from(original, "latin1").toString("utf8");
+    const decoded = Buffer.from(normalized, "latin1").toString("utf8");
+    // Genuine latin1 names (for example résumé.pdf) are not necessarily UTF-8.
+    // Keep the original whenever decoding would introduce replacement marks.
+    if (decoded.includes("\uFFFD")) return normalized;
+    return decoded.normalize("NFC");
   } catch {
-    return original;
+    return normalized;
   }
 }

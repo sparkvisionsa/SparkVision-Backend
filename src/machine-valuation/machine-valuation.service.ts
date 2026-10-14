@@ -3628,31 +3628,26 @@ function mapStoredFileDoc(
   const uploadDate = doc.uploadDate instanceof Date ? doc.uploadDate : new Date();
   const updatedAt =
     doc.metadata?.updatedAt instanceof Date ? doc.metadata.updatedAt : uploadDate;
+  const rawName = doc.metadata?.originalFileName || doc.filename || "file";
+  const rawRelativePath = doc.metadata?.relativePath || rawName;
+  const rawFolderPath = doc.metadata?.folderPath ?? folderPathFromRelativePath(rawRelativePath);
+  const name = decodeUploadFilename(rawName);
+  const relativePath = decodeUploadFilename(rawRelativePath);
+  const folderPath = decodeUploadFilename(rawFolderPath);
 
   return {
     _id: doc._id.toString(),
     projectId: doc.metadata?.projectId?.toString?.() ?? "",
     subProjectId: doc.metadata?.subProjectId?.toString?.(),
     picAssetId: doc.metadata?.picAssetId?.toString?.(),
-    name: doc.metadata?.originalFileName || doc.filename || "file",
+    name,
     scope: doc.metadata?.scope,
-    relativePath:
-      doc.metadata?.relativePath ||
-      doc.metadata?.originalFileName ||
-      doc.filename ||
-      "file",
-    folderPath:
-      doc.metadata?.folderPath ??
-      folderPathFromRelativePath(
-        doc.metadata?.relativePath ||
-          doc.metadata?.originalFileName ||
-          doc.filename ||
-          "file",
-      ),
+    relativePath,
+    folderPath,
     mimeType: doc.metadata?.mimeType || "application/octet-stream",
     extension:
       doc.metadata?.extension ||
-      extractFileExtension(doc.metadata?.originalFileName || doc.filename || ""),
+      extractFileExtension(name),
     sizeBytes: typeof doc.length === "number" ? doc.length : 0,
     uploadedAt: uploadDate.toISOString(),
     updatedAt: updatedAt.toISOString(),
@@ -9895,12 +9890,13 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     for (let index = 0; index < files.length; index++) {
       const file = files[index];
       if (!file) continue;
-      const fileName = sanitizeUploadedFileName(file.originalname);
+      const decodedOriginalName = decodeUploadFilename(file.originalname || "file");
+      const fileName = sanitizeUploadedFileName(decodedOriginalName);
       if (options.imageOnly && !isLikelyImageUpload(fileName, file.mimetype)) {
         continue;
       }
       const relativePath = sanitizeUploadedRelativePath(
-        options.relativePaths?.[index] || file.originalname,
+        decodeUploadFilename(options.relativePaths?.[index] || decodedOriginalName),
         fileName,
       );
       const folderPath = folderPathFromRelativePath(relativePath);
@@ -10000,13 +9996,14 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
           }
           if (!data || data.length === 0) return null;
 
-          const fileName = sanitizeUploadedFileName(file.originalname);
+          const decodedOriginalName = decodeUploadFilename(file.originalname || "file");
+          const fileName = sanitizeUploadedFileName(decodedOriginalName);
           if (options.imageOnly && !isLikelyImageUpload(fileName, file.mimetype)) {
             return null;
           }
 
           const relativePath = sanitizeUploadedRelativePath(
-            options.relativePaths?.[index] || file.originalname,
+            decodeUploadFilename(options.relativePaths?.[index] || decodedOriginalName),
             fileName,
           );
           const folderPath = folderPathFromRelativePath(relativePath);
