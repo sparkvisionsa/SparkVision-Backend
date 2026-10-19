@@ -299,7 +299,10 @@ async function ensureAdminConfigAndSuperAdmin(db: Db) {
 
 function membershipRoleFromLegacyUserRole(role: string): CompanyMembershipRole {
   if (role === "company_admin") return "company_admin";
+  if (role === "department_head") return "department_head";
   if (role === "viewer" || role === "valuer") return "valuer";
+  if (role === "associate_valuer") return "associate_valuer";
+  if (role === "accredited_valuer") return "accredited_valuer";
   if (role === "data_entry") return "data_entry";
   if (role === "reviewer") return "reviewer";
   if (role === "inspector") return "inspector";

@@ -15,6 +15,7 @@
     "support:agents": "node scripts/set-support-agents.cjs",
     "test:report-templates": "node --import tsx --test tests/report-template-catalog.test.ts",
     "test:validation-messages": "node --import tsx --test tests/validation-messages.test.ts",
+    "test:permissions": "node --import tsx --test tests/permissions.test.ts",
     "test:asset-upload-resume": "node --import tsx --test tests/asset-upload-resume.test.ts",
     "test:asset-media-realtime": "node --import tsx --test tests/asset-media-realtime.test.ts",
     "test:asset-report-selection": "node --import tsx --test tests/asset-report-selection.test.ts",

@@ -4,7 +4,10 @@ export type UserRole =
   | "user"
   | "super_admin"
   | "company_admin"
+  | "department_head"
   | "valuer"
+  | "associate_valuer"
+  | "accredited_valuer"
   | "data_entry"
   | "reviewer"
   | "inspector";
@@ -368,17 +371,23 @@ export type CompanyMongoDoc = WithId<CompanyDoc>;
 /** دور المستخدم داخل شركة معيّنة (المصدر عند التفويض داخل الشركة). */
 export type CompanyMembershipRole =
   | "company_admin"
+  | "department_head"
   | "valuer"
+  | "associate_valuer"
+  | "accredited_valuer"
   | "data_entry"
   | "reviewer"
   | "inspector";
 
 /** أعضاء الشركة باستثناء `company_admin` — للتحقق من الـ API وتجميع العدّ والفلترة. */
 export const COMPANY_MEMBER_ROLES: readonly CompanyMembershipRole[] = [
+  "department_head",
   "valuer",
+  "associate_valuer",
+  "accredited_valuer",
   "data_entry",
-  "reviewer",
   "inspector",
+  "reviewer",
 ];
 
 /**
@@ -395,6 +404,12 @@ export interface UserCompanyMembershipDoc {
    * compatibility.
    */
   productIds?: ValueTechProductId[];
+  /** Reusable permission profiles assigned independently inside every product. */
+  permissionProfileIds?: Partial<Record<ValueTechProductId, string[]>>;
+  /** Per-user exceptions applied after the assigned profiles are merged. */
+  permissionOverrides?: Partial<
+    Record<ValueTechProductId, { allow?: string[]; deny?: string[] }>
+  >;
   createdAt: Date;
   updatedAt: Date;
 }

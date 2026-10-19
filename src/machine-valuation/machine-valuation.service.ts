@@ -95,7 +95,7 @@ import { mvProjectSharesCompany } from "./mv-project-scope.util";
 import { ASSETS_COLLECTION, ASSET_IMPORTS_COLLECTION, ASSET_COLUMN_CONFIGS_COLLECTION, ASSET_AUDIT_LOGS_COLLECTION, ensureAssetsCollectionsInitialized } from "@/assets/collections";
 import { reserveValTechIds } from "@/assets/asset-sequence";
 import { isAppAssetSource, resolveAssetSource } from "@/assets/asset-source";
-import type { AssetDoc } from "@/assets/types";
+import type { AssetDoc, AssetImportDoc, AssetRawData } from "@/assets/types";
 import { sanitizeTextInput } from "@/assets/asset-import.utils";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
 import { computeMvProjectProgressPct } from "./mv-project-progress.util";
@@ -103,6 +103,10 @@ import { computeMvProjectProgressPct } from "./mv-project-progress.util";
 const MV_PHOTO_FOLDER_FILTER = { isAssetFolder: true as const };
 const EXTERNAL_ASSET_IMAGE_FETCH_TIMEOUT_MS = 15_000;
 const MV_VALUATION_EXCEL_SCOPE = "valuation-excel" as const;
+const PERMISSION_PREVIEW_PROJECT_NAME = "مشروع معاينة الصلاحيات — بيانات تجريبية";
+const PERMISSION_PREVIEW_SHEET_NAME = "أصول تجريبية لمعاينة الصلاحيات";
+const PERMISSION_PREVIEW_ASSET_SOURCE = "permission-preview-assets.xlsx";
+const PERMISSION_PREVIEW_VERSION = 1;
 
 function toId(raw: string): ObjectId {
   if (!ObjectId.isValid(raw)) throw new NotFoundException("Not found");
@@ -7164,6 +7168,223 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     );
     if (!result.modifiedCount) throw new NotFoundException("Project not found");
     return { ok: true, deletedAt: deletedAt.toISOString(), purgeAt: purgeAt.toISOString() };
+  }
+
+  /**
+   * ينشئ (أو يعيد استخدام) مشروعاً حقيقياً داخل شركة مدير النظام لمعاينة
+   * صفحات الصلاحيات. المشروع وبياناته محفوظان في نفس مجموعات الإنتاج وتعرضهما
+   * مكونات النظام الفعلية، بينما تمنع العلامة الداخلية إنشاء نسخ مكررة.
+   */
+  async ensurePermissionPreviewProject(
+    ctx: MvAccessContext,
+    companyIdForSuperAdmin?: string | null,
+  ) {
+    if (!ctx.isSuperAdmin && ctx.userRole !== "company_admin") {
+      throw new ForbiddenException("Company administrator access required");
+    }
+
+    let companyId: ObjectId;
+    if (ctx.isSuperAdmin) {
+      const raw = companyIdForSuperAdmin?.trim() || ctx.companyId?.trim() || "";
+      const parsed = tryParseObjectId(raw);
+      if (!parsed) throw new BadRequestException("companyId is required");
+      const company = await getAuthCollections(await getMongoDb()).companies.findOne(
+        { _id: parsed },
+        { projection: { _id: 1 } },
+      );
+      if (!company) throw new BadRequestException("Invalid companyId");
+      companyId = parsed;
+    } else {
+      const parsed = tryParseObjectId(ctx.companyId ?? "");
+      if (!parsed) throw new ForbiddenException("Company membership required");
+      companyId = parsed;
+    }
+
+    const db = await getMongoDb();
+    const projects = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+    let project = await projects.findOne({
+      companyId,
+      permissionPreview: true,
+      deletedAt: { $in: [null, undefined] },
+    });
+    let created = false;
+
+    if (!project) {
+      const fresh = await this.createProject(
+        PERMISSION_PREVIEW_PROJECT_NAME,
+        ctx,
+        ctx.isSuperAdmin ? companyId.toString() : undefined,
+        "simple",
+        [{
+          id: "permission-preview-riyadh",
+          name: "موقع المعاينة التجريبي",
+          region: "منطقة الرياض",
+          city: "الرياض",
+          latitude: 24.7136,
+          longitude: 46.6753,
+          mapUrl: "https://maps.google.com/?q=24.7136,46.6753",
+          primaryPhone: "0500000000",
+          notes: "بيانات تجريبية لمعاينة صفحات الصلاحيات.",
+        }],
+        [{
+          type: "primary",
+          phone: "0500000000",
+          locationId: "permission-preview-riyadh",
+          locationName: "موقع المعاينة التجريبي",
+        }],
+      );
+      project = await projects.findOne({ _id: toId(fresh._id) });
+      if (!project) throw new ServiceUnavailableException("Could not create preview project");
+      created = true;
+    }
+
+    const projectId = project._id;
+    const reportReference = trimReferenceNumber(project.referenceNumber)
+      || trimReferenceNumber(project.reportData?.reportReference);
+    const reportData = sanitizeReportData({
+      ...(project.reportData ?? {}),
+      ...(reportReference ? { reportReference } : {}),
+      reportTitle: "تقرير تقييم آلات ومعدات — مشروع معاينة الصلاحيات",
+      valuationMethod: "أسلوب التكلفة والسوق",
+      valuationPurpose: "أغراض التمويل واتخاذ القرار",
+      valuePremise: "الاستخدام الحالي",
+      valuationBasis: "القيمة السوقية",
+      reportIssueDate: "2026-10-17",
+      agreementDate: "2026-10-10",
+      inspectionDate: "2026-10-15",
+      valuationDate: "2026-10-17",
+      clientName: "شركة العميل التجريبية",
+      clientEmail: "demo-client@example.test",
+      clientPhone: "0500000000",
+      clientLegalType: "شركة ذات مسؤولية محدودة",
+      clientActivity: "التصنيع والإنتاج",
+      clientRepresentativeName: "ممثل العميل التجريبي",
+      clientRepresentativeRole: "مدير المشروع",
+      intendedUsers: "إدارة الشركة والجهات الممولة",
+      intendedUse: "معاينة صفحات النظام الحقيقية عند إعداد الصلاحيات.",
+      inspectionLocation: "موقع المعاينة التجريبي — الرياض",
+      currencyLabel: "ريال سعودي",
+      assetSubjectDescription: "آلات ومعدات إنتاج تجريبية لأغراض معاينة النظام.",
+      assetDetailedDescription: "خط إنتاج وآلة قطع ورافعة شوكية بحالة تشغيلية جيدة.",
+      finalValue: 475000,
+      finalValueWords: "أربعمائة وخمسة وسبعون ألف ريال سعودي فقط لا غير",
+      includeAssetImages: true,
+      includeValuationAccountImages: true,
+    });
+    const now = new Date();
+    await projects.updateOne(
+      { _id: projectId },
+      {
+        $set: {
+          name: PERMISSION_PREVIEW_PROJECT_NAME,
+          permissionPreview: true,
+          permissionPreviewVersion: PERMISSION_PREVIEW_VERSION,
+          workflowStatus: "review",
+          reportType: "simple",
+          reportData,
+          updatedAt: now,
+        },
+      },
+    );
+
+    const sheets = db.collection<MvSheetDoc>(MV_SHEETS_COLLECTION);
+    let sheet = await sheets.findOne({ projectId, name: PERMISSION_PREVIEW_SHEET_NAME });
+    if (!sheet) {
+      const headers = ["رقم الأصل", "اسم الأصل", "التصنيف", "المصنع", "الموديل", "الكمية", "الحالة", "القيمة التقديرية"];
+      const rows: Record<string, string | number | null>[] = [
+        { "رقم الأصل": "A-001", "اسم الأصل": "آلة قطع ليزر تجريبية", "التصنيف": "آلات إنتاج", "المصنع": "Demo Industrial", "الموديل": "DL-500", "الكمية": 1, "الحالة": "جيدة", "القيمة التقديرية": 225000 },
+        { "رقم الأصل": "A-002", "اسم الأصل": "رافعة شوكية تجريبية", "التصنيف": "معدات مناولة", "المصنع": "Demo Lift", "الموديل": "FL-30", "الكمية": 2, "الحالة": "جيدة", "القيمة التقديرية": 150000 },
+        { "رقم الأصل": "A-003", "اسم الأصل": "ضاغط هواء تجريبي", "التصنيف": "معدات مساندة", "المصنع": "Demo Air", "الموديل": "AC-75", "الكمية": 1, "الحالة": "ممتازة", "القيمة التقديرية": 100000 },
+      ];
+      const inserted = await sheets.insertOne({
+        projectId,
+        name: PERMISSION_PREVIEW_SHEET_NAME,
+        headers,
+        rowValues: recordsToRowValues(headers, rows),
+        sourceType: "manual",
+        sourceFileName: "permission-preview-assets.xlsx",
+        createdAt: now,
+        updatedAt: now,
+      } as MvSheetDoc);
+      sheet = await sheets.findOne({ _id: inserted.insertedId });
+    }
+
+    if (sheet) {
+      await this.generateInspectionFoldersFromSheet(
+        projectId.toString(),
+        sheet._id.toString(),
+        ctx,
+        { columnName: "اسم الأصل" },
+      );
+    }
+
+    // شاشة «بيانات الأصول» الفعلية تعتمد على مجموعتي asset_imports وassets،
+    // لذلك نزرع فيها نفس الأصول بدل الاكتفاء بجدول mv_sheets غير الظاهر هناك.
+    await ensureAssetsCollectionsInitialized(db);
+    const imports = db.collection<AssetImportDoc>(ASSET_IMPORTS_COLLECTION);
+    let assetImport = await imports.findOne({
+      projectId,
+      sourceFileName: PERMISSION_PREVIEW_ASSET_SOURCE,
+    });
+    if (!assetImport) {
+      const importId = new ObjectId();
+      const previewRows: Array<{ assetId: string; rawData: AssetRawData }> = [
+        { assetId: "PERMISSION-PREVIEW-A-001", rawData: { "رقم الأصل": "A-001", "اسم الأصل": "آلة قطع ليزر تجريبية", "التصنيف": "آلات إنتاج", "المصنع": "Demo Industrial", "الموديل": "DL-500", "الكمية": 1, "الحالة": "جيدة", "القيمة التقديرية": 225000 } },
+        { assetId: "PERMISSION-PREVIEW-A-002", rawData: { "رقم الأصل": "A-002", "اسم الأصل": "رافعة شوكية تجريبية", "التصنيف": "معدات مناولة", "المصنع": "Demo Lift", "الموديل": "FL-30", "الكمية": 2, "الحالة": "جيدة", "القيمة التقديرية": 150000 } },
+        { assetId: "PERMISSION-PREVIEW-A-003", rawData: { "رقم الأصل": "A-003", "اسم الأصل": "ضاغط هواء تجريبي", "التصنيف": "معدات مساندة", "المصنع": "Demo Air", "الموديل": "AC-75", "الكمية": 1, "الحالة": "ممتازة", "القيمة التقديرية": 100000 } },
+      ];
+      const assetCollection = db.collection<AssetDoc>(ASSETS_COLLECTION);
+      await Promise.all(previewRows.map((row, rowIndex) => assetCollection.updateOne(
+        { projectId, assetId: row.assetId },
+        {
+          $set: {
+            importId,
+            assetName: String(row.rawData["اسم الأصل"] ?? ""),
+            assetType: "machinery",
+            rawData: row.rawData,
+            normalizedData: {},
+            sheetName: PERMISSION_PREVIEW_SHEET_NAME,
+            rowIndex,
+            updatedAt: now,
+            status: "reviewed",
+            asset_source: "عميل",
+            isDone: true,
+          },
+          $setOnInsert: {
+            _id: new ObjectId(),
+            projectId,
+            assetId: row.assetId,
+            importedAt: now,
+            createdAt: now,
+          },
+        },
+        { upsert: true },
+      )));
+      const importDoc: AssetImportDoc = {
+        _id: importId,
+        projectId,
+        sourceFileName: PERMISSION_PREVIEW_ASSET_SOURCE,
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        totalSheets: 1,
+        totalRows: previewRows.length,
+        byType: { vehicles: 0, machinery: previewRows.length, electronics: 0, furniture: 0, other: 0 },
+        warnings: [],
+        importedAt: now,
+        status: "completed",
+        sheetColumnHeaderLabels: {
+          [PERMISSION_PREVIEW_SHEET_NAME]: Object.fromEntries(Object.keys(previewRows[0]!.rawData).map((key) => [key, key])),
+        },
+      };
+      await imports.insertOne(importDoc);
+      assetImport = importDoc;
+    }
+
+    return {
+      projectId: projectId.toString(),
+      name: PERMISSION_PREVIEW_PROJECT_NAME,
+      created,
+      version: PERMISSION_PREVIEW_VERSION,
+    };
   }
 
   async listProjectArchive(ctx: MvAccessContext) {

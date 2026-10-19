@@ -279,6 +279,10 @@ export interface MvInspectorFileDoc {
 /** حقول مشروع MV في `mv_projects` — بدون `_id`؛ يُولَّد تلقائياً في Atlas عند الإدراج. */
 export interface MvProjectDoc {
   name: string;
+  /** مشروع حقيقي خاص بمعاينة صفحات الصلاحيات، واحد لكل شركة. */
+  permissionPreview?: boolean;
+  /** إصدار بيانات المعاينة ليسهل ترقية المشروع التجريبي دون إنشاء نسخ مكررة. */
+  permissionPreviewVersion?: number;
   createdAt: Date;
   updatedAt: Date;
   deletedAt?: Date | null;

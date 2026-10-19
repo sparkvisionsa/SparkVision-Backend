@@ -870,6 +870,21 @@ export class MachineValuationController {
     return result;
   }
 
+  @Post("permission-preview-project")
+  async ensurePermissionPreviewProject(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body: { companyId?: string },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.mvService.ensurePermissionPreviewProject(
+      toMvAccess(context),
+      body?.companyId,
+    );
+  }
+
   @Post("projects/:pid/asset-image-imports")
   async startProjectAssetImageImport(
     @Req() req: Request,

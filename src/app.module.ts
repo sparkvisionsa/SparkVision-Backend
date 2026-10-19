@@ -19,6 +19,8 @@ import { MachineValuationModule } from "./machine-valuation/machine-valuation.mo
 import { AssetsModule } from "./assets/assets.module";
 import { TransactionsModule } from "./transactions/transactions.module";
 import { HelperToolsModule } from "./helper-tools/helper-tools.module";
+import { PermissionsController } from "./permissions/permissions.controller";
+import { PermissionsGuard } from "./permissions/permissions.guard";
 
 @Module({
   imports: [
@@ -53,6 +55,7 @@ import { HelperToolsModule } from "./helper-tools/helper-tools.module";
     AuthTrackingController,
     AdminController,
     OrganizationController,
+    PermissionsController,
   ],
   providers: [
     { provide: APP_INTERCEPTOR, useClass: RealtimeInterceptor },
@@ -63,6 +66,10 @@ import { HelperToolsModule } from "./helper-tools/helper-tools.module";
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: PermissionsGuard,
     },
   ],
 })

@@ -85,10 +85,13 @@ import {
 
 const COMPANY_MEMBERSHIP_ROLE_LABELS_AR: Record<CompanyMembershipRole, string> = {
   company_admin: "مدير الشركة",
-  valuer: "مقيم",
+  department_head: "رئيس قسم",
+  valuer: "مقيم أساسي",
+  associate_valuer: "مقيم منتسب",
+  accredited_valuer: "مقيم معتمد",
   data_entry: "مدخل بيانات",
   reviewer: "مراجع",
-  inspector: "مفتش ميداني",
+  inspector: "معاين",
 };
 
 const VALUE_TECH_PRODUCT_IDS = [
@@ -3867,7 +3870,15 @@ const createCompanySchema = z.object({
 
 const companyUserMemberRoleSchema = z
   .union([
-    z.enum(["valuer", "data_entry", "reviewer", "inspector"]),
+    z.enum([
+      "department_head",
+      "valuer",
+      "associate_valuer",
+      "accredited_valuer",
+      "data_entry",
+      "inspector",
+      "reviewer",
+    ]),
     z.literal("viewer"),
   ])
   .transform((r) => (r === "viewer" ? "valuer" : r));
@@ -4227,6 +4238,10 @@ export async function listCompanyUsersForCompanyAdmin(request: Request) {
           memberLinks.find((m) => m.userId.equals(u._id)) ?? null,
           company
         ),
+        permissionProfileIds:
+          memberLinks.find((m) => m.userId.equals(u._id))?.permissionProfileIds ?? {},
+        permissionOverrides:
+          memberLinks.find((m) => m.userId.equals(u._id))?.permissionOverrides ?? {},
         createdAt: u.createdAt.toISOString(),
         lastLoginAt: toIso(u.lastLoginAt),
         valuationReportSignatureDataUrl:
