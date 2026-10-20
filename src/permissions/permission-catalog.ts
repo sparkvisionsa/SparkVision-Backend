@@ -34,16 +34,11 @@ export const PERMISSION_CATALOG: Partial<Record<ValueTechProductId, PermissionCa
     { key: "support", label: "الدعم والتذاكر", description: "صفحة التواصل مع الدعم ومتابعة التذاكر", actions: [commonActions.access, commonActions.create] },
   ],
   "real-estate-valuation": [
-    { key: "transactions", label: "لوحة المعاملات", description: "الصفحة الرئيسية لمعاملات تقييم العقارات", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete, { key: "status", label: "تغيير الحالة" }, { key: "assign", label: "تعيين المعاينين" }] },
+    { key: "transactions", label: "لوحة المعاملات", description: "الصفحة الرئيسية لمعاملات تقييم العقارات", actions: [commonActions.access, commonActions.create, { key: "status", label: "تغيير الحالة" }, { key: "assign", label: "تعيين المعاينين" }] },
     { key: "valuation", label: "تفاصيل المعاملة", description: "صفحة بيانات العقار وطرق التقييم ورأي المقيم", actions: [commonActions.access, commonActions.edit] },
     { key: "property_media", label: "الصور والمرفقات", description: "شاشتا الصور والمرفقات داخل المعاملة", actions: [commonActions.access, { key: "upload", label: "رفع ملفات" }, commonActions.edit, commonActions.delete, { key: "download", label: "تنزيل" }] },
     { key: "reports", label: "عرض التقرير النهائي", description: "صفحة إعداد وعرض وإصدار التقرير النهائي", actions: [commonActions.access, commonActions.edit, { key: "generate", label: "توليد التقرير" }, { key: "download", label: "تنزيل التقرير" }] },
     { key: "clients", label: "العملاء", description: "عملاء نظام التقييم العقاري", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
-    { key: "settings_company", label: "بيانات الشركة", description: "هوية وبيانات الشركة", actions: [commonActions.access, commonActions.edit] },
-    { key: "settings_users", label: "مستخدمو الشركة", description: "إنشاء وتعديل وحذف مستخدمي النظام", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
-    { key: "settings_permissions", label: "الصلاحيات", description: "قوالب الصلاحيات وتعيينها للمستخدمين", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete, { key: "assign", label: "إسناد للمستخدمين" }] },
-    { key: "settings_locations", label: "المدن والأحياء", description: "صفحة إدارة المناطق والمدن والأحياء", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
-    { key: "settings_reports", label: "إعدادات التقرير", description: "قالب وإعدادات التقرير العقاري", actions: [commonActions.access, commonActions.edit] },
     { key: "support", label: "الدعم والتذاكر", description: "صفحة التواصل مع الدعم ومتابعة التذاكر", actions: [commonActions.access, commonActions.create] },
   ],
 };

@@ -1,11 +1,14 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
 import type { Request } from "express";
 import { getMongoDb } from "@/server/mongodb";
 import { resolveRequestContext } from "@/server/auth-tracking/context";
 import type { ValueTechProductId } from "@/server/auth-tracking/types";
 import { effectivePermissionGrants } from "./permissions.service";
 
-type Requirement = { productId: ValueTechProductId; grant: string };
+type Requirement =
+  | { productId: ValueTechProductId; grant: string }
+  | { adminOnly: true }
+  | { superAdminOnly: true };
 
 function methodAction(method: string) {
   if (method === "POST") return "create";
@@ -15,8 +18,10 @@ function methodAction(method: string) {
 }
 
 function requestProduct(request: Request, fallback: ValueTechProductId): ValueTechProductId {
-  const query = Array.isArray(request.query?.productId) ? request.query.productId[0] : request.query?.productId;
-  return query === "machine-valuation" || query === "real-estate-valuation" ? query : fallback;
+  const q = Array.isArray(request.query?.productId) ? request.query.productId[0] : request.query?.productId;
+  const b = (request.body as { productId?: unknown } | undefined)?.productId;
+  const raw = q ?? b;
+  return raw === "machine-valuation" || raw === "real-estate-valuation" ? raw : fallback;
 }
 
 /** Maps protected API operations to the same stable keys shown in the permission matrix. */
@@ -25,6 +30,10 @@ export function permissionRequirementForRequest(request: Request): Requirement |
   const method = request.method.toUpperCase();
 
   if (path.includes("/company/permissions")) return null;
+
+  if (/\/locations\//.test(path)) {
+    return method === "GET" ? null : { superAdminOnly: true };
+  }
 
   if (path.includes("/mv/data-extraction")) {
     return { productId: "machine-valuation", grant: `data_extraction.${methodAction(method)}` };
@@ -103,18 +112,17 @@ export function permissionRequirementForRequest(request: Request): Requirement |
   }
 
   if (path.includes("/transactions")) {
+    if (/\/transactions\/(freelance-inspectors|company-inspectors)$/.test(path)) {
+      return { productId: "real-estate-valuation", grant: "transactions.assign" };
+    }
+    if (method === "DELETE" && /\/transactions\/[^/]+$/.test(path)) return { adminOnly: true };
     if (/\/images|\/attachments/.test(path)) {
       const action = method === "GET" ? "access" : method === "POST" ? "upload" : methodAction(method);
       return { productId: "real-estate-valuation", grant: `property_media.${action}` };
     }
     if (/\/pdf/.test(path)) {
-      const disposition = Array.isArray(request.query?.disposition)
-        ? request.query.disposition[0]
-        : request.query?.disposition;
-      return {
-        productId: "real-estate-valuation",
-        grant: disposition === "attachment" || path.includes("download") ? "reports.download" : "reports.access",
-      };
+      const disposition = Array.isArray(request.query?.disposition) ? request.query.disposition[0] : request.query?.disposition;
+      return { productId: "real-estate-valuation", grant: disposition === "inline" ? "reports.access" : "reports.download" };
     }
     if (/\/inspectors/.test(path)) return { productId: "real-estate-valuation", grant: "transactions.assign" };
     if (/\/notes(?:\/|$)/.test(path)) {
@@ -139,6 +147,7 @@ export function permissionRequirementForRequest(request: Request): Requirement |
   }
   if (path.includes("/company/admin/report-defaults") || path.includes("/company/real-estate-report-template")) {
     const productId = requestProduct(request, path.includes("real-estate") ? "real-estate-valuation" : "machine-valuation");
+    if (productId === "real-estate-valuation") return method === "GET" ? null : { adminOnly: true };
     return { productId, grant: `settings_reports.${method === "GET" ? "access" : "edit"}` };
   }
   if (path.includes("/company/admin/serial-numbering")) {
@@ -156,6 +165,15 @@ export class PermissionsGuard implements CanActivate {
     if (!requirement) return true;
 
     const context = await resolveRequestContext(request);
+
+    if ("adminOnly" in requirement || "superAdminOnly" in requirement) {
+      if (!context.user) throw new UnauthorizedException("يجب تسجيل الدخول.");
+      const isSuper = context.user.role === "super_admin";
+      const isAdmin = isSuper || context.companyMembership?.role === "company_admin";
+      if ("superAdminOnly" in requirement ? isSuper : isAdmin) return true;
+      throw new ForbiddenException("هذا الإجراء متاح للمدير فقط.");
+    }
+
     if (!context.user || !context.companyMembership) return true;
     if (context.user.role === "super_admin" || context.companyMembership.role === "company_admin") return true;
 
@@ -164,4 +182,3 @@ export class PermissionsGuard implements CanActivate {
     throw new ForbiddenException("ليس لديك صلاحية لتنفيذ هذا الإجراء داخل هذا النظام.");
   }
 }
-

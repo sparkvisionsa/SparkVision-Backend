@@ -523,6 +523,20 @@ export class TransactionsMongoService {
     return toTransactionJson(db, row);
   }
 
+  async setStatus(id: string, status: string) {
+    const STATUSES = ["new","inspection","review","audit","approved","sent","cancelled","pending"];
+    if (!ObjectId.isValid(id) || !STATUSES.includes(status))
+      throw new BadRequestException({ message: "حالة غير صالحة" });
+    const db = await getMongoDb();
+    const row = await db.collection<TransactionDoc>(TRANSACTIONS_COLLECTION).findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { "evalData.status": status, updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+    if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });
+    return toTransactionJson(db, row);
+  }
+
   async updateTransaction(
     id: string,
     body: Record<string, unknown>,
@@ -549,11 +563,13 @@ export class TransactionsMongoService {
     }
 
     const now = new Date();
+    const { status: _ignored, ...evalFields } = evalData;
+    const evalSet = Object.fromEntries(Object.entries(evalFields).map(([k, v]) => [`evalData.${k}`, v]));
     const row = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOneAndUpdate(
         { _id: new ObjectId(id) },
-        { $set: { evalData, ...topLevelUpdates, updatedAt: now } },
+        { $set: { ...evalSet, ...topLevelUpdates, updatedAt: now } },
         { returnDocument: "after" },
       );
     if (!row) throw new NotFoundException({ message: "المعاملة غير موجودة" });

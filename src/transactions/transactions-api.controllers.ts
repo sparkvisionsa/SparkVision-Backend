@@ -9,6 +9,7 @@ import {
   Req,
   UploadedFiles,
   UseInterceptors,
+  ForbiddenException
 } from "@nestjs/common";
 import { AnyFilesInterceptor } from "@nestjs/platform-express";
 import { diskStorage } from "multer";
@@ -16,6 +17,9 @@ import { extname, join } from "path";
 import { Request } from "express";
 import { TransactionsMongoService } from "./transactions-mongo.service";
 import { resolveRequestContext } from "@/server/auth-tracking/context";
+
+import { getMongoDb } from "@/server/mongodb";
+import { getAuthCollections } from "@/server/auth-tracking/collections";
 
 const multerStorage = diskStorage({
   destination: join(process.cwd(), "uploads"),
@@ -87,6 +91,22 @@ export class TransactionsController {
   @Get("freelance-inspectors")
   listFreelanceInspectors() {
     return this.svc.listFreelanceInspectors();
+  }
+
+  @Patch(":id/status")
+  setStatus(@Param("id") id: string, @Body() body: { status?: string }) {
+    return this.svc.setStatus(id, body.status ?? "");
+  }
+
+  @Get("company-inspectors")
+  async companyInspectors(@Req() req: Request) {
+    const context = await resolveRequestContext(req);
+    if (!context.user || !context.company) throw new ForbiddenException();
+    const db = await getMongoDb();
+    const { users, userCompanyMemberships } = getAuthCollections(db);
+    const links = await userCompanyMemberships.find({ companyId: context.company._id, role: "inspector" }).toArray();
+    const rows = await users.find({ _id: { $in: links.map((l) => l.userId) } }).toArray();
+    return rows.map((u) => ({ id: u._id.toString(), username: u.valuationReportDisplayName || u.username, role: "inspector" }));
   }
 
   @Get(":id")

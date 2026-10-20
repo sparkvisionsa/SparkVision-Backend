@@ -49,7 +49,8 @@ export class TransactionsMediaController {
   //
   @Patch(":id/core")
   editCore(@Param("id") id: string, @Body() body: Record<string, unknown>) {
-    return this.svc.editCoreFields(id, body);
+    const { status: _status, ...rest } = body;
+    return this.svc.editCoreFields(id, rest);
   }
 
   // ── Attachments ─────────────────────────────────────────────────────────────
