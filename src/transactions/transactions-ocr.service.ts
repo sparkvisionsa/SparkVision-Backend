@@ -58,7 +58,7 @@ export class TransactionsVisionService {
 
     // Using 1.5 Flash: It's fast, accurate for OCR, and has a huge free tier
     this.model = this.genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       generationConfig: { responseMimeType: "application/json" },
     });
   }

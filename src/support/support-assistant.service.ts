@@ -78,7 +78,7 @@ export class SupportAssistantService {
     const sources = (social || !first ? [] : compactArticles(articles));
     const key = process.env.SUPPORT_AI_API_KEY || process.env.GEMINI_API_KEY;
     if (!key) return { ...fallback, sources, mode: "guide" as const };
-    const model = process.env.SUPPORT_AI_MODEL || "gemini-2.5-flash";
+    const model = process.env.SUPPORT_AI_MODEL || "gemini-3.8-flash";
     const guide = compactArticles(first ? articles : SUPPORT_ARTICLES);
     try {
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
