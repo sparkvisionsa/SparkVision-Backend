@@ -1304,6 +1304,19 @@ function mongoPicAssetImagesCount(fieldPath: string = "$images"): Record<string,
   };
 }
 
+/** عدد صور الأصل التي اختارها المستخدم صراحةً للتقرير. */
+function mongoPicAssetReportImagesCount(): Record<string, unknown> {
+  return {
+    $size: {
+      $filter: {
+        input: mongoAssetPhotos(),
+        as: "image",
+        cond: { $eq: ["$$image.includeInReport", true] },
+      },
+    },
+  };
+}
+
 /**
  * عدّ صور الأصول لملخص المشروع (شاشة التقرير النهائي).
  * الصور الحية تعيش في GridFS (`scope: asset-images`) بعد النقل من مجلدات Pic،
@@ -1339,6 +1352,56 @@ async function countProjectAssetImagesForSummary(db: Db, projectId: ObjectId): P
             $match: {
               "metadata.projectId": projectId,
               "metadata.scope": "asset-images",
+            },
+          },
+          { $set: { __mvDedupeKey: assetImageDedupeKeyMongoExpr() } },
+          { $group: { _id: "$__mvDedupeKey" } },
+          { $count: "imageCount" },
+        ],
+        { allowDiskUse: true },
+      )
+      .toArray()
+      .catch(() => [] as { imageCount?: number }[]),
+  ]);
+  return Math.max(
+    toSafeNonNegativeInt(picAgg[0]?.imageCount),
+    toSafeNonNegativeInt(gridFsAgg[0]?.imageCount),
+  );
+}
+
+/**
+ * عدّ صور الأصول المحددة للتقرير من المصدرين الدائمين.
+ * `assets.images` هو المصدر المرجعي لصور التطبيق والروابط الخارجية، وGridFS هو
+ * المصدر المرجعي لملفات الرفع. المزامنة تجعل العدّين متساويين للصور المشتركة؛
+ * أخذ الأكبر يمنع عدّ المرآة مرتين ويشمل الصور الموجودة في مصدر واحد فقط.
+ */
+async function countProjectSelectedAssetImagesForSummary(
+  db: Db,
+  projectId: ObjectId,
+): Promise<number> {
+  const [picAgg, gridFsAgg] = await Promise.all([
+    db
+      .collection<AssetDoc>(ASSETS_COLLECTION)
+      .aggregate<{ imageCount?: number }>([
+        { $match: { projectId, ...MV_PHOTO_FOLDER_FILTER } },
+        {
+          $group: {
+            _id: null,
+            imageCount: { $sum: mongoPicAssetReportImagesCount() },
+          },
+        },
+      ])
+      .toArray()
+      .catch(() => [] as { imageCount?: number }[]),
+    db
+      .collection(MV_FILES_FILES_COLLECTION)
+      .aggregate<{ imageCount?: number }>(
+        [
+          {
+            $match: {
+              "metadata.projectId": projectId,
+              "metadata.scope": "asset-images",
+              "metadata.includeInReport": true,
             },
           },
           { $set: { __mvDedupeKey: assetImageDedupeKeyMongoExpr() } },
@@ -2891,6 +2954,7 @@ function serializePicAsset(pic: PicAssetMongoDoc, idFallback?: { _id: ObjectId; 
 type PicAssetWithMediaCounts = PicAssetMongoDoc & {
   imageCount?: number;
   photoCount?: number;
+  reportImageCount?: number;
   voiceNoteCount?: number;
 };
 
@@ -2914,6 +2978,7 @@ function serializePicAssetSummary(pic: PicAssetWithMediaCounts) {
     voiceNotes: [] as typeof full.voiceNotes,
     imageCount: imgN,
     photoCount: pic.photoCount ?? imgN,
+    reportImageCount: toSafeNonNegativeInt(pic.reportImageCount),
     voiceNoteCount: vnN,
   };
 }
@@ -6474,9 +6539,10 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
 
     /** مسار خفيف لشاشة بيانات التقرير: بدون شجرة مجلدات وبدون مساحات صور ثقيلة. */
     if (picAssetMode === "report") {
-      const [creatorOid, assetImageCount] = await Promise.all([
+      const [creatorOid, assetImageCount, selectedAssetImageCount] = await Promise.all([
         Promise.resolve(tryCoerceToObjectId(project.userId)),
         countProjectAssetImagesForSummary(db, _id),
+        countProjectSelectedAssetImagesForSummary(db, _id),
       ]);
       const creator = creatorOid
         ? await getAuthCollections(db).users.findOne(
@@ -6528,6 +6594,7 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
           sheetCount: 0,
           subProjectCount: 0,
           assetImageCount,
+          selectedAssetImageCount,
           valuationAccountImageCount,
           clientDocumentImageCount,
           sceCertificateImageCount,
@@ -6591,6 +6658,7 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
                 $addFields: {
                   imageCount: mongoPicAssetImagesCount("$images"),
                   photoCount: { $size: mongoAssetPhotos() },
+                  reportImageCount: mongoPicAssetReportImagesCount(),
                   voiceNoteCount: mongoSafeArraySize("$voiceNotes"),
                   mainImage: {
                     $cond: [

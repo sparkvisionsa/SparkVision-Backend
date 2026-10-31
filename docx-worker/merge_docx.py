@@ -159,6 +159,12 @@ CLIENT_DOCS_BOTTOM_MARGIN_PX = 0
 CLIENT_DOCS_GAP_PX = 1
 CLIENT_DOCS_TITLE_RESERVE_PX = 28
 CLIENT_DOCS_SECTION_TITLE = "مرفق 3: المستندات المستلمة من العميل"
+# شهادة الهيئة مستند مستقل؛ صورة واحدة كبيرة في كل صفحة مع مساحة بيضاء متوازنة.
+CERTIFICATE_IMAGES_PER_ROW = 1
+CERTIFICATE_IMAGES_PER_PAGE = 1
+CERTIFICATE_CONTENT_WIDTH_RATIO = 0.88
+CERTIFICATE_CONTENT_HEIGHT_RATIO = 0.92
+CERTIFICATE_TITLE_RESERVE_PX = 28
 
 MERGE_PARTS_RE = re.compile(r"^word/(document|header\d+|footer\d+)\.xml$", re.I)
 ASSET_IMAGE_PAGE_TITLE = "مرفق 2: الصور الفوتوغرافية"
@@ -2787,6 +2793,7 @@ def make_docx_image_table_element(
     gap_emu: int = ASSET_IMAGE_GAP_EMU,
     title_reserve_emu: int | None = None,
     asset_max_side_px: int = ASSET_IMAGE_MAX_SQUARE_PX,
+    center_table: bool = False,
 ) -> tuple[Any, int]:
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -2811,7 +2818,7 @@ def make_docx_image_table_element(
     gap_emu_val = max(0, int(gap_emu))
 
     table = doc.add_table(rows=rows, cols=images_per_row)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER if center_table else WD_TABLE_ALIGNMENT.LEFT
     table.autofit = False
     set_docx_table_borders_none(table)
     set_docx_table_cell_spacing(table, gap_dxa_val)
@@ -2825,7 +2832,7 @@ def make_docx_image_table_element(
     else:
         page_width, _page_height, left_margin, _right_margin, _top_margin, _bottom_margin = section_metrics
     physical_side_margin = max(0, int(page_width * (1 - width_ratio) / 2))
-    set_docx_table_indent(table, physical_side_margin - left_margin)
+    set_docx_table_indent(table, 0 if center_table else physical_side_margin - left_margin)
 
     max_picture_height = min(image_emu, MAX_DRAWING_HEIGHT_EMU)
 
@@ -3143,6 +3150,8 @@ def insert_image_grid_pages(
 
     image_rows_per_page = max(1, math.ceil(images_per_page / images_per_row))
     fill_client = layout == "client_grid"
+    fill_certificate = layout == "certificate_grid"
+    fill_document = fill_client or fill_certificate
     page_number = 0
     for page_idx in range(0, len(images), images_per_page):
         if page_idx > 0:
@@ -3153,15 +3162,28 @@ def insert_image_grid_pages(
             images_per_row,
             image_rows_per_page,
             section_metrics,
-            fill_content_height=fill_client,
-            content_height_ratio=CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0,
+            fill_content_height=fill_document,
+            content_height_ratio=(
+                CERTIFICATE_CONTENT_HEIGHT_RATIO
+                if fill_certificate
+                else CLIENT_DOCS_CONTENT_HEIGHT_RATIO if fill_client else 1.0
+            ),
             bottom_margin_emu=CLIENT_DOCS_BOTTOM_MARGIN_EMU if fill_client else 0,
-            contain_images=fill_client,
-            content_width_ratio=CLIENT_DOCS_CONTENT_WIDTH_RATIO if fill_client else IMAGE_CONTENT_WIDTH_RATIO,
-            gap_dxa=CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
-            gap_emu=CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
-            title_reserve_emu=CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None,
+            contain_images=fill_document,
+            content_width_ratio=(
+                CERTIFICATE_CONTENT_WIDTH_RATIO
+                if fill_certificate
+                else CLIENT_DOCS_CONTENT_WIDTH_RATIO if fill_client else IMAGE_CONTENT_WIDTH_RATIO
+            ),
+            gap_dxa=0 if fill_certificate else CLIENT_DOCS_GAP_DXA if fill_client else ASSET_IMAGE_GAP_DXA,
+            gap_emu=0 if fill_certificate else CLIENT_DOCS_GAP_EMU if fill_client else ASSET_IMAGE_GAP_EMU,
+            title_reserve_emu=(
+                PIXEL_EMU * CERTIFICATE_TITLE_RESERVE_PX
+                if fill_certificate
+                else CLIENT_DOCS_TITLE_RESERVE_EMU if fill_client else None
+            ),
             asset_max_side_px=asset_max_side_px,
+            center_table=fill_certificate,
         )
         insert_elem(table_elem)
         inserted += count
@@ -3411,8 +3433,8 @@ def apply_image_sections_docx_api(
         certificate_images or [],
         certificate_image_marker_variables or set(),
         "certificate_grid",
-        client_images_per_row,
-        client_images_per_page,
+        CERTIFICATE_IMAGES_PER_ROW,
+        CERTIFICATE_IMAGES_PER_PAGE,
         log_label="certificate",
         portrait=True,
     )
@@ -3422,8 +3444,8 @@ def apply_image_sections_docx_api(
         else insert_client_images_after_section_heading(
             doc,
             certificate_images or [],
-            client_images_per_row,
-            client_images_per_page,
+            CERTIFICATE_IMAGES_PER_ROW,
+            CERTIFICATE_IMAGES_PER_PAGE,
             field="certificate",
             grid_name="certificate_grid",
         )

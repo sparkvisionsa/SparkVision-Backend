@@ -1102,6 +1102,47 @@ def test_legacy_bookmarks_do_not_drive_text_or_images() -> None:
     assert not list(root.iter(f"{{{W_NS}}}drawing"))
 
 
+def test_certificate_image_is_large_centered_and_keeps_aspect_ratio() -> None:
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}" xmlns:r="{R_NS}">
+  <w:body>
+    <w:p><w:r><w:t>&lt;&lt;certificateImages&gt;&gt;</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+    template = make_minimal_docx(document_xml)
+    certificate = make_solid_jpeg(1400, 2000)
+    output, stats = merge_with_captured_stats(
+        {
+            "templateBase64": base64.b64encode(template).decode("ascii"),
+            "certificateImagesBase64": [base64.b64encode(certificate).decode("ascii")],
+        }
+    )
+    assert stats["certificateImagesInserted"] == 1
+
+    with zipfile.ZipFile(io.BytesIO(output), "r") as output_zip:
+        root = etree.fromstring(output_zip.read("word/document.xml"))
+
+    tables = list(root.iter(f"{{{W_NS}}}tbl"))
+    assert len(tables) == 1
+    table = tables[0]
+    table_alignment = table.find(f"./{{{W_NS}}}tblPr/{{{W_NS}}}jc")
+    assert table_alignment is not None
+    assert table_alignment.get(f"{{{W_NS}}}val") == "center"
+    assert len(table.findall(f".//{{{W_NS}}}tr")) == 1
+    assert len(table.findall(f".//{{{W_NS}}}tr/{{{W_NS}}}tc")) == 1
+
+    extent = next(root.iter(f"{{{WP_NS}}}extent"))
+    width = int(extent.get("cx") or "0")
+    height = int(extent.get("cy") or "0")
+    page_width = 11906 * 635
+    assert width >= int(page_width * 0.65), "certificate should occupy most of the page width"
+    assert abs((width / height) - (1400 / 2000)) < 0.01, "certificate aspect ratio must be preserved"
+
+
 def test_toc_keeps_template_font_direction_and_styles() -> None:
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="{W_NS}"><w:body>
@@ -1173,6 +1214,8 @@ def main() -> None:
         print("OK: dynamic report preparers, signatures, preserved Word table formatting")
     test_legacy_bookmarks_do_not_drive_text_or_images()
     print("OK: legacy bookmarks do not drive text or image insertion")
+    test_certificate_image_is_large_centered_and_keeps_aspect_ratio()
+    print("OK: certificate image is large, centered, and keeps its aspect ratio")
     test_toc_keeps_template_font_direction_and_styles()
     print("OK: TOC keeps template font, direction, tabs, and styles")
 
