@@ -25,7 +25,15 @@ export type HelperRecordingDoc = {
   description: string;
   mime: string;
   size: number;
-  fileId: ObjectId;
+  /** GridFS id is retained for recordings created before object storage. */
+  fileId?: ObjectId;
+  status?: "uploading" | "processing" | "ready" | "failed";
+  failureReason?: string;
+  rawKey?: string;
+  mp4Key?: string;
+  hlsKey?: string;
+  thumbnailKey?: string;
+  processedSize?: number;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -41,7 +49,27 @@ export type HelperRecordingUpload = {
   size: number;
   offset: number;
   path: string;
-  state: "active" | "writing";
+  state: "active" | "writing" | "completing" | "completed";
+  recordingId?: string;
+  createdAt: Date;
+  expiresAt: Date;
+};
+
+export type HelperMultipartUpload = {
+  _id: string;
+  actorKey: string;
+  clientRequestId?: string;
+  recordingId: string;
+  key: string;
+  uploadId: string;
+  name: string;
+  mime: string;
+  size: number;
+  maxSize: number;
+  seconds: number;
+  description: string;
+  source: RecorderSurface;
+  state: "active" | "completed" | "aborted";
   createdAt: Date;
   expiresAt: Date;
 };
@@ -51,6 +79,7 @@ export const HELPER_RECORDING_MAX_BYTES = 1024 * 1024 * 1024;
 export const HELPER_RECORDING_CHUNK_BYTES = 3 * 1024 * 1024;
 export const HELPER_RECORDINGS_COLLECTION = "helper_screen_recordings";
 export const HELPER_UPLOADS_COLLECTION = "helper_recording_uploads";
+export const HELPER_MULTIPART_UPLOADS_COLLECTION = "helper_recording_multipart_uploads";
 export const HELPER_RECORDINGS_BUCKET = "helper_recordings";
 
 export function helperActorKey(actor: HelperActor) {
