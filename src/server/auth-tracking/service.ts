@@ -48,7 +48,7 @@ import type {
   CompanyMongoDoc,
   CompanyMembershipRole,
   CompanyReportDefaults,
-  CompanyReportLetterheadTemplate,
+  CompanyReportSystemTemplate,
   CompanyReportOnlySignatory,
   CompanyReportPptxTemplate,
   CompanyReportSignatoryRow,
@@ -1801,15 +1801,7 @@ const REPORT_DEFAULTS_PPTX_TEMPLATE_DATA_URL_MAX_CHARS = 56_000_000;
 const REPORT_DEFAULTS_PPTX_TEMPLATE_FILE_MAX_BYTES = 35 * 1024 * 1024;
 /** Shared relative URL prefix for company-owned report-template files. */
 export const COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX = "/uploads/company-report-templates/";
-const REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX = COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX;
-const REPORT_DEFAULTS_LETTERHEAD_FIELDS = [
-  "coverImageDataUrl",
-  "pageImageDataUrl",
-  "landscapePageImageDataUrl",
-  "logoDataUrl",
-  "footerImageDataUrl",
-  "signatureStampDataUrl",
-] as const;
+const REPORT_DEFAULTS_TEMPLATE_IMAGE_UPLOAD_PREFIX = COMPANY_REPORT_TEMPLATE_UPLOAD_PREFIX;
 
 const REPORT_DEFAULTS_AI_TEMPLATE_IMAGE_FIELDS = [
   "coverImageDataUrl",
@@ -1821,7 +1813,7 @@ function isReportDefaultsImageReference(value: string): boolean {
   return (
     value === "" ||
     value.startsWith("data:image/") ||
-    value.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)
+    value.startsWith(REPORT_DEFAULTS_TEMPLATE_IMAGE_UPLOAD_PREFIX)
   );
 }
 
@@ -1829,7 +1821,7 @@ function sanitizeReportDefaultsImageReference(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.replace(/\u0000/g, "").trim();
   if (!normalized) return null;
-  if (normalized.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)) {
+  if (normalized.startsWith(REPORT_DEFAULTS_TEMPLATE_IMAGE_UPLOAD_PREFIX)) {
     return normalized.slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS);
   }
   if (normalized.startsWith("data:image/")) {
@@ -1899,7 +1891,7 @@ function parseReportDefaultsImageDataUrl(value: string): { buffer: Buffer; ext: 
   return { buffer, ext };
 }
 
-async function persistCompanyReportLetterheadImage(
+async function persistCompanyReportTemplateImage(
   companyId: string,
   field: string,
   value: unknown,
@@ -1907,7 +1899,7 @@ async function persistCompanyReportLetterheadImage(
   if (typeof value !== "string") return null;
   const normalized = value.replace(/\u0000/g, "").trim();
   if (!normalized) return null;
-  if (normalized.startsWith(REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX)) {
+  if (normalized.startsWith(REPORT_DEFAULTS_TEMPLATE_IMAGE_UPLOAD_PREFIX)) {
     return normalized.slice(0, REPORT_DEFAULTS_IMAGE_URL_MAX_CHARS);
   }
   if (!normalized.startsWith("data:image/")) return null;
@@ -1917,7 +1909,7 @@ async function persistCompanyReportLetterheadImage(
     throw new HttpError(
       400,
       "invalid_payload",
-      "Report letterhead image must be PNG, JPG, or WEBP and no larger than 8MB after compression.",
+      "Report template image must be PNG, JPG, or WEBP and no larger than 8MB after compression.",
     );
   }
 
@@ -1927,7 +1919,7 @@ async function persistCompanyReportLetterheadImage(
   await mkdir(dir, { recursive: true });
   const filename = `${safeField}-${Date.now()}-${randomId()}.${parsed.ext}`;
   await writeFile(join(dir, filename), parsed.buffer);
-  return `${REPORT_DEFAULTS_LETTERHEAD_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
+  return `${REPORT_DEFAULTS_TEMPLATE_IMAGE_UPLOAD_PREFIX}${safeCompanyId}/${filename}`;
 }
 
 const COMPANY_WORD_TEMPLATE_GRIDFS_BUCKET = "company_report_templates";
@@ -2489,19 +2481,6 @@ async function persistCompanyReportDefaultsAssets(
     }
     return template;
   };
-  const letterheadRaw =
-    data.letterhead && typeof data.letterhead === "object" && !Array.isArray(data.letterhead)
-      ? { ...(data.letterhead as Record<string, unknown>) }
-      : null;
-
-  if (letterheadRaw) {
-    const letterhead: Record<string, unknown> = { ...letterheadRaw };
-    for (const field of REPORT_DEFAULTS_LETTERHEAD_FIELDS) {
-      letterhead[field] = await persistCompanyReportLetterheadImage(companyId, field, letterheadRaw[field]);
-    }
-    data.letterhead = letterhead;
-  }
-
   const persistTemplateCollection = async (
     kind: CompanyReportTemplateStorageKind,
     listValue: unknown,
@@ -2557,7 +2536,7 @@ async function persistCompanyReportDefaultsAssets(
             ? { ...(template as Record<string, unknown>) }
             : {};
         for (const field of REPORT_DEFAULTS_AI_TEMPLATE_IMAGE_FIELDS) {
-          templateRaw[field] = await persistCompanyReportLetterheadImage(
+          templateRaw[field] = await persistCompanyReportTemplateImage(
             companyId,
             `ai-${index + 1}-${field}`,
             templateRaw[field],
@@ -2776,22 +2755,30 @@ function sanitizeCompanyReportCustomSections(value: unknown): CompanyReportCusto
     .filter((item): item is CompanyReportCustomSection => item != null);
 }
 
-function sanitizeCompanyReportLetterheadTemplate(value: unknown): CompanyReportLetterheadTemplate {
+const COMPANY_REPORT_SYSTEM_TEMPLATE_IDS = new Set([
+  "default-report-template",
+  "classic-letterhead",
+  "modern-letterhead",
+  "executive-navy",
+  "industrial-amber",
+  "minimal-graphite",
+  "field-teal",
+  "premium-burgundy",
+  "creative-blocks",
+  "powerpoint-deck",
+]);
+
+function sanitizeCompanyReportSystemTemplate(value: unknown): CompanyReportSystemTemplate {
   const data = value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-  const templateId = sanitizeReportDefaultsText(data.templateId, 80);
-  const outputFormat = data.outputFormat === "pptx" ? "pptx" : "pdf";
+  const requestedTemplateId = sanitizeReportDefaultsText(data.templateId, 80);
+  const templateId = COMPANY_REPORT_SYSTEM_TEMPLATE_IDS.has(requestedTemplateId)
+    ? requestedTemplateId
+    : "default-report-template";
   return {
-    enabled: data.enabled === true,
-    templateId: templateId || "default-report-template",
-    outputFormat,
-    coverImageDataUrl: sanitizeReportDefaultsImageReference(data.coverImageDataUrl),
-    pageImageDataUrl: sanitizeReportDefaultsImageReference(data.pageImageDataUrl),
-    landscapePageImageDataUrl: sanitizeReportDefaultsImageReference(data.landscapePageImageDataUrl),
-    logoDataUrl: sanitizeReportDefaultsImageReference(data.logoDataUrl),
-    footerImageDataUrl: sanitizeReportDefaultsImageReference(data.footerImageDataUrl),
-    signatureStampDataUrl: sanitizeReportDefaultsImageReference(data.signatureStampDataUrl),
+    templateId,
+    outputFormat: templateId === "powerpoint-deck" ? "pptx" : "pdf",
   };
 }
 
@@ -3261,7 +3248,7 @@ function sanitizeCompanyReportDefaults(raw: unknown): CompanyReportDefaults {
     customSections: sanitizeCompanyReportCustomSections(data.customSections),
     reportDataModels: sanitizeCompanyReportDataModels(data.reportDataModels),
     reportSectionModels: sanitizeCompanyReportSectionModels(data.reportSectionModels),
-    letterhead: sanitizeCompanyReportLetterheadTemplate(data.letterhead),
+    letterhead: sanitizeCompanyReportSystemTemplate(data.letterhead),
     aiTemplates: sanitizeCompanyAiReportTemplates(data.aiTemplates),
     wordTemplates,
     pptxTemplates,
@@ -3297,7 +3284,7 @@ export function resolveCompanyReportDefaults(
   const customSectionsStored = sanitizeCompanyReportCustomSections(stored?.customSections);
   const reportDataModelsStored = sanitizeCompanyReportDataModels(stored?.reportDataModels);
   const reportSectionModelsStored = sanitizeCompanyReportSectionModels(stored?.reportSectionModels);
-  const letterheadStored = sanitizeCompanyReportLetterheadTemplate(stored?.letterhead);
+  const letterheadStored = sanitizeCompanyReportSystemTemplate(stored?.letterhead);
   const aiTemplatesStored = sanitizeCompanyAiReportTemplates(stored?.aiTemplates);
   const legacyMappings = sanitizeCompanyReportTemplateVariableMappings(stored?.variableMappings);
   const legacyExcludedVariables = sanitizeCompanyReportTemplateExcludedVariables(
@@ -3697,15 +3684,8 @@ const updateCompanyReportDefaultsSchema = z.object({
     .optional(),
   letterhead: z
     .object({
-      enabled: z.boolean().optional(),
       templateId: z.string().max(80).optional().nullable(),
       outputFormat: z.enum(["pdf", "pptx"]).optional().nullable(),
-      coverImageDataUrl: reportDefaultsImageDataUrlSchema,
-      pageImageDataUrl: reportDefaultsImageDataUrlSchema,
-      landscapePageImageDataUrl: reportDefaultsImageDataUrlSchema,
-      logoDataUrl: reportDefaultsImageDataUrlSchema,
-      footerImageDataUrl: reportDefaultsImageDataUrlSchema,
-      signatureStampDataUrl: reportDefaultsImageDataUrlSchema,
     })
     .partial()
     .optional(),

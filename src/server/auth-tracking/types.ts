@@ -132,16 +132,9 @@ export interface CompanyReportCustomGroup {
   title: string;
 }
 
-export interface CompanyReportLetterheadTemplate {
-  enabled?: boolean;
+export interface CompanyReportSystemTemplate {
   templateId?: string | null;
   outputFormat?: "pdf" | "pptx" | null;
-  coverImageDataUrl?: string | null;
-  pageImageDataUrl?: string | null;
-  landscapePageImageDataUrl?: string | null;
-  logoDataUrl?: string | null;
-  footerImageDataUrl?: string | null;
-  signatureStampDataUrl?: string | null;
 }
 
 export interface CompanyAiReportTemplateVariable {
@@ -306,7 +299,7 @@ export interface CompanyReportDefaults {
   assumptions?: CompanyReportAssumptionsDefaults;
   customGroups?: CompanyReportCustomGroup[];
   customSections?: CompanyReportCustomSection[];
-  letterhead?: CompanyReportLetterheadTemplate;
+  letterhead?: CompanyReportSystemTemplate;
   aiTemplates?: CompanyAiReportTemplate[];
   /** Canonical multi-template collections. */
   wordTemplates?: CompanyReportWordTemplate[];

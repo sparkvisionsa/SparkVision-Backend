@@ -7,6 +7,37 @@ const WORD_FILE_1 = "64b000000000000000000001";
 const WORD_FILE_2 = "64b000000000000000000002";
 const PPTX_FILE_1 = "64b000000000000000000003";
 
+test("removed custom report branding falls back to the built-in system template", () => {
+  const resolved = resolveCompanyReportDefaults({
+    letterhead: {
+      templateId: "removed-custom-template",
+      outputFormat: "pptx",
+      enabled: true,
+      coverImageDataUrl: "data:image/png;base64,legacy",
+      pageImageDataUrl: "/uploads/company-report-templates/legacy/page.png",
+    },
+  } as never);
+
+  assert.deepEqual(resolved.letterhead, {
+    templateId: "default-report-template",
+    outputFormat: "pdf",
+  });
+});
+
+test("system report template selection remains available", () => {
+  const resolved = resolveCompanyReportDefaults({
+    letterhead: {
+      templateId: "powerpoint-deck",
+      outputFormat: "pdf",
+    },
+  });
+
+  assert.deepEqual(resolved.letterhead, {
+    templateId: "powerpoint-deck",
+    outputFormat: "pptx",
+  });
+});
+
 test("legacy singleton templates are exposed as named catalogue entries", () => {
   const resolved = resolveCompanyReportDefaults({
     wordTemplate: {
