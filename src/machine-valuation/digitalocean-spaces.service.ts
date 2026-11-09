@@ -1,12 +1,22 @@
 import { Injectable, InternalServerErrorException, Logger } from "@nestjs/common";
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
   CopyObjectCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  HeadObjectCommand,
+  ListPartsCommand,
+  ListObjectsV2Command,
   GetObjectCommand,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Readable } from "node:stream";
+import { createReadStream } from "node:fs";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 function env(name: string): string {
@@ -107,6 +117,7 @@ export class DigitalOceanSpacesService {
   private readonly originEndpoint: string;
   private readonly prefix: string;
   private readonly assetImagesPrefix: string;
+  private readonly recordingPrefix: string;
 
   constructor() {
     const accessKeyId = env("DO_SPACES_ACCESS_KEY_ID");
@@ -121,6 +132,7 @@ export class DigitalOceanSpacesService {
       env("DO_SPACES_ASSET_IMAGES_PREFIX") || "mv-asset-images",
       "mv-asset-images",
     );
+    this.recordingPrefix = sanitizeSpacesKeySegment(env("DO_SPACES_RECORDINGS_PREFIX") || "helper-recordings", "helper-recordings");
 
     const originEndpoint = trimTrailingSlash(env("DO_SPACES_ORIGIN_ENDPOINT"));
     const endpoint = trimTrailingSlash(
@@ -147,6 +159,77 @@ export class DigitalOceanSpacesService {
 
   isReady(): boolean {
     return this.client != null && this.bucket.length > 0;
+  }
+
+  buildRecordingKey(recordingId: string, fileName: string, variant = "raw") {
+    return [this.recordingPrefix, sanitizeSpacesKeySegment(recordingId, "recording"), sanitizeSpacesKeySegment(variant, "raw"), sanitizeSpacesKeySegment(fileName, "recording.bin")].join("/");
+  }
+
+  async createMultipartUpload(key: string, contentType: string) {
+    const response = await this.requireClient().send(new CreateMultipartUploadCommand({
+      Bucket: this.bucket, Key: key, ContentType: contentType, ACL: "private",
+      CacheControl: "private, max-age=0, no-store",
+    }));
+    if (!response.UploadId) throw new InternalServerErrorException("Spaces did not return a multipart upload id.");
+    return response.UploadId;
+  }
+
+  async presignUploadPart(key: string, uploadId: string, partNumber: number, expiresIn = 900) {
+    return getSignedUrl(this.requireClient() as never, new UploadPartCommand({
+      Bucket: this.bucket, Key: key, UploadId: uploadId, PartNumber: partNumber,
+    }), { expiresIn });
+  }
+
+  async completeMultipartUpload(key: string, uploadId: string, parts: Array<{ PartNumber: number; ETag: string }>) {
+    await this.requireClient().send(new CompleteMultipartUploadCommand({
+      Bucket: this.bucket, Key: key, UploadId: uploadId,
+      MultipartUpload: { Parts: parts.sort((a, b) => a.PartNumber - b.PartNumber) },
+    }));
+  }
+
+  async listMultipartParts(key: string, uploadId: string) {
+    const response = await this.requireClient().send(new ListPartsCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId }));
+    return (response.Parts ?? []).map((part) => ({ partNumber: part.PartNumber ?? 0, etag: part.ETag ?? "", size: part.Size ?? 0 }));
+  }
+
+  async abortMultipartUpload(key: string, uploadId: string) {
+    await this.requireClient().send(new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId }));
+  }
+
+  async presignGet(key: string, expiresIn = 300, downloadName?: string) {
+    const signed = await getSignedUrl(this.requireClient() as never, new GetObjectCommand({
+      Bucket: this.bucket, Key: key,
+      ...(downloadName ? { ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}` } : {}),
+    }), { expiresIn });
+    const cdnEndpoint = trimTrailingSlash(env("DO_SPACES_CDN_ENDPOINT"));
+    if (!cdnEndpoint) return signed;
+    const signedUrl = new URL(signed);
+    const cdnUrl = new URL(cdnEndpoint);
+    if (!signedUrl.hostname.startsWith(`${this.bucket}.`)) {
+      throw new InternalServerErrorException("Spaces CDN signing requires virtual-hosted-style presigned URLs.");
+    }
+    signedUrl.host = cdnUrl.host;
+    signedUrl.protocol = cdnUrl.protocol;
+    return signedUrl.toString();
+  }
+
+  async headObject(key: string) {
+    const value = await this.requireClient().send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+    return { size: value.ContentLength ?? 0, contentType: value.ContentType ?? "application/octet-stream" };
+  }
+
+  async putPrivateObject(key: string, body: Buffer, contentType: string, cacheControl = "private, max-age=300") {
+    await this.requireClient().send(new PutObjectCommand({
+      Bucket: this.bucket, Key: key, Body: body, ContentType: contentType, ContentLength: body.length,
+      ACL: "private", CacheControl: cacheControl,
+    }));
+  }
+
+  async uploadPrivateFile(key: string, path: string, size: number, contentType: string, cacheControl = "private, max-age=300") {
+    await this.requireClient().send(new PutObjectCommand({
+      Bucket: this.bucket, Key: key, Body: createReadStream(path), ContentLength: size,
+      ContentType: contentType, ACL: "private", CacheControl: cacheControl,
+    }));
   }
 
   private requireClient(): S3Client {
@@ -234,6 +317,17 @@ export class DigitalOceanSpacesService {
     if (!normalizedKey) return;
     const client = this.requireClient();
     await client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: normalizedKey }));
+  }
+
+  async deletePrefix(prefix: string): Promise<void> {
+    const client = this.requireClient();
+    let continuationToken: string | undefined;
+    do {
+      const page = await client.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: continuationToken }));
+      const objects = (page.Contents ?? []).flatMap((object) => object.Key ? [{ Key: object.Key }] : []);
+      if (objects.length) await client.send(new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects: objects, Quiet: true } }));
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
   }
 
   async copyAssetImage(params: {

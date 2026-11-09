@@ -13,7 +13,8 @@ test("report selection accepts unchanged selections without rewriting categorize
   try {
     const db = await getMongoDb(), projectId = new ObjectId(), assetId = new ObjectId(), fileId = new ObjectId();
     const service = new MachineValuationService({ isReady: () => false } as any);
-    (service as any).loadProjectForAccess = async () => ({ _id: projectId });
+    (service as any).loadProjectForAccess = async () => ({ _id: projectId, name: "Project" });
+    (service as any).ensureDisplayNumberForProject = async () => 1;
     const ctx = { userId: "owner", companyId: "company", isSuperAdmin: false, userRole: "valuer" as const };
     const initialTime = new Date("2026-01-01");
     const images = {
@@ -34,12 +35,16 @@ test("report selection accepts unchanged selections without rewriting categorize
       assert.deepEqual(saved!.updatedAt, initialTime, "unchanged selection does not generate a new asset revision");
     }
     assert.equal((await db.collection("mv_files.files").findOne({ _id: fileId }))!.metadata.includeInReport, true, "unchanged asset selections still reconcile report file metadata");
+    const reportBefore = await service.getProject(projectId.toString(), ctx, { picAssetMode: "report" });
+    assert.equal(reportBefore.project.selectedAssetImageCount, 2, "final report summary counts only selected images");
     await patch({ imageReportSelections: [{ ...images.brand, includeInReport: true }] });
     const changed = await db.collection("assets").findOne({ _id: assetId });
     assert.equal(changed!.images.brand.includeInReport, true);
     assert.equal(changed!.images.main.includeInReport, true);
     assert.deepEqual(changed!.images.other, images.other);
     assert.equal(changed!.images.details, null);
+    const reportAfter = await service.getProject(projectId.toString(), ctx, { picAssetMode: "report" });
+    assert.equal(reportAfter.project.selectedAssetImageCount, 3, "database summary reflects changed selections");
     await patch({ imageReportSelections: [{ ...images.brand, includeInReport: true }] });
     assert.deepEqual((await db.collection("assets").findOne({ _id: assetId }))!.updatedAt, changed!.updatedAt);
     // Legacy clients may submit the flattened display list; repeating it is also valid.

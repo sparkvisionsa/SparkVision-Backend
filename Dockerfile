@@ -34,6 +34,7 @@ RUN apt-get update \
     libffi8 \
     shared-mime-info \
     poppler-utils \
+    ffmpeg \
     fontconfig \
     fonts-dejavu-core \
     fonts-noto-core \

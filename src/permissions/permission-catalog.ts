@@ -29,7 +29,7 @@ export const PERMISSION_CATALOG: Partial<Record<ValueTechProductId, PermissionCa
     { key: "settings_users", label: "مستخدمو الشركة", description: "إنشاء وتعديل وحذف مستخدمي النظام", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
     { key: "settings_permissions", label: "الصلاحيات", description: "قوالب الصلاحيات وتعيينها للمستخدمين", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete, { key: "assign", label: "إسناد للمستخدمين" }] },
     { key: "settings_assets", label: "تصنيفات الأصول", description: "تصنيفات وأنواع ومسميات الأصول", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
-    { key: "settings_reports", label: "بيانات إعداد التقرير النهائي", description: "نماذج بيانات التقرير وقوالب Word وPowerPoint وقوالب النظام والكليشيه", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
+    { key: "settings_reports", label: "بيانات إعداد التقرير النهائي", description: "نماذج بيانات التقرير وقوالب Word وPowerPoint وقوالب النظام", actions: [commonActions.access, commonActions.create, commonActions.edit, commonActions.delete] },
     { key: "settings_serial", label: "إعدادات الترقيم المتسلسل", description: "صفحة إعداد صيغة الرقم المرجعي للمشاريع", actions: [commonActions.access, commonActions.edit] },
     { key: "support", label: "الدعم والتذاكر", description: "صفحة التواصل مع الدعم ومتابعة التذاكر", actions: [commonActions.access, commonActions.create] },
   ],
