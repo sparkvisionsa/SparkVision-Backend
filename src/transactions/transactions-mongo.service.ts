@@ -261,6 +261,7 @@ function extractEvalData(body: Record<string, unknown>): EvalData {
     marketReason: str("marketReason"),
     landTitle: str("landTitle"),
     landSpace: str("landSpace"),
+    buildingArea: str("buildingArea"),
     propertyAreaMethod: str("propertyAreaMethod"),
     costNetBuildings: str("costNetBuildings"),
     costNetLandPrice: str("costNetLandPrice"),
