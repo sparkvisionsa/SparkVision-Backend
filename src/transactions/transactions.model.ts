@@ -58,6 +58,7 @@ export type EvalData = {
 
   landTitle: string;
   landSpace: string;
+  buildingArea: string;
 
   // basic property data
   propertyCode: string;
@@ -231,6 +232,7 @@ export function emptyEvalData(): EvalData {
     reviewer: "",
     landTitle: "",
     landSpace: "",
+    buildingArea: "",
     ownerName: "",
     propertyType: "",
     landUse: "",
