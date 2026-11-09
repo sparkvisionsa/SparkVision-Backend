@@ -35,7 +35,7 @@
    npm run worker:recordings:dev
    ```
 
-   في الإنتاج ابنِ الخادم أولًا (`npm run build`) وشغّل عملية عامل مستقلة بـ `npm run worker:recordings`. اجعل متغيرات Mongo وRedis وSpaces وFFmpeg نفسها متاحة للعملية. ابدأ بـ `RECORDING_WORKER_CONCURRENCY=1` و`RECORDING_FFMPEG_THREADS=2`. يولّد العامل MP4 مرة واحدة ثم يقسّمه إلى HLS دون إعادة ترميز، لتقليل زمن التجهيز. يمكن معاينة الملف الخام بعد اكتمال الرفع وأثناء المعالجة.
+   في الإنتاج يشغّل خادم API عامل التسجيلات داخله افتراضيًا، ولذلك تعمل الحاوية الواحدة دون خدمة إضافية. اجعل متغيرات Mongo وRedis وSpaces وFFmpeg متاحة للعملية، وابدأ بـ `RECORDING_WORKER_CONCURRENCY=1` و`RECORDING_FFMPEG_THREADS=2`. عند تشغيل خدمة عامل مستقلة بـ `npm run worker:recordings` اضبط `RECORDING_WORKER_EMBEDDED=false` في خدمة API فقط لتجنب مضاعفة التزامن. عند بدء العامل يعيد تلقائيًا إدراج التسجيلات التي بقيت في حالة `processing`. يولّد العامل MP4 مرة واحدة ثم يقسّمه إلى HLS دون إعادة ترميز، لتقليل زمن التجهيز. يمكن معاينة الملف الخام بعد اكتمال الرفع وأثناء المعالجة.
 
 ## إعداد CORS في Spaces
 

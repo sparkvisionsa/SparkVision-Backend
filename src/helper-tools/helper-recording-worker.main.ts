@@ -6,6 +6,7 @@ import { NestFactory } from "@nestjs/core";
 import { HelperRecordingWorkerModule } from "./helper-recording-worker.module";
 
 async function bootstrap() {
+  process.env.RECORDING_WORKER_STANDALONE_PROCESS = "true";
   const app = await NestFactory.createApplicationContext(HelperRecordingWorkerModule, { logger: ["error", "warn", "log"] });
   const logger = new Logger("HelperRecordingWorker");
   logger.log("Screen recording worker is running.");

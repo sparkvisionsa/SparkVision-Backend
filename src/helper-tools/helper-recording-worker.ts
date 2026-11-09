@@ -7,10 +7,16 @@ import { HelperToolsRecordingsService } from "./helper-tools-recordings.service"
 export class HelperRecordingWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(HelperRecordingWorker.name);
   private worker?: Worker;
+  private reconcileTimer?: NodeJS.Timeout;
 
   constructor(@Inject(HelperToolsRecordingsService) private readonly recordings: HelperToolsRecordingsService) {}
 
   onModuleInit() {
+    const standaloneProcess = process.env.RECORDING_WORKER_STANDALONE_PROCESS === "true";
+    if (!standaloneProcess && process.env.RECORDING_WORKER_EMBEDDED?.toLowerCase() === "false") {
+      this.logger.log("Embedded recording worker is disabled.");
+      return;
+    }
     const redisUrl = process.env.REDIS_URL;
     if (!redisUrl) throw new Error("REDIS_URL must be set to run the recording worker.");
     const connection = new IORedis(redisUrl, {
@@ -36,9 +42,18 @@ export class HelperRecordingWorker implements OnModuleInit, OnModuleDestroy {
     });
     this.worker.on("error", reportUnavailable);
     this.worker.on("failed", (job, error) => this.logger.error(`Recording job ${job?.id ?? "unknown"} failed: ${error.message}`));
+    void this.worker.waitUntilReady()
+      .then(async () => {
+        this.logger.log("Recording worker is ready.");
+        await this.recordings.requeueProcessingRecordings();
+        this.reconcileTimer = setInterval(() => void this.recordings.requeueProcessingRecordings(), 5 * 60_000);
+        this.reconcileTimer.unref();
+      })
+      .catch(reportUnavailable);
   }
 
   async onModuleDestroy() {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     await this.worker?.close();
   }
 }
