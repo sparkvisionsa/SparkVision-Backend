@@ -56,15 +56,24 @@ async function main() {
   });
   if (publicReadPolicy) throw new Error("A public bucket policy covers recording objects; review that policy before changing bucket settings.");
 
+  const exposedUploadHeaders = ["ETag", "Content-Length", "Content-Range", "Accept-Ranges"];
   const corsRule = {
     ID: "screen-recording-direct-upload",
     AllowedOrigins: origins,
     AllowedMethods: ["GET", "HEAD", "PUT"],
     AllowedHeaders: ["*"],
-    ExposeHeaders: ["ETag", "Content-Length", "Content-Range", "Accept-Ranges"],
+    ExposeHeaders: exposedUploadHeaders,
     MaxAgeSeconds: 3600,
   };
-  const corsRules = [corsRule, ...(cors?.CORSRules || []).filter((rule) => rule.ID !== corsRule.ID)];
+  // Spaces can select a broader legacy rule (for example AllowedOrigins: ["*"])
+  // for production uploads. Every rule that permits PUT must therefore expose
+  // ETag; otherwise the browser uploads the part but cannot complete multipart.
+  const preservedCorsRules = (cors?.CORSRules || [])
+    .filter((rule) => rule.ID !== corsRule.ID)
+    .map((rule) => rule.AllowedMethods?.includes("PUT")
+      ? { ...rule, ExposeHeaders: [...new Set([...(rule.ExposeHeaders || []), ...exposedUploadHeaders])] }
+      : rule);
+  const corsRules = [corsRule, ...preservedCorsRules];
   const lifecycleRule = {
     ID: "abort-incomplete-screen-recordings",
     Filter: { Prefix: `${prefix}/` },

@@ -8,7 +8,7 @@ import {
   OnModuleInit,
 } from "@nestjs/common";
 import { GridFSBucket, ObjectId } from "mongodb";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,6 +49,13 @@ function detectRecordingMime(header: Buffer) {
   if (header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
   if (header.subarray(4, 8).toString() === "ftyp") return "video/mp4";
   return null;
+}
+
+function executablePath(configured: string | undefined, fallback: string) {
+  const value = configured?.trim();
+  if (!value) return fallback;
+  if ((value.includes("/") || value.includes("\\")) && !existsSync(value)) return fallback;
+  return value;
 }
 
 function parseObjectId(id: string) {
@@ -141,6 +148,38 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
     await db.collection(HELPER_MULTIPART_UPLOADS_COLLECTION).createIndex({ actorKey: 1, clientRequestId: 1 }, { unique: true, sparse: true }).catch(() => undefined);
   }
 
+  private async enqueueProcessingJob(recordingId: string) {
+    if (!this.queue) return false;
+    const existing = await this.queue.getJob(recordingId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state !== "completed" && state !== "failed" && state !== "unknown") return false;
+      await existing.remove().catch(() => undefined);
+    }
+    await this.queue.add("process", { recordingId }, {
+      jobId: recordingId,
+      attempts: 3,
+      backoff: { type: "exponential", delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 500,
+    });
+    return true;
+  }
+
+  async requeueProcessingRecordings() {
+    if (!this.queue) return;
+    const rows = await (await this.db()).collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION)
+      .find({ status: "processing", rawKey: { $type: "string" } })
+      .sort({ updatedAt: 1 })
+      .limit(100)
+      .toArray();
+    let queued = 0;
+    for (const row of rows) {
+      if (await this.enqueueProcessingJob(String(row._id))) queued += 1;
+    }
+    if (queued) this.logger.log(`Requeued ${queued} recording(s) that were left processing.`);
+  }
+
   async list(actor: HelperActor, source?: string) {
     const db = await this.db();
     const filter: Record<string, unknown> = { ...helperVisibilityFilter(actor) };
@@ -231,7 +270,7 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
     if (existingSession.state === "completed") {
       const recording = await db.collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION).findOne({ _id: new ObjectId(existingSession.recordingId) });
       if (!recording || !helperCanAccess(recording, actor)) throw new NotFoundException("التسجيل غير موجود.");
-      if (recording.status === "processing" && this.queue) await this.queue.add("process", { recordingId: existingSession.recordingId }, { jobId: existingSession.recordingId, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: 100, removeOnFail: 500 });
+      if (recording.status === "processing") await this.enqueueProcessingJob(existingSession.recordingId);
       return { recording: publicRecording(recording) };
     }
     const session = await this.multipartSession(actor, id);
@@ -249,7 +288,7 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
           await db.collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION).updateOne({ _id: new ObjectId(session.recordingId) }, { $set: { status: "failed", failureReason: "Redis غير متصل؛ لم تبدأ المعالجة.", updatedAt: new Date() } });
           throw new BadRequestException("خدمة معالجة الفيديو غير متاحة حاليًا.");
         }
-        await this.queue.add("process", { recordingId: session.recordingId }, { jobId: session.recordingId, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: 100, removeOnFail: 500 });
+        await this.enqueueProcessingJob(session.recordingId);
         const completedRecord = await db.collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION).findOne({ _id: new ObjectId(session.recordingId) });
         return { recording: completedRecord ? publicRecording(completedRecord) : null };
       }
@@ -283,7 +322,7 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
       );
       throw new BadRequestException("خدمة معالجة الفيديو غير متاحة حاليًا.");
     }
-    await this.queue.add("process", { recordingId: session.recordingId }, { jobId: session.recordingId, attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: 100, removeOnFail: 500 });
+    await this.enqueueProcessingJob(session.recordingId);
     const recording = await db.collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION).findOne({ _id: new ObjectId(session.recordingId) });
     return { recording: recording ? publicRecording(recording) : null };
   }
@@ -559,8 +598,8 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
       await mkdir(hlsDir, { recursive: true });
       const raw = await this.spaces.getObjectStream(record.rawKey);
       await pipeline(raw.stream as NodeJS.ReadableStream, createWriteStream(source));
-      const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
-      const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
+      const ffprobe = executablePath(process.env.FFPROBE_PATH, "ffprobe");
+      const ffmpeg = executablePath(process.env.FFMPEG_PATH, "ffmpeg");
       const ffmpegThreads = String(Math.max(1, Math.min(8, Math.floor(Number(process.env.RECORDING_FFMPEG_THREADS) || 2))));
       const probe = await execFileAsync(ffprobe, ["-v", "error", "-show_entries", "format=duration,size:stream=codec_type", "-of", "json", source], { maxBuffer: 2 * 1024 * 1024 });
       const metadata = JSON.parse(probe.stdout) as { format?: { duration?: string; size?: string } };
