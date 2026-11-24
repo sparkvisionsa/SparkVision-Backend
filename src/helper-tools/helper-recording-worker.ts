@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nest
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { HelperToolsRecordingsService } from "./helper-tools-recordings.service";
+import { HELPER_RECORDING_QUEUE } from "./helper-tools.types";
 
 @Injectable()
 export class HelperRecordingWorker implements OnModuleInit, OnModuleDestroy {
@@ -34,7 +35,7 @@ export class HelperRecordingWorker implements OnModuleInit, OnModuleDestroy {
       if (redisWarningShown) this.logger.log("Redis reconnected; recording worker is ready.");
       redisWarningShown = false;
     });
-    this.worker = new Worker("helper-recording-processing", async (job) => {
+    this.worker = new Worker(HELPER_RECORDING_QUEUE, async (job) => {
       await this.recordings.processRecording(String(job.data.recordingId), job.attemptsMade >= Number(job.opts.attempts ?? 1) - 1);
     }, {
       connection,

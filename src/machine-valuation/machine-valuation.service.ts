@@ -53,6 +53,8 @@ import type {
   MvReportCustomField,
   MvReportCustomFieldType,
   MvReportCustomSection,
+  MvReportDataModelSnapshot,
+  MvReportDataModelSnapshotField,
   MvReportEditableSection,
   MvReportInsertedBlock,
   MvReportInsertedBlockKind,
@@ -99,6 +101,26 @@ import type { AssetDoc, AssetImportDoc, AssetRawData } from "@/assets/types";
 import { sanitizeTextInput } from "@/assets/asset-import.utils";
 import { ASSET_IMPORT_MAX_FILE_BYTES } from "@/assets/asset-import.constants";
 import { computeMvProjectProgressPct } from "./mv-project-progress.util";
+import {
+  MV_TRASH_COLLECTION,
+  MV_TRASH_COMPANY_RESTORE_DAYS,
+  configureMvTrash,
+  createMvTrashEntry,
+  detachMvFilesToTrash,
+  diffRemovedEmbeddedItems,
+  groupEmbeddedRemovals,
+  isMvTrashAdmin,
+  listMvTrashEntries,
+  mvTrashRestoreUntil,
+  purgeExpiredMvTrash,
+  purgeMvTrashEntry,
+  purgeMvTrashForProject,
+  registerMvTrashKind,
+  restoreMvTrashEntry,
+  trashEmbeddedRemovals,
+  type MvEmbeddedSpec,
+  type MvTrashEntry,
+} from "./mv-trash";
 
 const MV_PHOTO_FOLDER_FILTER = { isAssetFolder: true as const };
 const EXTERNAL_ASSET_IMAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -107,6 +129,34 @@ const PERMISSION_PREVIEW_PROJECT_NAME = "مشروع معاينة الصلاحي�
 const PERMISSION_PREVIEW_SHEET_NAME = "أصول تجريبية لمعاينة الصلاحيات";
 const PERMISSION_PREVIEW_ASSET_SOURCE = "permission-preview-assets.xlsx";
 const PERMISSION_PREVIEW_VERSION = 1;
+
+const MV_ATTACHMENT_TRASH_KINDS: Record<(typeof ATTACHMENT_FIELDS)[number], { source: string; image: string }> = {
+  valuationAccountingWorkspace: { source: "valuationFile", image: "valuationImage" },
+  clientDocumentsWorkspace: { source: "clientFile", image: "clientFileImage" },
+  sceCertificateWorkspace: { source: "sceCertificate", image: "sceCertificateImage" },
+};
+
+/**
+ * المصفوفات داخل مستند المشروع التي يُعد اختفاء عنصر منها «حذفاً» ينتقل إلى
+ * سلة المحذوفات ويُستعاد إلى موضعه. كل عناصرها تحمل ‎`id`‎ ثابتاً.
+ */
+const MV_PROJECT_TRASH_SPECS: MvEmbeddedSpec[] = [
+  { field: "locations", kind: "inspectionSite", labelKeys: ["name", "city", "region"] },
+  { field: "inspectionAssignments", kind: "inspectionAssignment", labelKeys: ["inspectorName"] },
+  { field: "reportData.customSections", kind: "reportCustomSection", labelKeys: ["title"] },
+  { field: "reportData.customFields", kind: "reportCustomField", labelKeys: ["label"] },
+  { field: "reportData.valuationTeam", kind: "reportTeamMember", labelKeys: ["name"] },
+  { field: "reportData.reportEditableSections", kind: "reportSection", labelKeys: ["title"] },
+  { field: "reportData.reportInsertedBlocks", kind: "reportBlock", labelKeys: ["caption", "content", "kind"] },
+  ...ATTACHMENT_FIELDS.flatMap((field) => [
+    { field: `${field}.sources`, kind: MV_ATTACHMENT_TRASH_KINDS[field].source, labelKeys: ["name", "fileName", "sourceFileName"] },
+    { field: `${field}.images`, kind: MV_ATTACHMENT_TRASH_KINDS[field].image, labelKeys: ["name", "sourceFileName"] },
+  ]),
+];
+
+function trashTextSnippet(value: unknown, max = 90): string {
+  return String(value ?? "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
 
 function toId(raw: string): ObjectId {
   if (!ObjectId.isValid(raw)) throw new NotFoundException("Not found");
@@ -714,6 +764,55 @@ function sanitizeReportCustomSections(value: unknown): MvReportCustomSection[] {
     .filter((item): item is MvReportCustomSection => item != null);
 }
 
+/**
+ * The project's private copy of its report-data model (same limits as the
+ * company catalogue). Without it a project whose model is later deleted would
+ * lose its sections, labels and field types.
+ */
+function sanitizeReportDataModelSnapshot(value: unknown): MvReportDataModelSnapshot | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const id = sanitizeOptionalText(raw.id, 120);
+  if (!id) return undefined;
+  const sections: MvReportDataModelSnapshot["sections"] = [];
+  const seenSections = new Set<string>();
+  let fieldCount = 0;
+  for (const rawSection of Array.isArray(raw.sections) ? raw.sections.slice(0, 30) : []) {
+    if (!rawSection || typeof rawSection !== "object" || Array.isArray(rawSection)) continue;
+    const sectionRaw = rawSection as Record<string, unknown>;
+    const sectionId = sanitizeOptionalText(sectionRaw.id, 120);
+    const title = sanitizeOptionalText(sectionRaw.title, 180);
+    if (!sectionId || !title || seenSections.has(sectionId)) continue;
+    seenSections.add(sectionId);
+    const fields: MvReportDataModelSnapshotField[] = [];
+    const seenFields = new Set<string>();
+    for (const rawField of Array.isArray(sectionRaw.fields) ? sectionRaw.fields : []) {
+      if (fieldCount >= 120) break;
+      if (!rawField || typeof rawField !== "object" || Array.isArray(rawField)) continue;
+      const fieldRaw = rawField as Record<string, unknown>;
+      const fieldId = sanitizeOptionalText(fieldRaw.id, 120);
+      const label = sanitizeOptionalText(fieldRaw.label, 180);
+      const sourceKey = sanitizeOptionalText(fieldRaw.sourceKey, 180);
+      if (!fieldId || !label || !sourceKey || seenFields.has(fieldId)) continue;
+      seenFields.add(fieldId);
+      fields.push({
+        id: fieldId,
+        label,
+        sourceKey,
+        type: MV_REPORT_CUSTOM_FIELD_TYPES.has(fieldRaw.type as MvReportCustomFieldType)
+          ? (fieldRaw.type as MvReportCustomFieldType)
+          : "text",
+        required: fieldRaw.required === true,
+        ...(fieldRaw.system === true || !sourceKey.startsWith("field:") ? { system: true } : {}),
+      });
+      fieldCount += 1;
+    }
+    sections.push({ id: sectionId, title, fields });
+  }
+  if (sections.length === 0) return undefined;
+  return { id, name: sanitizeOptionalText(raw.name, 160) || "نموذج البيانات", sections };
+}
+
 function sanitizeReportPageOrientations(value: unknown): Record<string, "portrait" | "landscape"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, "portrait" | "landscape"> = {};
@@ -816,6 +915,10 @@ function sanitizeReportData(raw: unknown): MvProjectReportData {
   const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   return {
     reportDataModelId: sanitizeOptionalText(data.reportDataModelId, 120),
+    ...(() => {
+      const snapshot = sanitizeReportDataModelSnapshot(data.reportDataModelSnapshot);
+      return snapshot ? { reportDataModelSnapshot: snapshot } : {};
+    })(),
     reportSectionModelId: sanitizeOptionalText(data.reportSectionModelId, 120),
     reportReference: sanitizeOptionalText(data.reportReference, 120),
     reportTitle: sanitizeOptionalText(data.reportTitle, 220),
@@ -1751,6 +1854,86 @@ function removePicAssetImagesBySelectionKeys(
     }
   }
   return { next, changed };
+}
+
+/** موضع وسيط داخل ‎`images`‎/‎`voiceNotes`‎: خانة التصنيف (أو ‎null‎ للمصفوفة) وترتيبه فيها. */
+type PicAssetMediaPlacement = { slot: string | null; index: number | null; image: unknown };
+
+/** يحدد مواضع الوسائط المطابقة دون تغيير البنية (مصفوفة أو كائن مصنّف). */
+function locatePicAssetMedia(raw: unknown, match: (image: unknown) => boolean): PicAssetMediaPlacement[] {
+  const found: PicAssetMediaPlacement[] = [];
+  if (Array.isArray(raw)) {
+    raw.forEach((image, index) => { if (image != null && match(image)) found.push({ slot: null, index, image }); });
+    return found;
+  }
+  if (!isPicAssetCategorizedImagesObject(raw)) return found;
+  for (const [slot, value] of Object.entries(raw)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      value.forEach((image, index) => { if (image != null && match(image)) found.push({ slot, index, image }); });
+    } else if (typeof value === "object" && match(value)) {
+      found.push({ slot, index: null, image: value });
+    }
+  }
+  return found;
+}
+
+/** الوسائط الموجودة في ‎`previous`‎ والغائبة عن ‎`next`‎ (بأي من هوياتها الثابتة). */
+function removedPicAssetMedia(previous: unknown, next: unknown): PicAssetMediaPlacement[] {
+  const kept = new Set<string>();
+  for (const image of flattenPicAssetImagesRaw(next)) {
+    for (const key of picAssetImageSelectionKeys(image)) kept.add(key);
+  }
+  return locatePicAssetMedia(previous, (image) => {
+    const keys = picAssetImageSelectionKeys(image);
+    return keys.length > 0 && !keys.some((key) => kept.has(key));
+  });
+}
+
+/** يعيد وسيطاً إلى خانته وترتيبه الأصليين؛ إن شُغلت الخانة المفردة يُضاف إلى ‎`other`‎. */
+function restorePicAssetMediaPlacement(
+  raw: unknown,
+  placement: PicAssetMediaPlacement,
+): { next: unknown; changed: boolean } {
+  const keys = picAssetImageSelectionKeys(placement.image);
+  const exists = flattenPicAssetImagesRaw(raw).some((image) =>
+    picAssetImageSelectionKeys(image).some((key) => keys.includes(key)));
+  if (exists) return { next: raw, changed: false };
+  const insert = (list: unknown[], index: number | null) => {
+    const copy = [...list];
+    copy.splice(index == null ? copy.length : Math.max(0, Math.min(index, copy.length)), 0, placement.image);
+    return copy;
+  };
+  if (Array.isArray(raw) || (raw == null && placement.slot == null)) {
+    return { next: insert(Array.isArray(raw) ? raw : [], placement.slot == null ? placement.index : null), changed: true };
+  }
+  const next: Record<string, unknown> = isPicAssetCategorizedImagesObject(raw)
+    ? { ...raw }
+    : { plate: null, odometer: null, brand: null, details: null, other: [] };
+  const slot = placement.slot ?? "other";
+  const current = next[slot];
+  if (Array.isArray(current)) {
+    next[slot] = insert(current, placement.index);
+  } else if (current == null) {
+    next[slot] = placement.index != null || slot === "other" ? [placement.image] : placement.image;
+  } else {
+    next.other = insert(Array.isArray(next.other) ? next.other : [], null);
+  }
+  return { next, changed: true };
+}
+
+function picAssetMediaLabel(image: unknown, fallback: string): string {
+  if (image && typeof image === "object" && !(image instanceof ObjectId)) {
+    const row = image as { name?: unknown; fileName?: unknown; filename?: unknown; url?: unknown };
+    for (const value of [row.name, row.fileName, row.filename]) {
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    if (typeof row.url === "string" && row.url.trim()) {
+      const tail = row.url.split(/[?#]/)[0]!.split("/").pop() ?? "";
+      try { return decodeURIComponent(tail) || fallback; } catch { return tail || fallback; }
+    }
+  }
+  return fallback;
 }
 
 /**
@@ -4129,7 +4312,10 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     error?: string; updatedAt: number;
   }>();
 
-  constructor(private readonly inspectorSpaces: DigitalOceanSpacesService) {}
+  constructor(private readonly inspectorSpaces: DigitalOceanSpacesService) {
+    configureMvTrash({ deleteSpacesObject: (key) => this.inspectorSpaces.deleteObject(key) });
+    this.registerTrashKinds();
+  }
 
   onModuleDestroy() {
     if (this.archivePurgeTimer) clearInterval(this.archivePurgeTimer);
@@ -4906,6 +5092,26 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Same access check as `loadProjectForAccess`, reading only the fields the
+   * caller needs (inspection sites / inspector files) instead of the whole
+   * project document with its heavy workspaces — uploads, downloads and
+   * site autosaves stay fast on large projects.
+   */
+  private async loadProjectLightForAccess(
+    db: Awaited<ReturnType<typeof getMongoDb>>,
+    projectId: ObjectId,
+    ctx: MvAccessContext,
+    projection: Record<string, unknown> = {},
+  ): Promise<MvProjectMongoDoc> {
+    const project = await db
+      .collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+      .findOne({ _id: projectId }, { projection: { companyId: 1, deletedAt: 1, ...projection } });
+    if (!project || project.deletedAt) throw new NotFoundException("Project not found");
+    this.assertProjectInScope(project, ctx);
+    return project;
+  }
+
   private async loadProjectForAccess(
     db: Awaited<ReturnType<typeof getMongoDb>>,
     projectId: ObjectId,
@@ -5455,6 +5661,377 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
         await this.assertInspectorAccessToFolderId(db, projectId, subProjectId, ctx);
       }
     }
+  }
+
+  /* ───────── سلة المحذوفات: أدوات مشتركة ───────── */
+
+  private projectTrashScope(project: { _id: ObjectId; companyId?: unknown }) {
+    return {
+      projectId: project._id,
+      ...(project.companyId != null ? { companyId: project.companyId as ObjectId | string } : {}),
+    };
+  }
+
+  /** اسم مجلد/أصل في شجرة المشروع، أو ‎null‎ إن لم يعد موجوداً. */
+  private async folderNodeName(db: Db, projectId: ObjectId, nodeId: ObjectId | null | undefined): Promise<string | null> {
+    if (!nodeId) return null;
+    const filter = { _id: nodeId, projectId };
+    const node =
+      (await db.collection(MV_SUBPROJECTS_COLLECTION).findOne(filter, { projection: { name: 1 } })) ??
+      (await db.collection(MV_ITEMS_COLLECTION).findOne(filter, { projection: { name: 1 } })) ??
+      (await db.collection(ASSETS_COLLECTION).findOne(filter, { projection: { name: 1, lable: 1 } }));
+    if (!node) return null;
+    return picAssetDisplayName(node as { name?: unknown; lable?: unknown }) || "—";
+  }
+
+  /**
+   * ينقل شجرة (مجلدات/أصول/شيتات) إلى السلة: المستندات تُحفظ كما هي وملفاتها
+   * تُفصل عن المشروع دون إتلافها. الحذف الفعلي من المجموعات الحية يتم بعد العودة.
+   */
+  private async trashFolderTree(
+    db: Db,
+    ctx: MvAccessContext,
+    project: MvProjectMongoDoc,
+    input: {
+      kind: string;
+      label: string;
+      rootId: ObjectId | null;
+      parentId: ObjectId | null | undefined;
+      filesFilter: Record<string, unknown>;
+      docs: Array<{ collection: string; filter: Record<string, unknown> }>;
+    },
+  ) {
+    const docs: Array<{ collection: string; doc: Record<string, unknown> }> = [];
+    for (const source of input.docs) {
+      const rows = await db.collection(source.collection).find(source.filter).toArray();
+      for (const doc of rows) docs.push({ collection: source.collection, doc });
+    }
+    const fileCount = await db.collection(MV_FILES_FILES_COLLECTION).countDocuments(input.filesFilter);
+    if (docs.length === 0 && fileCount === 0) return null;
+    const trashId = new ObjectId();
+    await createMvTrashEntry(db, ctx, {
+      _id: trashId,
+      kind: input.kind,
+      label: input.label,
+      location: await this.folderNodeName(db, project._id, input.parentId),
+      ...this.projectTrashScope(project),
+      count: Math.max(1, docs.filter((row) => row.collection !== MV_SHEETS_COLLECTION).length),
+      data: { rootId: input.rootId, parentId: input.parentId ?? null, fileCount },
+      docs,
+      hasFiles: fileCount > 0,
+    });
+    if (fileCount > 0) await detachMvFilesToTrash(db, trashId, input.filesFilter);
+    return trashId;
+  }
+
+  /** ينقل إلى السلة كل وسيط اختفى من ‎`images`‎/‎`voiceNotes`‎ أصل، مع موضعه داخله. */
+  private async trashRemovedPicAssetMedia(
+    db: Db,
+    ctx: MvAccessContext,
+    project: MvProjectMongoDoc,
+    pic: PicAssetMongoDoc,
+    field: "images" | "voiceNotes",
+    nextValue: unknown,
+  ) {
+    const assetName = picAssetDisplayName(pic);
+    for (const placement of removedPicAssetMedia((pic as unknown as Record<string, unknown>)[field], nextValue)) {
+      await createMvTrashEntry(db, ctx, {
+        kind: field === "images" ? "assetImage" : "assetVoiceNote",
+        label: picAssetMediaLabel(placement.image, assetName),
+        location: assetName || null,
+        ...this.projectTrashScope(project),
+        data: { picAssetId: pic._id, fileId: picAssetImageFileObjectId(placement.image) },
+        payload: [{ role: "mediaRef", doc: { picAssetId: pic._id, field, ...placement } }],
+      });
+    }
+  }
+
+  /**
+   * يقارن مستند المشروع قبل الحفظ وبعده وينقل إلى السلة كل عنصر اختفى من
+   * المصفوفات المتتبَّعة (ضمن الحقول التي مسّها الطلب فقط).
+   */
+  private async trashRemovedProjectItems(
+    db: Db,
+    ctx: MvAccessContext,
+    before: MvProjectMongoDoc,
+    after: Partial<MvProjectDoc>,
+    touchedFields: string[],
+  ) {
+    const specs = MV_PROJECT_TRASH_SPECS.filter((spec) => touchedFields.includes(spec.field.split(".")[0]!));
+    if (specs.length === 0) return;
+    const removals = groupEmbeddedRemovals(
+      diffRemovedEmbeddedItems(before, after, specs),
+      (child, parent) => {
+        const childField = child.path[0]!.field;
+        const parentField = parent.path[0]!.field;
+        const childItem = (child.item ?? {}) as Record<string, unknown>;
+        const parentId = (parent.item as { id?: unknown } | null)?.id;
+        if (parentField === "reportData.customSections" && childField === "reportData.customFields") {
+          return childItem.sectionId === parentId;
+        }
+        // صور الملف المقتطعة تتبع ملفها المصدر.
+        return parentField.endsWith(".sources") &&
+          childField === parentField.replace(/\.sources$/, ".images") &&
+          childItem.sourceId === parentId;
+      },
+    );
+    if (removals.length === 0) return;
+    for (const removal of removals) {
+      if (removal.kind !== "inspectionSite") continue;
+      const siteId = String((removal.item as { id?: unknown }).id ?? "");
+      removal.data = {
+        siteId,
+        // ملفات الموقع تصير عامة عند حذفه؛ نحفظها لتعود إليه عند استعادته.
+        fileIds: normalizeInspectorFilesArray(before.inspectorFiles)
+          .filter((file) => file.locationIds?.includes(siteId))
+          .map((file) => file.id),
+        contacts: (Array.isArray(before.contacts) ? before.contacts : [])
+          .filter((contact) => contact?.locationId === siteId),
+      };
+    }
+    await trashEmbeddedRemovals(
+      db,
+      ctx,
+      { collection: MV_PROJECTS_COLLECTION, docId: before._id, ...this.projectTrashScope(before) },
+      removals,
+    );
+  }
+
+  /**
+   * حذف «ناعم» داخل بيانات التقرير لا يظهر كعنصر اختفى من مصفوفة:
+   * إخفاء قسم أساسي من التقرير، أو تفريغ نص قابل للتحرير.
+   */
+  private async trashReportDataSoftRemovals(
+    db: Db,
+    ctx: MvAccessContext,
+    before: MvProjectMongoDoc,
+    after: Partial<MvProjectDoc>,
+    labels: Record<string, unknown>,
+  ) {
+    const labelFor = (key: string) => trashTextSnippet(labels[key]) || "";
+    const scope = this.projectTrashScope(before);
+    const hiddenBefore = new Set(before.reportData?.reportHiddenAnchorIds ?? []);
+    for (const anchorId of after.reportData?.reportHiddenAnchorIds ?? []) {
+      if (hiddenBefore.has(anchorId)) continue;
+      await createMvTrashEntry(db, ctx, {
+        kind: "reportBuiltInSection",
+        label: labelFor(anchorId) || anchorId,
+        ...scope,
+        data: { anchorId },
+      });
+    }
+    const textBefore = before.reportData?.reportTextOverrides ?? {};
+    for (const [key, value] of Object.entries(after.reportData?.reportTextOverrides ?? {})) {
+      if (value !== "" || textBefore[key] === "") continue;
+      const previous = textBefore[key];
+      await createMvTrashEntry(db, ctx, {
+        kind: "reportText",
+        label: trashTextSnippet(previous) || labelFor(key) || key,
+        ...scope,
+        data: { key, hadOverride: previous !== undefined },
+        payload: [{ role: "text", doc: previous ?? null }],
+      });
+    }
+  }
+
+  /** يعيد مراجع الوسائط إلى أصولها (الخانة والترتيب نفسيهما). الأصول غير الموجودة تُتجاوز. */
+  private async restoreTrashedMediaRefs(db: Db, entry: MvTrashEntry, payload: Array<{ role: string; doc: unknown }>) {
+    const assets = db.collection<AssetDoc>(ASSETS_COLLECTION);
+    for (const row of payload) {
+      if (row.role !== "mediaRef" || !row.doc || typeof row.doc !== "object") continue;
+      const ref = row.doc as { picAssetId?: unknown; field?: unknown } & PicAssetMediaPlacement;
+      const picAssetId = tryCoerceToObjectId(ref.picAssetId);
+      if (!picAssetId || !entry.projectId) continue;
+      const field = ref.field === "voiceNotes" ? "voiceNotes" : "images";
+      const asset = await assets.findOne(
+        { _id: picAssetId, projectId: entry.projectId },
+        { projection: { [field]: 1 } },
+      );
+      if (!asset) continue;
+      const restored = restorePicAssetMediaPlacement(
+        (asset as unknown as Record<string, unknown>)[field],
+        { slot: ref.slot ?? null, index: ref.index ?? null, image: ref.image },
+      );
+      if (!restored.changed) continue;
+      await assets.updateOne(
+        { _id: picAssetId, projectId: entry.projectId },
+        { $set: { [field]: restored.next, updatedAt: new Date() } as never },
+      );
+    }
+  }
+
+  private registerTrashKinds() {
+    const requireParentNodes = async (db: Db, entry: MvTrashEntry) => {
+      if (!entry.projectId) return;
+      for (const [key, message] of [
+        ["parentId", "المجلد الأب لهذا العنصر محذوف. استعد المجلد الأب أولاً."],
+        ["folderId", "المجلد الذي يحتوي هذا العنصر محذوف. استعد المجلد أولاً."],
+        ["picAssetId", "الأصل الذي ينتمي إليه هذا العنصر محذوف. استعد الأصل أولاً."],
+      ] as const) {
+        const nodeId = tryCoerceToObjectId(entry.data[key]);
+        if (nodeId && !(await this.folderNodeName(db, entry.projectId, nodeId))) {
+          throw new BadRequestException(message);
+        }
+      }
+    };
+    const restoreMedia = (db: Db, entry: MvTrashEntry, payload: Array<{ role: string; doc: unknown }>) =>
+      this.restoreTrashedMediaRefs(db, entry, payload);
+
+    registerMvTrashKind("sheet", { beforeRestore: requireParentNodes });
+    registerMvTrashKind("folder", { beforeRestore: requireParentNodes });
+    registerMvTrashKind("assetFolder", { beforeRestore: requireParentNodes });
+    registerMvTrashKind("projectFile", { beforeRestore: requireParentNodes, restore: restoreMedia });
+    registerMvTrashKind("assetVoiceNote", { beforeRestore: requireParentNodes, restore: restoreMedia });
+    registerMvTrashKind("assetImage", {
+      beforeRestore: requireParentNodes,
+      restore: restoreMedia,
+      purge: async (db, entry, payload) => {
+        // كائن ‎Spaces‎ يُتلف فقط إن كان ملكاً للنظام ولم يعد أي أصل يشير إليه.
+        for (const row of payload) {
+          if (row.role !== "mediaRef") continue;
+          const image = (row.doc as { image?: unknown } | null)?.image;
+          if (!image || typeof image !== "object" || image instanceof ObjectId) continue;
+          const ref = image as { publicId?: unknown; url?: unknown };
+          if (typeof ref.publicId !== "string" || typeof ref.url !== "string") continue;
+          if (ref.url !== this.inspectorSpaces.publicUrlForKey(ref.publicId)) continue;
+          const stillUsed = await db.collection(ASSETS_COLLECTION).countDocuments({
+            ...(entry.projectId ? { projectId: entry.projectId } : {}),
+            $or: ["images", "images.plate", "images.odometer", "images.brand", "images.details", "images.other"]
+              .map((path) => ({ [`${path}.publicId`]: ref.publicId })),
+          }, { limit: 1 });
+          if (!stillUsed) await this.inspectorSpaces.deleteObject(ref.publicId).catch(() => undefined);
+        }
+      },
+    });
+    registerMvTrashKind("inspectionSite", {
+      restore: async (db, entry) => {
+        // الموقع عاد إلى ‎`locations`‎؛ نعيد معه أرقام تواصله وربط ملفاته.
+        if (!entry.projectId) return;
+        const projects = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+        const project = await projects.findOne(
+          { _id: entry.projectId }, { projection: { contacts: 1, inspectorFiles: 1 } });
+        if (!project) return;
+        const siteId = String(entry.data.siteId ?? "");
+        const fileIds = new Set((Array.isArray(entry.data.fileIds) ? entry.data.fileIds : []).map(String));
+        const contacts = Array.isArray(project.contacts) ? [...project.contacts] : [];
+        for (const contact of (Array.isArray(entry.data.contacts) ? entry.data.contacts : []) as MvProjectContact[]) {
+          const exists = contacts.some((row) =>
+            row.locationId === contact.locationId && row.type === contact.type && row.phone === contact.phone);
+          if (!exists) contacts.push(contact);
+        }
+        const inspectorFiles = (Array.isArray(project.inspectorFiles) ? project.inspectorFiles : []).map((file) =>
+          siteId && fileIds.has(file.id) && !(file.locationIds ?? []).includes(siteId)
+            ? { ...file, locationIds: [...(file.locationIds ?? []), siteId] }
+            : file);
+        await projects.updateOne({ _id: project._id }, { $set: { contacts, inspectorFiles } });
+      },
+    });
+    registerMvTrashKind("reportBuiltInSection", {
+      restore: async (db, entry) => {
+        if (!entry.projectId) return;
+        await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+          { _id: entry.projectId },
+          { $pull: { "reportData.reportHiddenAnchorIds": String(entry.data.anchorId ?? "") }, $set: { updatedAt: new Date() } },
+        );
+      },
+    });
+    registerMvTrashKind("sheetColumn", {
+      beforeRestore: async (db, entry) => {
+        const sheet = await db.collection<MvSheetDoc>(MV_SHEETS_COLLECTION)
+          .findOne({ _id: tryCoerceToObjectId(entry.data.sheetId) ?? new ObjectId() }, { projection: { headers: 1 } });
+        if (!sheet) throw new BadRequestException("الجدول الذي ينتمي إليه هذا العمود محذوف. استعد الجدول أولاً.");
+        if ((sheet.headers ?? []).includes(String(entry.data.header ?? ""))) {
+          throw new BadRequestException("يوجد عمود بالاسم نفسه في الجدول حالياً.");
+        }
+      },
+      restore: async (db, entry, payload) => {
+        const sheets = db.collection<MvSheetDoc>(MV_SHEETS_COLLECTION);
+        const sheet = await sheets.findOne({ _id: tryCoerceToObjectId(entry.data.sheetId) ?? new ObjectId() });
+        if (!sheet) return;
+        const header = String(entry.data.header ?? "");
+        const headers = [...(sheet.headers ?? [])];
+        const at = Math.max(0, Math.min(Number(entry.data.index) || 0, headers.length));
+        const values = ((payload.find((row) => row.role === "column")?.doc as { values?: unknown[] } | undefined)?.values ?? []);
+        const rows = sheet.rowValues ?? recordsToRowValues(headers, sheet.rows ?? []);
+        headers.splice(at, 0, header);
+        const rowValues = rows.map((row, rowIndex) => {
+          const next = [...row];
+          while (next.length < headers.length - 1) next.push(null);
+          next.splice(at, 0, (values[rowIndex] ?? null) as string | number | null);
+          return next;
+        });
+        await sheets.updateOne(
+          { _id: sheet._id },
+          { $set: { headers, rowValues, updatedAt: new Date() }, $unset: { rows: "" } },
+        );
+      },
+    });
+    registerMvTrashKind("reportDataReset", {
+      restore: async (db, entry, payload) => {
+        const snapshot = payload.find((row) => row.role === "reportData")?.doc;
+        if (!entry.projectId || !snapshot || typeof snapshot !== "object") return;
+        const projects = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+        const project = await projects.findOne(
+          { _id: entry.projectId }, { projection: { referenceNumber: 1, "reportData.reportReference": 1 } });
+        if (!project) return;
+        const reportData = sanitizeReportData(snapshot as Record<string, unknown>);
+        // الرقم المرجعي ملك المشروع الحالي ولا يعود مع اللقطة.
+        const reference = trimReferenceNumber(project.reportData?.reportReference) ||
+          trimReferenceNumber(project.referenceNumber);
+        if (reference) reportData.reportReference = reference;
+        await projects.updateOne({ _id: project._id }, { $set: { reportData, updatedAt: new Date() } });
+      },
+    });
+    registerMvTrashKind("reportText", {
+      restore: async (db, entry, payload) => {
+        if (!entry.projectId) return;
+        const projects = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+        const project = await projects.findOne(
+          { _id: entry.projectId }, { projection: { "reportData.reportTextOverrides": 1 } });
+        const key = String(entry.data.key ?? "");
+        const overrides = { ...(project?.reportData?.reportTextOverrides ?? {}) };
+        // إن كتب المستخدم نصاً جديداً بعد الحذف فلا نستبدله.
+        if (!key || (overrides[key] ?? "") !== "") {
+          throw new BadRequestException("هذا النص أُعيدت كتابته بعد الحذف؛ احذف النص الحالي أولاً لاستعادة السابق.");
+        }
+        const previous = payload.find((row) => row.role === "text")?.doc;
+        if (entry.data.hadOverride && typeof previous === "string") overrides[key] = previous;
+        else delete overrides[key];
+        await projects.updateOne(
+          { _id: entry.projectId },
+          { $set: { "reportData.reportTextOverrides": overrides, updatedAt: new Date() } },
+        );
+      },
+    });
+    registerMvTrashKind("inspectorFile", {
+      restore: async (db, entry) => {
+        // مواقع المعاينة قد تكون تغيّرت: يبقى الملف مرتبطاً بالمواقع الموجودة فقط (أو عاماً).
+        const project = entry.projectId
+          ? await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+            .findOne({ _id: entry.projectId }, { projection: { locations: 1, inspectorFiles: 1 } })
+          : null;
+        if (!project || !Array.isArray(project.inspectorFiles)) return;
+        const known = new Set((project.locations ?? []).map((location) => String((location as { id?: unknown }).id ?? "")));
+        let changed = false;
+        const files = project.inspectorFiles.map((file) => {
+          if (!Array.isArray(file.locationIds)) return file;
+          const locationIds = file.locationIds.filter((id) => known.has(String(id)));
+          if (locationIds.length === file.locationIds.length) return file;
+          changed = true;
+          return { ...file, locationIds };
+        });
+        if (changed) {
+          await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+            .updateOne({ _id: project._id }, { $set: { inspectorFiles: files } });
+        }
+      },
+      purge: async (db, _entry, payload) => {
+        const item = payload.find((row) => row.role === "item")?.doc;
+        for (const file of normalizeInspectorFilesArray(item ? [item] : [])) {
+          await this.deleteInspectorBlobFromStores(db, file);
+        }
+      },
+    });
   }
 
   private async deleteStoredFiles(
@@ -6365,7 +6942,21 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (b.reportData !== undefined) {
-      const sanitized = sanitizeReportData(b.reportData);
+      // Several screens save one setting at a time from a lighter copy of the
+      // project (list cards, image hubs …). A key the request does not carry
+      // was not edited, so it keeps its stored value instead of being wiped —
+      // custom fields, the report-data model and its copy are never lost
+      // because a partial payload arrived. Clearing a value is still explicit
+      // ("" / [] / null in the payload).
+      const incoming =
+        b.reportData && typeof b.reportData === "object" && !Array.isArray(b.reportData)
+          ? (b.reportData as Record<string, unknown>)
+          : {};
+      const stored =
+        currentProject.reportData && typeof currentProject.reportData === "object"
+          ? (currentProject.reportData as unknown as Record<string, unknown>)
+          : {};
+      const sanitized = sanitizeReportData({ ...stored, ...incoming });
       if (!trimReferenceNumber(sanitized.reportReference)) {
         const keep =
           trimReferenceNumber(currentProject.reportData?.reportReference) ||
@@ -6472,6 +7063,26 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       { returnDocument: "after" },
     );
     if (!updated) throw new NotFoundException("Project not found");
+    // ما اختفى بهذا الحفظ (حقل، قسم، موقع، مرفق…) ينتقل إلى سلة المحذوفات.
+    try {
+      if ((b as { reportDataReset?: unknown }).reportDataReset === true && $set.reportData && currentProject.reportData) {
+        await createMvTrashEntry(db, ctx, {
+          kind: "reportDataReset",
+          label: currentProject.name,
+          ...this.projectTrashScope(currentProject),
+          payload: [{ role: "reportData", doc: currentProject.reportData }],
+        });
+      } else {
+        await this.trashRemovedProjectItems(db, ctx, currentProject, updated, Object.keys($set));
+        if ($set.reportData) {
+          const labels = (b as { trashLabels?: unknown }).trashLabels;
+          await this.trashReportDataSoftRemovals(db, ctx, currentProject, updated,
+            labels && typeof labels === "object" ? labels as Record<string, unknown> : {});
+        }
+      }
+    } catch (error) {
+      this.logger.error(`trash project items ${_id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const updatedDisplayNumber = await this.ensureDisplayNumberForProject(db, updated);
     return {
       ok: true as const,
@@ -6995,6 +7606,86 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /**
+   * Autosave of the inspection sites (locations + their phones). Lighter than
+   * `updateProject`: no report data / workspaces are read or returned.
+   * Files attached to a site that is removed are kept as general project
+   * files (their link to the removed site is dropped atomically), so a file
+   * is never lost nor left pointing at a site that no longer exists.
+   */
+  async saveProjectLocations(
+    id: string,
+    ctx: MvAccessContext,
+    body?: { locations?: unknown; contacts?: unknown } | null,
+  ) {
+    const db = await getMongoDb();
+    const _id = toId(id);
+    const before = await this.loadProjectLightForAccess(db, _id, ctx, { locations: 1, contacts: 1, inspectorFiles: 1 });
+    const sanitizedLocations = sanitizeProjectLocations(body?.locations ?? []);
+    const contacts = mergeProjectContactsWithLocationPhones(body?.contacts ?? [], sanitizedLocations);
+    const locations = mergeProjectLocationsWithContacts(sanitizedLocations, contacts);
+    const keptIds = locations.map(
+      (location, index) => sanitizeOptionalText(location.id, 80) || `site-${index + 1}`,
+    );
+    const now = new Date();
+    const updated = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOneAndUpdate(
+      { _id },
+      [
+        {
+          $set: {
+            locations: { $literal: locations },
+            contacts: { $literal: contacts },
+            updatedAt: { $literal: now },
+            inspectorFiles: {
+              $map: {
+                input: { $ifNull: ["$inspectorFiles", []] },
+                as: "file",
+                in: {
+                  $cond: [
+                    { $isArray: "$$file.locationIds" },
+                    {
+                      $mergeObjects: [
+                        "$$file",
+                        {
+                          locationIds: {
+                            $filter: {
+                              input: "$$file.locationIds",
+                              as: "siteId",
+                              cond: { $in: ["$$siteId", { $literal: keptIds }] },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                    "$$file",
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+      {
+        returnDocument: "after",
+        projection: { locations: 1, contacts: 1, inspectorFiles: 1, inspectionAssignments: 1 },
+      },
+    );
+    if (!updated) throw new NotFoundException("Project not found");
+    await this.trashRemovedProjectItems(db, ctx, before, updated, ["locations"]).catch((error) =>
+      this.logger.error(`trash project sites ${_id}: ${error instanceof Error ? error.message : String(error)}`));
+    const savedLocations = sanitizeProjectLocations(updated.locations, false);
+    return {
+      ok: true as const,
+      locations: savedLocations,
+      contacts: sanitizeProjectContacts(updated.contacts, false),
+      inspectionAssignments: sanitizeInspectionAssignments(updated.inspectionAssignments, savedLocations).map(
+        serializeInspectionAssignment,
+      ),
+      inspectorFiles: normalizeInspectorFilesArray(updated.inspectorFiles).map(serializeInspectorFileForClient),
+      updatedAt: now.toISOString(),
+    };
+  }
+
   async uploadInspectorFile(
     projectId: string,
     file: Express.Multer.File,
@@ -7012,11 +7703,21 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     const decodedName = sanitizeUploadedFileName(decodeUploadFilename(file.originalname || "upload"));
     const db = await getMongoDb();
     const _id = toId(projectId);
-    const project = await this.loadProjectForAccess(db, _id, ctx);
+    const project = await this.loadProjectLightForAccess(db, _id, ctx, { locations: 1 });
     const locationIds = sanitizeLocationIdSelection(
       locationIdsRaw,
       sanitizeProjectLocations(project.locations, false),
     );
+    // A file sent to a specific site must land on that site: never file it
+    // silently under "all sites" because the site is unknown.
+    const requestedSiteIds = parseStringArrayField(locationIdsRaw)
+      .map((item) => sanitizeOptionalText(item, 80))
+      .filter(Boolean);
+    const wantsAllSites =
+      requestedSiteIds.length === 0 || requestedSiteIds.some((item) => item === "__all__" || item === "all");
+    if (!wantsAllSites && locationIds.length === 0) {
+      throw new BadRequestException("موقع المعاينة المحدد غير محفوظ في المشروع. أعد المحاولة.");
+    }
 
     const logicalType = inspectorLogicalTypeFromMime(file.mimetype || "", decodedName);
     const id = randomUUID();
@@ -7058,11 +7759,11 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       ...(locationIds.length > 0 ? { locationIds } : {}),
     };
 
-    await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+    const updated = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOneAndUpdate(
       { _id },
       { $push: { inspectorFiles: row }, $set: { updatedAt: now } },
+      { returnDocument: "after", projection: { inspectorFiles: 1 } },
     );
-    const updated = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne({ _id });
     const list = normalizeInspectorFilesArray(updated?.inspectorFiles).map(serializeInspectorFileForClient);
     return {
       ok: true as const,
@@ -7074,19 +7775,34 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   async deleteInspectorFile(projectId: string, fileId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const _id = toId(projectId);
-    const project = await this.loadProjectForAccess(db, _id, ctx);
+    const project = await this.loadProjectLightForAccess(db, _id, ctx, { inspectorFiles: 1 });
     const files = normalizeInspectorFilesArray(project.inspectorFiles);
     const target = files.find((f) => f.id === fileId.trim());
     if (!target) {
       throw new NotFoundException("الملف غير موجود.");
     }
-    await this.deleteInspectorBlobFromStores(db, target);
+    // الملف نفسه يبقى في التخزين؛ يُتلف فقط عند الحذف النهائي من السلة.
+    const rawFiles: unknown[] = Array.isArray(project.inspectorFiles) ? project.inspectorFiles : [];
+    const rawIndex = rawFiles.findIndex((f) => (f as { id?: unknown } | null)?.id === target.id);
+    await createMvTrashEntry(db, ctx, {
+      kind: "inspectorFile",
+      label: target.name,
+      ...this.projectTrashScope(project),
+      embedded: {
+        collection: MV_PROJECTS_COLLECTION,
+        docId: _id,
+        path: [{ field: "inspectorFiles" }],
+        index: rawIndex >= 0 ? rawIndex : files.length,
+        idKey: "id",
+      },
+      payload: [{ role: "item", doc: rawIndex >= 0 ? rawFiles[rawIndex] : target }],
+    });
     const now = new Date();
-    await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).updateOne(
+    const refreshed = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOneAndUpdate(
       { _id },
       { $pull: { inspectorFiles: { id: target.id } }, $set: { updatedAt: now } },
+      { returnDocument: "after", projection: { inspectorFiles: 1 } },
     );
-    const refreshed = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne({ _id });
     return {
       ok: true as const,
       removedId: target.id,
@@ -7129,7 +7845,9 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   ) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    const project = await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectLightForAccess(db, pid, ctx, {
+      inspectorFiles: { $elemMatch: { id: fileId.trim() } },
+    });
     const files = normalizeInspectorFilesArray(project.inspectorFiles);
     const entry = files.find((f) => f.id === fileId.trim());
     if (!entry) {
@@ -7497,15 +8215,146 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async restoreProject(id: string, ctx: MvAccessContext) {
-    if (!ctx.userId || (!ctx.isSuperAdmin && ctx.userRole !== "company_admin")) {
-      throw new ForbiddenException("استعادة المشاريع متاحة لمدير الشركة فقط.");
+  /**
+   * سلة المحذوفات الموحّدة: المشاريع المحذوفة + كل عنصر آخر حُذف داخل النظام.
+   * كل مستخدم يرى ما حذفه بنفسه؛ مدير الشركة يرى محذوفات كل مستخدمي شركته.
+   */
+  async listTrash(ctx: MvAccessContext) {
+    if (!ctx.userId || (!ctx.isSuperAdmin && !ctx.companyId)) {
+      throw new ForbiddenException("غير مصرح بعرض سلة المحذوفات.");
     }
+    const db = await getMongoDb();
+    const admin = isMvTrashAdmin(ctx);
+    const userOid = tryParseObjectId(ctx.userId);
+    const projectsCol = db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION);
+    const projectScope = ctx.isSuperAdmin ? {} : this.buildProjectsVisibleToCompanyFilter(ctx.companyId!);
+    const [entries, deletedProjects] = await Promise.all([
+      listMvTrashEntries(db, ctx),
+      projectsCol.find(
+        { ...projectScope, ...(admin ? {} : { deletedBy: userOid ?? new ObjectId() }), deletedAt: { $type: "date" } },
+        { projection: { name: 1, companyId: 1, displayNumber: 1, referenceNumber: 1, deletedAt: 1, deletedBy: 1 } },
+      ).sort({ deletedAt: -1 }).toArray(),
+    ]);
+
+    const unique = (values: Array<unknown>) =>
+      [...new Set(values.map((value) => tryCoerceToObjectId(value)?.toString()).filter((id): id is string => !!id))]
+        .map((id) => new ObjectId(id));
+    const auth = getAuthCollections(db);
+    const userIds = unique([...entries.map((entry) => entry.deletedBy), ...deletedProjects.map((row) => row.deletedBy)]);
+    const parentProjectIds = unique(entries.map((entry) => entry.projectId));
+    const companyIds = ctx.isSuperAdmin
+      ? unique([...entries.map((entry) => entry.companyId), ...deletedProjects.map((row) => row.companyId)])
+      : [];
+    const [users, parentProjects, companies] = await Promise.all([
+      userIds.length ? auth.users.find({ _id: { $in: userIds } },
+        { projection: { username: 1, valuationReportDisplayName: 1 } }).toArray() : [],
+      parentProjectIds.length ? projectsCol.find({ _id: { $in: parentProjectIds } },
+        { projection: { name: 1, deletedAt: 1 } }).toArray() : [],
+      companyIds.length ? auth.companies.find({ _id: { $in: companyIds } }, { projection: { name: 1 } }).toArray() : [],
+    ]);
+    const userNames = new Map(users.map((user) =>
+      [user._id.toString(), user.valuationReportDisplayName?.trim() || user.username]));
+    const projectById = new Map(parentProjects.map((row) => [row._id.toString(), row]));
+    const companyNames = new Map(companies.map((company) => [company._id.toString(), company.name]));
+    const now = new Date();
+    const describe = (deletedAt: Date, deletedBy: unknown, companyId: unknown) => {
+      const byId = tryCoerceToObjectId(deletedBy)?.toString() ?? null;
+      const companyKey = tryCoerceToObjectId(companyId)?.toString() ?? null;
+      const restoreUntil = mvTrashRestoreUntil(deletedAt, ctx);
+      return {
+        deletedAt: deletedAt.toISOString(),
+        deletedById: byId,
+        deletedByName: byId ? userNames.get(byId) ?? null : null,
+        deletedByMe: !!byId && byId === ctx.userId,
+        companyName: companyKey ? companyNames.get(companyKey) ?? null : null,
+        restoreUntil: restoreUntil.toISOString(),
+        purgeAt: addArchiveYears(deletedAt, 1).toISOString(),
+        canRestore: restoreUntil > now,
+        canPermanentlyDelete: admin,
+      };
+    };
+
+    const items = [
+      ...deletedProjects.map((row) => ({
+        id: row._id.toString(),
+        kind: "project",
+        label: row.name,
+        location: null as string | null,
+        count: 1,
+        projectId: row._id.toString() as string | null,
+        projectName: row.name as string | null,
+        projectDeleted: true,
+        referenceNumber: row.referenceNumber ?? null,
+        displayNumber: row.displayNumber ?? null,
+        ...describe(row.deletedAt!, row.deletedBy, row.companyId),
+      })),
+      ...entries.map((entry) => {
+        const parent = entry.projectId ? projectById.get(entry.projectId.toString()) : undefined;
+        return {
+          id: entry._id.toString(),
+          kind: entry.kind,
+          label: entry.label,
+          location: entry.location ?? null,
+          count: entry.count ?? 1,
+          projectId: entry.projectId?.toString() ?? null,
+          projectName: parent?.name ?? null,
+          projectDeleted: !!entry.projectId && (!parent || !!parent.deletedAt),
+          referenceNumber: null as string | null,
+          displayNumber: null as number | null,
+          ...describe(entry.deletedAt, entry.deletedBy, entry.companyId),
+        };
+      }),
+    ].sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+
+    return {
+      items,
+      canSeeAll: admin,
+      canPermanentlyDelete: admin,
+      isSuperAdmin: ctx.isSuperAdmin,
+      restoreDays: MV_TRASH_COMPANY_RESTORE_DAYS,
+    };
+  }
+
+  /** استعادة عنصر من السلة إلى موضعه الأصلي (مشروعاً كان أو أي عنصر آخر). */
+  async restoreTrashItem(id: string, ctx: MvAccessContext) {
+    const db = await getMongoDb();
+    const _id = toId(id);
+    const isProject = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+      .countDocuments({ _id, deletedAt: { $type: "date" } }, { limit: 1 });
+    if (isProject) {
+      await this.restoreProject(id, ctx);
+      return { ok: true, kind: "project", projectId: id };
+    }
+    const entry = await restoreMvTrashEntry(db, _id, ctx);
+    if (entry.projectId) this.assetRevisionCache.delete(entry.projectId.toString());
+    return { ok: true, kind: entry.kind, projectId: entry.projectId?.toString() ?? null };
+  }
+
+  /** حذف نهائي من السلة — لمدير الشركة والسوبر أدمن فقط. */
+  async purgeTrashItem(id: string, ctx: MvAccessContext) {
+    const db = await getMongoDb();
+    const _id = toId(id);
+    const isProject = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION)
+      .countDocuments({ _id, deletedAt: { $type: "date" } }, { limit: 1 });
+    if (isProject) {
+      await this.permanentlyDeleteProject(id, ctx);
+      return { ok: true, kind: "project" };
+    }
+    const entry = await purgeMvTrashEntry(db, _id, ctx);
+    return { ok: true, kind: entry.kind };
+  }
+
+  async restoreProject(id: string, ctx: MvAccessContext) {
+    if (!ctx.userId) throw new ForbiddenException("يجب تسجيل الدخول لاستعادة المشاريع.");
     const db = await getMongoDb();
     const _id = toId(id);
     const project = await db.collection<MvProjectDoc>(MV_PROJECTS_COLLECTION).findOne({ _id });
     if (!project || !project.deletedAt) throw new NotFoundException("المشروع المحذوف غير موجود.");
     this.assertProjectInScope(project, ctx);
+    // المدير يستعيد أي مشروع في شركته؛ غيره يستعيد المشروع الذي حذفه بنفسه فقط.
+    if (!isMvTrashAdmin(ctx) && project.deletedBy?.toString() !== ctx.userId) {
+      throw new ForbiddenException("يمكنك استعادة المشاريع التي حذفتها أنت فقط.");
+    }
     const now = new Date();
     const restoreUntil = ctx.isSuperAdmin
       ? addArchiveYears(project.deletedAt, 1)
@@ -7589,6 +8438,8 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`purge project ${claimed._id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    await purgeExpiredMvTrash(db).catch((error) =>
+      this.logger.error(`trash purge: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   private async purgeProjectData(db: Db, project: MvProjectMongoDoc) {
@@ -7608,6 +8459,8 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       }
     }
     for (const key of imageKeys) await this.inspectorSpaces.deleteObject(key);
+    // محذوفات المشروع التي ما زالت في السلة (وملفاتها المفصولة) تُتلف معه.
+    await purgeMvTrashForProject(db, projectId);
     await this.deleteStoredFiles(db, { "metadata.projectId": projectId });
     for (const name of [MV_SHEETS_COLLECTION, MV_ITEMS_COLLECTION, MV_SUBPROJECTS_COLLECTION,
       "mv_attachment_uploads",
@@ -8315,7 +9168,7 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
 
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
     const sid = toId(subId);
     if (ctx.userRole === "inspector") {
       await this.assertInspectorAccessToFolderId(db, pid, sid, ctx);
@@ -8526,6 +9379,11 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     // changing updatedAt or triggering a database change event for an unchanged asset.
     let nextPic = pic as PicAssetMongoDoc | null;
     if (Object.keys($set).length > 0) {
+      // الصور/الملاحظات الصوتية التي اختفت من القائمة تُنقل إلى السلة بموضعها داخل الأصل.
+      for (const field of ["images", "voiceNotes"] as const) {
+        if ($set[field] === undefined) continue;
+        await this.trashRemovedPicAssetMedia(db, ctx, project, pic as PicAssetMongoDoc, field, $set[field]);
+      }
       $set.isAssetFolder = true;
       $set.updatedAt = now;
       nextPic = (await pa.findOneAndUpdate(
@@ -8575,10 +9433,14 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async deleteSubProject(projectId: string, subId: string, ctx: MvAccessContext) {
+  /**
+   * يحذف مجلداً/أصلاً بمحتوياته. الافتراضي نقل إلى سلة المحذوفات (قابل للاستعادة
+   * إلى الموضع نفسه)؛ ‎`hard`‎ للتنظيف الداخلي فقط (نقل بين مشروعين أو تراجع عن استيراد).
+   */
+  async deleteSubProject(projectId: string, subId: string, ctx: MvAccessContext, options: { hard?: boolean } = {}) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
     const sid = toId(subId);
     const sp = db.collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION);
     const it = db.collection<MvItemDoc>(MV_ITEMS_COLLECTION);
@@ -8591,15 +9453,33 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       }
       const ids = await this.collectDescendantSubProjectIds(db, pid, sid);
       const picTied = await this.collectAllPicForMvDeletion(db, pid, ids);
-      await db.collection(MV_SHEETS_COLLECTION).deleteMany({ subProjectId: { $in: ids } });
-      await this.deleteStoredFiles(db, {
+      const filesFilter = {
         "metadata.projectId": pid,
         $or: [
           { "metadata.subProjectId": { $in: ids } },
           { "metadata.subProjectId": { $in: picTied } },
           { "metadata.picAssetId": { $in: picTied } },
         ],
-      });
+      };
+      if (!options.hard) {
+        const node = (sub ?? item)!;
+        await this.trashFolderTree(db, ctx, project, {
+          kind: "folder",
+          label: node.name,
+          rootId: sid,
+          parentId: getParentIdFromDoc(node as MvSubProjectMongoDoc),
+          filesFilter,
+          docs: [
+            { collection: MV_SHEETS_COLLECTION, filter: { subProjectId: { $in: ids } } },
+            { collection: ASSETS_COLLECTION, filter: { _id: { $in: picTied }, ...MV_PHOTO_FOLDER_FILTER } },
+            { collection: MV_SUBPROJECTS_COLLECTION, filter: { _id: { $in: ids }, projectId: pid } },
+            { collection: MV_ITEMS_COLLECTION, filter: { _id: { $in: ids }, projectId: pid } },
+          ],
+        });
+      } else {
+        await this.deleteStoredFiles(db, filesFilter);
+      }
+      await db.collection(MV_SHEETS_COLLECTION).deleteMany({ subProjectId: { $in: ids } });
       await pa.deleteMany({ _id: { $in: picTied }, ...MV_PHOTO_FOLDER_FILTER });
       const delMv = await sp.deleteMany({ _id: { $in: ids }, projectId: pid });
       const delIt = await it.deleteMany({ _id: { $in: ids }, projectId: pid });
@@ -8622,13 +9502,28 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       await this.assertInspectorAccessToFolderId(db, pid, sid, ctx);
     }
     const picIds = await this.collectDescendantPicAssetIds(db, pid, sid);
-    await this.deleteStoredFiles(db, {
+    const picFilesFilter = {
       "metadata.projectId": pid,
       $or: [
         { "metadata.subProjectId": { $in: picIds } },
         { "metadata.picAssetId": { $in: picIds } },
       ],
-    });
+    };
+    if (!options.hard) {
+      await this.trashFolderTree(db, ctx, project, {
+        kind: "assetFolder",
+        label: picAssetDisplayName(picNode),
+        rootId: sid,
+        parentId: picNode.parent ?? null,
+        filesFilter: picFilesFilter,
+        docs: [{
+          collection: ASSETS_COLLECTION,
+          filter: { _id: { $in: picIds }, projectId: pid, ...MV_PHOTO_FOLDER_FILTER },
+        }],
+      });
+    } else {
+      await this.deleteStoredFiles(db, picFilesFilter);
+    }
     const delP = await pa.deleteMany({
       _id: { $in: picIds },
       projectId: pid,
@@ -8642,19 +9537,31 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   async deleteAllSubProjects(projectId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
 
     const subs = await db
       .collection<MvSubProjectDoc>(MV_SUBPROJECTS_COLLECTION)
       .find({ projectId: pid })
       .project({ _id: 1 })
       .toArray();
+    const ids = subs.map((s) => s._id);
 
-    if (subs.length > 0) {
-      const ids = subs.map((s) => s._id);
+    await this.trashFolderTree(db, ctx, project, {
+      kind: "allFolders",
+      label: project.name,
+      rootId: null,
+      parentId: null,
+      filesFilter: { "metadata.projectId": pid },
+      docs: [
+        ...(ids.length > 0 ? [{ collection: MV_SHEETS_COLLECTION, filter: { subProjectId: { $in: ids } } }] : []),
+        { collection: ASSETS_COLLECTION, filter: { projectId: pid, ...MV_PHOTO_FOLDER_FILTER } },
+        { collection: MV_ITEMS_COLLECTION, filter: { projectId: pid } },
+        { collection: MV_SUBPROJECTS_COLLECTION, filter: { projectId: pid } },
+      ],
+    });
+    if (ids.length > 0) {
       await db.collection(MV_SHEETS_COLLECTION).deleteMany({ subProjectId: { $in: ids } });
     }
-    await this.deleteStoredFiles(db, { "metadata.projectId": pid });
     await db
       .collection<AssetDoc>(ASSETS_COLLECTION)
       .deleteMany({ projectId: pid, ...MV_PHOTO_FOLDER_FILTER });
@@ -9231,24 +10138,23 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   async deleteValuationExcelFile(projectId: string, fileId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
     const fid = toId(fileId);
     const file = await this.getStoredFileDoc(db, pid, fid);
     if (file.metadata?.scope !== MV_VALUATION_EXCEL_SCOPE) {
       throw new NotFoundException("File not found");
     }
-    if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
-      try {
-        await this.inspectorSpaces.deleteObject(file.metadata.spacesKey.trim());
-      } catch (err) {
-        this.logger.warn(
-          `deleteValuationExcelFile Spaces: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      await db.collection(MV_FILES_FILES_COLLECTION).deleteOne({ _id: fid, "metadata.projectId": pid });
-    } else {
-      await this.getFilesBucket(db).delete(fid);
-    }
+    // نقل إلى السلة: الملف يبقى في التخزين ويُفصل عن المشروع حتى الاستعادة أو الحذف النهائي.
+    const trashId = new ObjectId();
+    await createMvTrashEntry(db, ctx, {
+      _id: trashId,
+      kind: "valuationExcelFile",
+      label: file.filename || "Excel",
+      ...this.projectTrashScope(project),
+      data: { fileId: fid },
+      hasFiles: true,
+    });
+    await detachMvFilesToTrash(db, trashId, { _id: fid, "metadata.projectId": pid });
     return { ok: true };
   }
 
@@ -10844,7 +11750,8 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       });
       const nodeIds = new Set(nodes.map(node => node.id.toString()));
       for (const node of nodes.filter(node => !node.parent || !nodeIds.has(node.parent.toString()))) {
-        await this.deleteSubProject(job.sourceProjectId, node.id.toString(), ctx);
+        // نقل وليس حذفاً: المحتوى صار في المشروع الهدف، فلا يُسجَّل في السلة.
+        await this.deleteSubProject(job.sourceProjectId, node.id.toString(), ctx, { hard: true });
       }
       for (const key of copiedSourceKeys) {
         try { await this.inspectorSpaces.deleteObject(key); }
@@ -10855,7 +11762,7 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     job.updatedAt = Date.now();
     } catch (error) {
       if (!sourceCleanupStarted) {
-        try { await this.deleteSubProject(job.targetProjectId, container._id, ctx); }
+        try { await this.deleteSubProject(job.targetProjectId, container._id, ctx, { hard: true }); }
         catch (cleanupError) {
           this.logger.warn(`asset image import rollback: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
         }
@@ -10950,7 +11857,7 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   async deleteProjectFile(projectId: string, fileId: string, ctx: MvAccessContext) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
     const fid = toId(fileId);
     let file: Awaited<ReturnType<typeof this.getStoredFileDoc>> | null = null;
     try {
@@ -10961,25 +11868,6 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
         return { ok: true, alreadyGone: true };
       }
       throw err;
-    }
-    if (file.metadata?.storage === "digitalocean" && file.metadata.spacesKey?.trim()) {
-      try {
-        await this.inspectorSpaces.deleteObject(file.metadata.spacesKey.trim());
-      } catch (err) {
-        this.logger.warn(
-          `deleteProjectFile Spaces: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      await db.collection(MV_FILES_FILES_COLLECTION).deleteOne({ _id: fid, "metadata.projectId": pid });
-    } else {
-      try {
-        await this.getFilesBucket(db).delete(fid);
-      } catch (err) {
-        this.logger.warn(
-          `deleteProjectFile GridFS: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      await db.collection(MV_FILES_FILES_COLLECTION).deleteOne({ _id: fid, "metadata.projectId": pid });
     }
     const pa = db.collection<AssetDoc>(ASSETS_COLLECTION);
     const folders = await pa
@@ -10992,9 +11880,13 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       .toArray();
     const now = new Date();
     const ops: AnyBulkWriteOperation<AssetDoc>[] = [];
+    const mediaRefs: Array<{ role: string; doc: unknown }> = [];
     for (const folder of folders) {
       const { next, changed } = removePicAssetImageByFileId(folder.images, fid);
       if (!changed) continue;
+      for (const placement of locatePicAssetMedia(folder.images, (image) => picAssetImageMatchesFileId(image, fid))) {
+        mediaRefs.push({ role: "mediaRef", doc: { picAssetId: folder._id, field: "images", ...placement } });
+      }
       ops.push({
         updateOne: {
           filter: { _id: folder._id, projectId: pid },
@@ -11002,6 +11894,35 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
+
+    // نقل إلى السلة بدل الإتلاف: الملف يُفصل عن المشروع ومراجعه داخل الأصول تُحفظ بمواضعها.
+    // إن كانت الصورة نفسها أُزيلت للتو من قائمة الأصل (طلب سابق) يُلحق الملف بسجلها ليستعادا معاً.
+    const meta = file.metadata;
+    const isAssetImage = meta?.scope === "asset-images";
+    const sibling = isAssetImage
+      ? await db.collection<MvTrashEntry>(MV_TRASH_COLLECTION).findOne({
+        projectId: pid, kind: "assetImage", "data.fileId": fid, hasFiles: { $ne: true },
+      })
+      : null;
+    let trashId = sibling?._id;
+    if (sibling) {
+      await db.collection<MvTrashEntry>(MV_TRASH_COLLECTION).updateOne({ _id: sibling._id }, { $set: { hasFiles: true } });
+    } else {
+      trashId = new ObjectId();
+      const picAssetId = tryCoerceToObjectId(meta?.picAssetId) ?? null;
+      const folderId = picAssetId ? null : tryCoerceToObjectId(meta?.subProjectId) ?? null;
+      await createMvTrashEntry(db, ctx, {
+        _id: trashId,
+        kind: isAssetImage ? "assetImage" : "projectFile",
+        label: file.filename || meta?.relativePath || "file",
+        location: (await this.folderNodeName(db, pid, picAssetId ?? folderId)) ?? (meta?.folderPath?.trim() || null),
+        ...this.projectTrashScope(project),
+        data: { fileId: fid, picAssetId, folderId },
+        payload: mediaRefs,
+        hasFiles: true,
+      });
+    }
+    await detachMvFilesToTrash(db, trashId!, { _id: fid, "metadata.projectId": pid });
     if (ops.length > 0) {
       await pa.bulkWrite(ops, { ordered: false });
     }
@@ -11208,6 +12129,26 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
       updatePayload.$unset = $unset;
     }
 
+    // حذف عمود = رؤوس جديدة كلها من القديمة مع نقص: الأعمدة المحذوفة تنتقل إلى السلة بقيمها.
+    const previousHeaders = existingSheet.headers ?? [];
+    if (body.headers && body.headers.length < previousHeaders.length &&
+        body.headers.every((header) => previousHeaders.includes(header))) {
+      const project = await this.loadProjectForAccess(db, existingSheet.projectId, ctx);
+      const previousRows = existingSheet.rowValues ??
+        recordsToRowValues(previousHeaders, existingSheet.rows ?? []);
+      for (const [index, header] of previousHeaders.entries()) {
+        if (body.headers.includes(header)) continue;
+        await createMvTrashEntry(db, ctx, {
+          kind: "sheetColumn",
+          label: header,
+          location: existingSheet.name,
+          ...this.projectTrashScope(project),
+          data: { sheetId: _id, header, index },
+          payload: [{ role: "column", doc: { values: previousRows.map((row) => row[index] ?? null) } }],
+        });
+      }
+    }
+
     const updated = await db
       .collection<MvSheetDoc>(MV_SHEETS_COLLECTION)
       .findOneAndUpdate({ _id }, updatePayload as never, { returnDocument: "after" });
@@ -11237,7 +12178,15 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
     const _id = toId(id);
     const sheet = await db.collection<MvSheetDoc>(MV_SHEETS_COLLECTION).findOne({ _id });
     if (!sheet) throw new NotFoundException("Sheet not found");
-    await this.loadProjectForAccess(db, sheet.projectId, ctx);
+    const project = await this.loadProjectForAccess(db, sheet.projectId, ctx);
+    await createMvTrashEntry(db, ctx, {
+      kind: "sheet",
+      label: sheet.name,
+      location: await this.folderNodeName(db, sheet.projectId, sheet.subProjectId),
+      ...this.projectTrashScope(project),
+      data: { folderId: sheet.subProjectId ?? null },
+      docs: [{ collection: MV_SHEETS_COLLECTION, doc: sheet }],
+    });
     const del = await db.collection(MV_SHEETS_COLLECTION).deleteOne({ _id });
     if (del.deletedCount === 0) throw new NotFoundException("Sheet not found");
     return { ok: true };
@@ -11247,11 +12196,24 @@ export class MachineValuationService implements OnModuleInit, OnModuleDestroy {
   async deleteAllSheets(projectId: string, ctx: MvAccessContext, subProjectId?: string) {
     const db = await getMongoDb();
     const pid = toId(projectId);
-    await this.loadProjectForAccess(db, pid, ctx);
+    const project = await this.loadProjectForAccess(db, pid, ctx);
     const filter: Record<string, unknown> = { projectId: pid };
     if (subProjectId) filter.subProjectId = toId(subProjectId);
     else filter.subProjectId = { $exists: false };
 
+    const sheets = await db.collection<MvSheetDoc>(MV_SHEETS_COLLECTION).find(filter).toArray();
+    if (sheets.length > 0) {
+      const folderId = subProjectId ? toId(subProjectId) : null;
+      await createMvTrashEntry(db, ctx, {
+        kind: "sheet",
+        label: sheets.length === 1 ? sheets[0]!.name : sheets.map((sheet) => sheet.name).join("، "),
+        location: await this.folderNodeName(db, pid, folderId),
+        ...this.projectTrashScope(project),
+        count: sheets.length,
+        data: { folderId },
+        docs: sheets.map((doc) => ({ collection: MV_SHEETS_COLLECTION, doc })),
+      });
+    }
     const result = await db.collection(MV_SHEETS_COLLECTION).deleteMany(filter);
     return { ok: true, deletedCount: result.deletedCount };
   }

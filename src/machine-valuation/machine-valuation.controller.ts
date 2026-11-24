@@ -267,6 +267,36 @@ export class MachineValuationController {
     return this.mvService.permanentlyDeleteProject(id, toMvAccess(context));
   }
 
+  /* ───────── سلة المحذوفات ───────── */
+
+  /** كل ما حُذف داخل النظام: يرى المستخدم محذوفاته، ومدير الشركة محذوفات كل مستخدمي شركته. */
+  @Get("trash")
+  async listTrash(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    res.setHeader("Cache-Control", "private, no-store");
+    return this.mvService.listTrash(toMvAccess(context));
+  }
+
+  @Post("trash/:id/restore")
+  async restoreTrashItem(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    const result = await this.mvService.restoreTrashItem(id, toMvAccess(context));
+    if (result.projectId) {
+      this.publishRealtime(result.projectId, "asset-folders-changed", "trash:restore");
+      this.publishRealtime(result.projectId, "asset-images-changed", "trash:restore");
+    }
+    return result;
+  }
+
+  @Delete("trash/:id")
+  async purgeTrashItem(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Param("id") id: string) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.purgeTrashItem(id, toMvAccess(context));
+  }
+
   @Get("project-workflow-statuses")
   listProjectWorkflowStatuses() {
     return this.mvService.listProjectWorkflowStatuses();
@@ -541,6 +571,19 @@ export class MachineValuationController {
     const context = await resolveRequestContext(req);
     applyContextCookies(res, context);
     return this.mvService.updateProject(id, toMvAccess(context), body ?? {});
+  }
+
+  /** حفظ تلقائي خفيف لمواقع المعاينة وأرقام التواصل (بدون بيانات التقرير). */
+  @Patch("projects/:id/locations")
+  async patchProjectLocations(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param("id") id: string,
+    @Body() body: { locations?: unknown[]; contacts?: unknown[] },
+  ) {
+    const context = await resolveRequestContext(req);
+    applyContextCookies(res, context);
+    return this.mvService.saveProjectLocations(id, toMvAccess(context), body ?? {});
   }
 
   @Patch("projects/:id")

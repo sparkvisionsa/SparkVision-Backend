@@ -9,7 +9,7 @@ import {
 } from "@nestjs/common";
 import { GridFSBucket, ObjectId } from "mongodb";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -19,7 +19,7 @@ import { pipeline } from "node:stream/promises";
 import type { Request, Response } from "express";
 import { getMongoDb } from "@/server/mongodb";
 import { DigitalOceanSpacesService } from "@/machine-valuation/digitalocean-spaces.service";
-import { Queue } from "bullmq";
+import { Queue, UnrecoverableError } from "bullmq";
 import IORedis from "ioredis";
 import {
   GUEST_OWNER_LABEL,
@@ -27,6 +27,7 @@ import {
   HELPER_RECORDING_MAX_BYTES,
   HELPER_RECORDINGS_BUCKET,
   HELPER_RECORDINGS_COLLECTION,
+  HELPER_RECORDING_QUEUE,
   HELPER_UPLOADS_COLLECTION,
   HELPER_MULTIPART_UPLOADS_COLLECTION,
   type HelperMultipartUpload,
@@ -40,6 +41,44 @@ import {
 
 const TEMP_DIR = join(tmpdir(), "spark-helper-recordings");
 const execFileAsync = promisify(execFile);
+/** A run renews its claim on a recording well inside this window; a dead run frees it after it. */
+const PROCESSING_LEASE_MS = 2 * 60_000;
+const FILE_GONE_MESSAGE = "ملف هذا التسجيل غير موجود في التخزين، لذلك لا يمكن تشغيله أو تنزيله.";
+
+/** The uploaded source is gone, so repeating the same job can never succeed. */
+class RecordingSourceMissingError extends Error {}
+
+function isMissingObjectError(error: unknown) {
+  const value = (error ?? {}) as { name?: string; Code?: string; $metadata?: { httpStatusCode?: number } };
+  return value.name === "NoSuchKey" || value.name === "NotFound" || value.Code === "NoSuchKey" || value.$metadata?.httpStatusCode === 404;
+}
+
+/** Spaces often replies with an empty <Message/>, which the SDK reports as "UnknownError". */
+function failureText(error: unknown) {
+  if (!(error instanceof Error)) return "تعذرت معالجة التسجيل.";
+  const message = error.message && error.message !== "UnknownError" ? error.message : error.name;
+  return (message || "تعذرت معالجة التسجيل.").slice(0, 500);
+}
+
+/** Repeats a storage transfer that broke mid-stream; the SDK cannot replay a file stream itself. */
+async function retryTransfer<T>(task: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await task();
+    } catch (error) {
+      const status = (error as { $metadata?: { httpStatusCode?: number } } | null)?.$metadata?.httpStatusCode ?? 0;
+      const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
+      if (permanent || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1500 * 2 ** (attempt - 1)));
+    }
+  }
+}
+
+/** Keeps the download name's extension in line with the file that is actually served. */
+function matchExtension(name: string, key: string) {
+  const extension = /\.(mp4|webm)$/i.exec(key)?.[1]?.toLowerCase();
+  return extension ? `${name.replace(/\.(mp4|webm)$/i, "")}.${extension}` : name;
+}
 
 function sizeLimitMessage() {
   return `حجم التسجيل يجب ألا يتجاوز ${Math.round(HELPER_RECORDING_MAX_BYTES / 1024 / 1024)} ميجابايت`;
@@ -98,6 +137,8 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
   private cleaning = false;
   private readonly logger = new Logger(HelperToolsRecordingsService.name);
   private queue?: Queue;
+  /** Storage keys recently confirmed to exist, with the time that confirmation expires. */
+  private readonly confirmedObjects = new Map<string, number>();
 
   constructor(@Inject(DigitalOceanSpacesService) private readonly spaces: DigitalOceanSpacesService) {}
 
@@ -124,7 +165,7 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
         if (redisWarningShown) this.logger.log("Redis reconnected; recording jobs can be processed again.");
         redisWarningShown = false;
       });
-      this.queue = new Queue("helper-recording-processing", { connection });
+      this.queue = new Queue(HELPER_RECORDING_QUEUE, { connection });
       this.queue.on("error", reportUnavailable);
     }
   }
@@ -534,7 +575,10 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
     const allowedVariants = new Set(["720p", "480p", "360p"]);
     if (variant && !allowedVariants.has(variant)) throw new BadRequestException("دقة البث غير صالحة.");
     const manifestKey = variant ? `${masterKey.substring(0, masterKey.lastIndexOf("/"))}/${variant}/index.m3u8` : masterKey;
-    const object = await this.spaces.getObjectStream(manifestKey);
+    const object = await this.spaces.getObjectStream(manifestKey).catch((error) => {
+      if (isMissingObjectError(error)) throw new NotFoundException(FILE_GONE_MESSAGE);
+      throw error;
+    });
     const chunks: Buffer[] = [];
     for await (const chunk of object.stream as AsyncIterable<Buffer>) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     let playlist = Buffer.concat(chunks).toString("utf8");
@@ -583,21 +627,45 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
   async processRecording(recordingId: string, finalAttempt = true) {
     const db = await this.db();
     const records = db.collection<HelperRecordingDoc>(HELPER_RECORDINGS_COLLECTION);
-    const record = await records.findOne({ _id: parseObjectId(recordingId) });
-    if (!record?.rawKey || record.status !== "processing") return;
-    const workDir = join(tmpdir(), `spark-recording-${recordingId}`);
-    const source = join(workDir, `source.${record.mime === "video/mp4" ? "mp4" : "webm"}`);
-    const mp4Path = join(workDir, "output.mp4");
-    const thumbPath = join(workDir, "thumbnail.jpg");
-    const hlsDir = join(workDir, "hls");
+    const _id = parseObjectId(recordingId);
+    const runId = randomUUID();
+    const leaseUntil = () => new Date(Date.now() + PROCESSING_LEASE_MS);
+    // Claim the recording first. A duplicate job, a second worker, or a retry that overlaps a run
+    // which is still alive finds the claim taken and leaves the recording alone.
+    const record = await records.findOneAndUpdate(
+      { _id, status: "processing", rawKey: { $type: "string" }, processingLeaseExpiresAt: { $not: { $gt: new Date() } } },
+      { $set: { processingLease: runId, processingLeaseExpiresAt: leaseUntil() } },
+      { returnDocument: "after" },
+    );
+    if (!record?.rawKey) return;
+    const rawKey = record.rawKey;
+    // Every later write is limited to this run's claim, so it can neither publish over nor fail a
+    // recording that is already ready, was deleted, or now belongs to another run.
+    const owned = { _id, status: "processing" as const, processingLease: runId };
+    const releaseLease = { processingLease: "", processingLeaseExpiresAt: "" } as const;
+    const heartbeat = setInterval(() => {
+      void records.updateOne(owned, { $set: { processingLeaseExpiresAt: leaseUntil() } }).catch(() => undefined);
+    }, PROCESSING_LEASE_MS / 4);
+    // Each run has its own work folder and publishes under its own prefix. Nothing that another
+    // run or an earlier success stored is removed or overwritten while this run is working.
+    const recordingPrefix = this.spaces.recordingBasePrefix(recordingId);
+    const runPrefix = `${recordingPrefix}run-${runId}/`;
+    let workDir = "";
+    let published = false;
     try {
-      await rm(workDir, { recursive: true, force: true });
-      const hlsBase = this.spaces.buildRecordingKey(recordingId, "marker", "hls").replace(/marker$/, "");
-      const processedBase = this.spaces.buildRecordingKey(recordingId, "marker", "processed").replace(/marker$/, "");
-      await Promise.all([this.spaces.deletePrefix(hlsBase), this.spaces.deletePrefix(processedBase)]);
+      workDir = await mkdtemp(join(tmpdir(), `spark-recording-${recordingId}-`));
+      const source = join(workDir, `source.${record.mime === "video/mp4" ? "mp4" : "webm"}`);
+      const mp4Path = join(workDir, "output.mp4");
+      const thumbPath = join(workDir, "thumbnail.jpg");
+      const hlsDir = join(workDir, "hls");
       await mkdir(hlsDir, { recursive: true });
-      const raw = await this.spaces.getObjectStream(record.rawKey);
-      await pipeline(raw.stream as NodeJS.ReadableStream, createWriteStream(source));
+      await retryTransfer(async () => {
+        const raw = await this.spaces.getObjectStream(rawKey);
+        await pipeline(raw.stream as NodeJS.ReadableStream, createWriteStream(source));
+      }).catch((error) => {
+        if (isMissingObjectError(error)) throw new RecordingSourceMissingError("ملف التسجيل الأصلي غير موجود في التخزين، ولا يمكن إكمال المعالجة.");
+        throw error;
+      });
       const ffprobe = executablePath(process.env.FFPROBE_PATH, "ffprobe");
       const ffmpeg = executablePath(process.env.FFMPEG_PATH, "ffmpeg");
       const ffmpegThreads = String(Math.max(1, Math.min(8, Math.floor(Number(process.env.RECORDING_FFMPEG_THREADS) || 2))));
@@ -621,11 +689,11 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
       const mp4Size = (await stat(mp4Path)).size;
       const bandwidth = Math.max(300_000, Math.ceil(mp4Size * 8 / duration * 1.2));
       await writeFile(playlistPath, `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth}\n720p/index.m3u8\n`);
-      const mp4Key = this.spaces.buildRecordingKey(recordingId, "video.mp4", "processed");
-      const playlistKey = this.spaces.buildRecordingKey(recordingId, "master.m3u8", "hls");
-      const hlsPrefix = playlistKey.substring(0, playlistKey.lastIndexOf("/"));
-      const thumbnailKey = this.spaces.buildRecordingKey(recordingId, "thumbnail.jpg", "processed");
-      await this.spaces.uploadPrivateFile(mp4Key, mp4Path, mp4Size, "video/mp4");
+      const mp4Key = `${runPrefix}video.mp4`;
+      const hlsPrefix = `${runPrefix}hls`;
+      const playlistKey = `${hlsPrefix}/master.m3u8`;
+      const thumbnailKey = `${runPrefix}thumbnail.jpg`;
+      await retryTransfer(() => this.spaces.uploadPrivateFile(mp4Key, mp4Path, mp4Size, "video/mp4"));
       const hlsFiles: string[] = ["master.m3u8"];
       for (const label of variantLabels) {
         hlsFiles.push(`${label}/index.m3u8`, ...(await readdir(join(hlsDir, label))).filter((name) => name.endsWith(".ts")).map((name) => `${label}/${name}`));
@@ -634,23 +702,44 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
         await Promise.all(hlsFiles.slice(offset, offset + 8).map(async (name) => {
           const path = join(hlsDir, name);
           const isPlaylist = name.endsWith(".m3u8");
-          const key = name === "master.m3u8" ? playlistKey : `${hlsPrefix}/${name}`;
-          await this.spaces.uploadPrivateFile(key, path, (await stat(path)).size, isPlaylist ? "application/vnd.apple.mpegurl" : "video/mp2t", isPlaylist ? "private, max-age=0, no-store" : undefined);
+          const size = (await stat(path)).size;
+          await retryTransfer(() => this.spaces.uploadPrivateFile(`${hlsPrefix}/${name}`, path, size, isPlaylist ? "application/vnd.apple.mpegurl" : "video/mp2t", isPlaylist ? "private, max-age=0, no-store" : undefined));
         }));
       }
-      await this.spaces.uploadPrivateFile(thumbnailKey, thumbPath, (await stat(thumbPath)).size, "image/jpeg");
-      await records.updateOne({ _id: record._id, status: "processing" }, { $set: {
+      const thumbnailSize = (await stat(thumbPath)).size;
+      await retryTransfer(() => this.spaces.uploadPrivateFile(thumbnailKey, thumbPath, thumbnailSize, "image/jpeg"));
+      // Confirm storage really holds the outputs before the record is pointed at them.
+      const [storedMp4] = await Promise.all([this.spaces.headObject(mp4Key), this.spaces.headObject(playlistKey), this.spaces.headObject(thumbnailKey)]);
+      if (storedMp4.size !== mp4Size) throw new Error("تعذر التحقق من ملف الفيديو بعد رفعه إلى التخزين.");
+      const commit = await records.updateOne(owned, { $set: {
         status: "ready", seconds: Math.ceil(duration), mp4Key, hlsKey: playlistKey, thumbnailKey,
         processedSize: mp4Size, updatedAt: new Date(),
-      }, $unset: { failureReason: "" } });
-      await this.spaces.deleteObject(record.rawKey).catch((error) => this.logger.warn(`Processed recording ${recordingId}, but could not remove raw object: ${String(error)}`));
+      }, $unset: { failureReason: "", ...releaseLease } });
+      if (!commit.matchedCount) {
+        // The recording was deleted, or another run took it over, while this one was working.
+        await this.spaces.deletePrefix(runPrefix).catch(() => undefined);
+        return;
+      }
+      published = true;
+      // The record now points at this run's verified files. Only at this point may the uploaded
+      // source and whatever earlier attempts left behind be removed.
+      await this.spaces.deletePrefix(recordingPrefix, runPrefix).catch((error) => this.logger.warn(`Processed recording ${recordingId}, but could not remove its leftover objects: ${String(error)}`));
+      await this.spaces.deleteObject(rawKey).catch((error) => this.logger.warn(`Processed recording ${recordingId}, but could not remove raw object: ${String(error)}`));
     } catch (error) {
-      const reason = error instanceof Error ? error.message.slice(0, 500) : "تعذرت معالجة التسجيل.";
-      await records.updateOne({ _id: record._id }, { $set: { status: finalAttempt ? "failed" : "processing", failureReason: reason, updatedAt: new Date() } });
+      const sourceMissing = error instanceof RecordingSourceMissingError;
+      const reason = failureText(error);
+      await records.updateOne(owned, {
+        $set: { status: finalAttempt || sourceMissing ? "failed" : "processing", failureReason: reason, updatedAt: new Date() },
+        $unset: releaseLease,
+      }).catch(() => undefined);
+      if (!published) await this.spaces.deletePrefix(runPrefix).catch(() => undefined);
       this.logger.error(`Recording ${recordingId} processing failed: ${reason}`);
+      // Without the source there is nothing left to retry.
+      if (sourceMissing) throw new UnrecoverableError(reason);
       throw error;
     } finally {
-      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+      clearInterval(heartbeat);
+      if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -676,10 +765,38 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
       await this.spaces.abortMultipartUpload(activeUpload.key, activeUpload.uploadId).catch(() => undefined);
       await db.collection<HelperMultipartUpload>(HELPER_MULTIPART_UPLOADS_COLLECTION).updateOne({ _id: activeUpload._id }, { $set: { state: "aborted" } });
     }
-    if (current.fileId) await new GridFSBucket(db, { bucketName: HELPER_RECORDINGS_BUCKET }).delete(current.fileId).catch(() => undefined);
-    for (const key of [current.rawKey, current.mp4Key, current.hlsKey, current.thumbnailKey]) if (key) await this.spaces.deleteObject(key).catch(() => undefined);
-    if (current.hlsKey) await this.spaces.deletePrefix(current.hlsKey.substring(0, current.hlsKey.lastIndexOf("/")) + "/").catch(() => undefined);
+    await this.deleteStoredFiles(current);
     return { ok: true };
+  }
+
+  private async deleteStoredFiles(doc: HelperRecordingDoc) {
+    if (doc.fileId) await new GridFSBucket(await this.db(), { bucketName: HELPER_RECORDINGS_BUCKET }).delete(doc.fileId).catch(() => undefined);
+    for (const key of [doc.rawKey, doc.mp4Key, doc.hlsKey, doc.thumbnailKey]) if (key) await this.spaces.deleteObject(key).catch(() => undefined);
+    if (doc.hlsKey) await this.spaces.deletePrefix(doc.hlsKey.substring(0, doc.hlsKey.lastIndexOf("/")) + "/").catch(() => undefined);
+    // Also clears outputs of processing runs that never reached the record.
+    if (doc.rawKey) await this.spaces.deletePrefix(this.spaces.recordingBasePrefix(String(doc._id))).catch(() => undefined);
+  }
+
+  /** True unless storage positively reports the object as missing. Confirmations are reused briefly. */
+  private async objectExists(key: string) {
+    if ((this.confirmedObjects.get(key) ?? 0) > Date.now()) return true;
+    try {
+      await this.spaces.headObject(key);
+    } catch (error) {
+      if (!isMissingObjectError(error)) return true; // storage hiccup: let the signed link decide
+      this.confirmedObjects.delete(key);
+      return false;
+    }
+    if (this.confirmedObjects.size > 500) this.confirmedObjects.clear();
+    this.confirmedObjects.set(key, Date.now() + 60_000);
+    return true;
+  }
+
+  /** Picks the file to serve and confirms it is really in storage before any link is issued. */
+  private async playableKey(doc: HelperRecordingDoc) {
+    const candidates = doc.status === "ready" ? [doc.mp4Key, doc.rawKey] : [doc.rawKey, doc.mp4Key];
+    for (const key of candidates) if (key && await this.objectExists(key)) return key;
+    throw new NotFoundException(FILE_GONE_MESSAGE);
   }
 
   async streamFile(actor: HelperActor, id: string, range: string | undefined, res: Response, downloadName?: string) {
@@ -690,9 +807,8 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
       throw new BadRequestException(current.failureReason || "التسجيل قيد المعالجة.");
     }
     if (!current.fileId) {
-      const key = current.status === "ready" ? current.mp4Key || current.rawKey : current.rawKey;
-      if (!key) throw new NotFoundException("ملف التسجيل غير موجود");
-      const safeName = String(downloadName ?? "recording.mp4").replace(/[\\/\r\n\u0000-\u001f]/g, "_").trim().slice(0, 120) || "recording.mp4";
+      const key = await this.playableKey(current);
+      const safeName = matchExtension(String(downloadName ?? "recording.mp4").replace(/[\\/\r\n\u0000-\u001f]/g, "_").trim().slice(0, 120) || "recording.mp4", key);
       const playbackTtl = downloadName ? 300 : Math.max(300, Math.min(7200, Number(process.env.RECORDING_PLAYBACK_URL_TTL_SECONDS) || 7200));
       res.redirect(302, await this.spaces.presignGet(key, playbackTtl, downloadName ? safeName : undefined));
       return;
@@ -733,9 +849,8 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
     if (current.fileId) {
       return { url: `/api/helper-tools/recordings/${id}/file?download=${encodeURIComponent(safeName)}` };
     }
-    const key = current.status === "ready" ? current.mp4Key || current.rawKey : current.rawKey;
-    if (!key) throw new NotFoundException("ملف التسجيل غير موجود");
-    return { url: await this.spaces.presignGet(key, 300, safeName) };
+    const key = await this.playableKey(current);
+    return { url: await this.spaces.presignGet(key, 300, matchExtension(safeName, key)) };
   }
 
   private async cleanup() {
@@ -770,9 +885,7 @@ export class HelperToolsRecordingsService implements OnModuleInit, OnModuleDestr
           $or: [{ status: { $in: ["ready", "failed"] } }, { status: { $exists: false } }],
         }).limit(100).toArray();
         for (const old of oldRecords) {
-          if (old.fileId) await new GridFSBucket(db, { bucketName: HELPER_RECORDINGS_BUCKET }).delete(old.fileId).catch(() => undefined);
-          for (const key of [old.rawKey, old.mp4Key, old.hlsKey, old.thumbnailKey]) if (key) await this.spaces.deleteObject(key).catch(() => undefined);
-          if (old.hlsKey) await this.spaces.deletePrefix(old.hlsKey.substring(0, old.hlsKey.lastIndexOf("/")) + "/").catch(() => undefined);
+          await this.deleteStoredFiles(old);
           await db.collection(HELPER_RECORDINGS_COLLECTION).deleteOne({ _id: old._id });
         }
       }

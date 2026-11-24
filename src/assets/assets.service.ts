@@ -25,6 +25,12 @@ import {
   sanitizeCustomColumnKey,
 } from "./asset-field-definitions";
 import { AssetProjectAccessService } from "./asset-project-access.service";
+import {
+  createMvTrashEntry,
+  onMvTrashRestored,
+  registerMvTrashKind,
+  type MvTrashActor,
+} from "@/machine-valuation/mv-trash";
 import { reserveValTechIds } from "./asset-sequence";
 import { resolveAssetSource } from "./asset-source";
 import {
@@ -450,13 +456,107 @@ async function removeSheetManualColumnFromImportDoc(
   await coll.updateOne({ _id: importOid, projectId }, { $set: { sheetManualColumnSheets: sheets } });
 }
 
+function assetTrashLabel(asset: Pick<AssetDoc, "assetId"> & { assetName?: unknown; name?: unknown }): string {
+  for (const value of [asset.assetName, asset.name, asset.assetId]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "—";
+}
+
+/* استعادة ما لا تكفيه إعادة المستندات: إعدادات أعمدة الورقة وقيم العمود المحذوف. */
+registerMvTrashKind("assetSheet", {
+  restore: async (db, entry) => {
+    const importId = entry.data.importId instanceof ObjectId ? entry.data.importId : null;
+    const sheetName = typeof entry.data.sheetName === "string" ? entry.data.sheetName : "";
+    if (!importId || !sheetName) return;
+    const coll = db.collection<AssetImportDoc>(ASSET_IMPORTS_COLLECTION);
+    const doc = await coll.findOne({ _id: importId }, { projection: { sheetManualColumnSheets: 1, sheetColumnHeaderLabels: 1 } });
+    if (!doc) return;
+    const $set: Record<string, unknown> = {};
+    const manualColumns = entry.data.manualColumns as { sheetName: string; columns: AssetImportManualColumnEntry[] } | null;
+    if (manualColumns && !doc.sheetManualColumnSheets?.some((s) => s.sheetName === sheetName)) {
+      $set.sheetManualColumnSheets = [...(doc.sheetManualColumnSheets ?? []), manualColumns];
+    }
+    if (entry.data.headerLabels && !(sheetName in (doc.sheetColumnHeaderLabels ?? {}))) {
+      $set.sheetColumnHeaderLabels = { ...(doc.sheetColumnHeaderLabels ?? {}), [sheetName]: entry.data.headerLabels };
+    }
+    if (Object.keys($set).length > 0) await coll.updateOne({ _id: importId }, { $set });
+  },
+});
+
+registerMvTrashKind("assetColumn", {
+  restore: async (db, entry, payload) => {
+    const fieldKey = String(entry.data.fieldKey ?? "");
+    if (!fieldKey || isUnsafeMongoFieldKey(fieldKey) || !entry.projectId) return;
+    const altRawKey = typeof entry.data.altRawKey === "string" && !isUnsafeMongoFieldKey(entry.data.altRawKey)
+      ? entry.data.altRawKey
+      : null;
+    const now = new Date();
+    for (const chunk of payload) {
+      if (chunk.role !== "columnValues") continue;
+      const rows = ((chunk.doc as { rows?: Array<{ _id: ObjectId; n?: unknown; r?: unknown; a?: unknown }> } | null)?.rows ?? []);
+      const operations = rows.map((row) => {
+        const $set: Record<string, unknown> = { updatedAt: now };
+        if ("n" in row) $set[`normalizedData.${fieldKey}`] = row.n;
+        if ("r" in row) $set[`rawData.${fieldKey}`] = row.r;
+        if (altRawKey && "a" in row) $set[`rawData.${altRawKey}`] = row.a;
+        return { updateOne: { filter: { _id: row._id, projectId: entry.projectId! }, update: { $set } } };
+      });
+      if (operations.length > 0) {
+        await db.collection<AssetDoc>(ASSETS_COLLECTION).bulkWrite(operations as never, { ordered: false });
+      }
+    }
+    const manualEntry = entry.data.manualColumnEntry as AssetImportManualColumnEntry | null;
+    const importId = entry.data.importId instanceof ObjectId ? entry.data.importId : null;
+    const sheetName = typeof entry.data.sheetName === "string" ? entry.data.sheetName : "";
+    if (manualEntry && importId && sheetName) {
+      const doc = await db.collection<AssetImportDoc>(ASSET_IMPORTS_COLLECTION)
+        .findOne({ _id: importId, projectId: entry.projectId }, { projection: { sheetManualColumnSheets: 1 } });
+      const present = doc?.sheetManualColumnSheets
+        ?.find((s) => s.sheetName === sheetName)?.columns.some((c) => c.fieldKey === manualEntry.fieldKey);
+      if (doc && !present) {
+        await appendSheetManualColumnToImportDoc(db, entry.projectId, importId, sheetName, manualEntry);
+      }
+    }
+  },
+});
+
 @Injectable()
 export class AssetsService {
   constructor(
     private readonly projectAccess: AssetProjectAccessService,
     private readonly listCache: AssetListCacheService,
     private readonly auditService: AssetAuditService,
-  ) {}
+  ) {
+    // أي استعادة من سلة المحذوفات داخل مشروع تُبطل قائمة أصوله المخزنة مؤقتاً.
+    onMvTrashRestored(async (entry) => {
+      if (entry.projectId) await this.listCache.invalidateProject(entry.projectId.toString());
+    });
+  }
+
+  /** سياق السلة: شركة السجل هي شركة المشروع نفسه لا شركة المستخدم النشطة فقط. */
+  private async trashScope(
+    db: import("mongodb").Db,
+    projectId: ObjectId,
+    user: UserMongoDoc,
+    activeCompanyId?: ObjectId | null,
+  ) {
+    const project = await db.collection<{ companyId?: ObjectId | string; name?: string }>("mv_projects")
+      .findOne({ _id: projectId }, { projection: { companyId: 1 } });
+    const actor: MvTrashActor = {
+      userId: user._id.toString(),
+      companyId: activeCompanyId?.toString() ?? null,
+      isSuperAdmin: user.role === "super_admin",
+      userRole: user.role,
+    };
+    return {
+      actor,
+      scope: {
+        projectId,
+        ...(project?.companyId != null ? { companyId: project.companyId } : {}),
+      },
+    };
+  }
 
   private projectAccessOpts(
     activeCompanyId: ObjectId | null | undefined,
@@ -969,6 +1069,15 @@ export class AssetsService {
       this.projectAccessOpts(activeCompanyId, { claimOwnershipIfMissing: true }),
     );
 
+    // نقل إلى سلة المحذوفات: الصف يعود بنفس معرّفه وموضعه في ورقته عند الاستعادة.
+    const trash = await this.trashScope(db, asset.projectId, user, activeCompanyId);
+    await createMvTrashEntry(db, trash.actor, {
+      kind: "asset",
+      label: assetTrashLabel(asset),
+      location: asset.sheetName ?? null,
+      ...trash.scope,
+      docs: [{ collection: ASSETS_COLLECTION, doc: asset }],
+    });
     await db.collection<AssetDoc>(ASSETS_COLLECTION).deleteOne({ _id: assetObjectId });
     await this.listCache.invalidateProject(asset.projectId.toString());
     await this.auditService.log(
@@ -1010,17 +1119,36 @@ export class AssetsService {
     const db = await getMongoDb();
     await ensureAssetsCollectionsInitialized(db);
 
-    const result = await db.collection<AssetDoc>(ASSETS_COLLECTION).deleteMany(
-      spreadsheetAssetsFilter({
-        projectId,
-        importId,
-        sheetName,
-      }),
-    );
-
+    const sheetFilter = spreadsheetAssetsFilter({
+      projectId,
+      importId,
+      sheetName,
+    });
     const importDoc = await db
       .collection<AssetImportDoc>(ASSET_IMPORTS_COLLECTION)
       .findOne({ _id: importId, projectId }, { projection: { sheetManualColumnSheets: 1, sheetColumnHeaderLabels: 1 } });
+
+    // نقل الورقة كاملة إلى سلة المحذوفات مع إعدادات أعمدتها لتعود كما كانت.
+    const sheetAssets = await db.collection<AssetDoc>(ASSETS_COLLECTION).find(sheetFilter).toArray();
+    if (sheetAssets.length > 0) {
+      const trash = await this.trashScope(db, projectId, user, activeCompanyId);
+      await createMvTrashEntry(db, trash.actor, {
+        kind: "assetSheet",
+        label: sheetName,
+        ...trash.scope,
+        count: sheetAssets.length,
+        data: {
+          importId,
+          sheetName,
+          manualColumns: importDoc?.sheetManualColumnSheets?.find((s) => s.sheetName === sheetName) ?? null,
+          headerLabels: importDoc?.sheetColumnHeaderLabels?.[sheetName] ?? null,
+        },
+        docs: sheetAssets.map((doc) => ({ collection: ASSETS_COLLECTION, doc })),
+      });
+    }
+
+    const result = await db.collection<AssetDoc>(ASSETS_COLLECTION).deleteMany(sheetFilter);
+
     const updates: Record<string, unknown> = {};
     if (importDoc?.sheetManualColumnSheets?.some((s) => s.sheetName === sheetName)) {
       updates.sheetManualColumnSheets = importDoc.sheetManualColumnSheets.filter(
@@ -1130,6 +1258,21 @@ export class AssetsService {
 
     if (assets.length !== assetIds.length) {
       throw new NotFoundException("تعذر العثور على بعض الأصول المحددة.");
+    }
+
+    // نقل إلى سلة المحذوفات في سجل واحد يستعيد كل الصفوف المحددة معاً.
+    if (assets.length > 0) {
+      const trash = await this.trashScope(db, projectId, user, activeCompanyId);
+      const names = assets.slice(0, 4).map(assetTrashLabel).join("، ");
+      const sheets = [...new Set(assets.map((asset) => asset.sheetName).filter(Boolean))];
+      await createMvTrashEntry(db, trash.actor, {
+        kind: "asset",
+        label: assets.length > 4 ? `${names}…` : names,
+        location: sheets.length === 1 ? sheets[0]! : null,
+        ...trash.scope,
+        count: assets.length,
+        docs: assets.map((doc) => ({ collection: ASSETS_COLLECTION, doc })),
+      });
     }
 
     const operations = assets.map((asset) => ({
@@ -1596,19 +1739,17 @@ export class AssetsService {
       throw new BadRequestException("اسم العمود المطلوب حذفه غير صالح.");
     }
 
-    /** حذف من ورقة واحدة فقط: لا نحذف سجل الإعدادات العام للعمود لأن باقي الشيتات قد تستخدمه. */
-    if (columnConfig && !query.sheetName?.trim()) {
-      await db.collection<AssetColumnConfigDoc>(ASSET_COLUMN_CONFIGS_COLLECTION).deleteOne({
-        _id: columnConfig._id,
-      });
-    }
+    const removesConfig = !!columnConfig && !query.sheetName?.trim();
+    const altRawKey = columnConfig?.columnName && columnConfig.columnName !== fieldKey
+      ? columnConfig.columnName
+      : null;
 
     const unsetPayload: Record<string, "" | 1> = {
       [`normalizedData.${fieldKey}`]: "",
       [`rawData.${fieldKey}`]: "",
     };
-    if (columnConfig?.columnName && columnConfig.columnName !== fieldKey) {
-      unsetPayload[`rawData.${columnConfig.columnName}`] = "";
+    if (altRawKey) {
+      unsetPayload[`rawData.${altRawKey}`] = "";
     }
 
     const importFilter: Record<string, unknown> =
@@ -1620,13 +1761,69 @@ export class AssetsService {
         : query.importId
           ? { importId: toObjectId(query.importId, "معرف الاستيراد") }
           : {};
+    const columnAssetsFilter = spreadsheetAssetsFilter({
+      projectId,
+      assetType: query.assetType,
+      ...importFilter,
+    });
+
+    // نقل العمود إلى سلة المحذوفات: قيم كل صف وإعداد العمود تُحفظ لتعود كما كانت.
+    const isManualSheetColumn = !!query.importId && !!query.sheetName?.trim() &&
+      isSheetManualColumnStorageKey(fieldKey);
+    const manualColumnEntry = isManualSheetColumn
+      ? (await db.collection<AssetImportDoc>(ASSET_IMPORTS_COLLECTION).findOne(
+        { _id: toObjectId(query.importId!, "معرف الاستيراد"), projectId },
+        { projection: { sheetManualColumnSheets: 1 } },
+      ))?.sheetManualColumnSheets
+        ?.find((s) => s.sheetName === sanitizeTextInput(query.sheetName!))
+        ?.columns.find((c) => c.fieldKey === fieldKey) ?? null
+      : null;
+    const columnValueRows: Array<{ _id: ObjectId; n?: unknown; r?: unknown; a?: unknown }> = [];
+    const valueCursor = db.collection<AssetDoc>(ASSETS_COLLECTION).find(columnAssetsFilter, {
+      projection: { normalizedData: 1, rawData: 1 },
+    });
+    for await (const asset of valueCursor) {
+      const normalized = (asset.normalizedData ?? {}) as Record<string, unknown>;
+      const raw = (asset.rawData ?? {}) as Record<string, unknown>;
+      const row: { _id: ObjectId; n?: unknown; r?: unknown; a?: unknown } = { _id: asset._id };
+      if (fieldKey in normalized) row.n = normalized[fieldKey];
+      if (fieldKey in raw) row.r = raw[fieldKey];
+      if (altRawKey && altRawKey in raw) row.a = raw[altRawKey];
+      if (Object.keys(row).length > 1) columnValueRows.push(row);
+    }
+    if (columnValueRows.length > 0 || removesConfig || manualColumnEntry) {
+      const trash = await this.trashScope(db, projectId, user, activeCompanyId);
+      const payload: Array<{ role: string; doc: unknown }> = [];
+      for (let offset = 0; offset < columnValueRows.length; offset += 500) {
+        payload.push({ role: "columnValues", doc: { rows: columnValueRows.slice(offset, offset + 500) } });
+      }
+      await createMvTrashEntry(db, trash.actor, {
+        kind: "assetColumn",
+        label: manualColumnEntry?.label ?? columnConfig?.columnName ?? incomingName,
+        location: query.sheetName?.trim() ? sanitizeTextInput(query.sheetName) : null,
+        ...trash.scope,
+        count: 1,
+        data: {
+          fieldKey,
+          altRawKey,
+          importId: query.importId ? toObjectId(query.importId, "معرف الاستيراد") : null,
+          sheetName: query.sheetName?.trim() ? sanitizeTextInput(query.sheetName) : null,
+          manualColumnEntry,
+        },
+        docs: removesConfig ? [{ collection: ASSET_COLUMN_CONFIGS_COLLECTION, doc: columnConfig! }] : [],
+        payload,
+      });
+    }
+
+    /** حذف من ورقة واحدة فقط: لا نحذف سجل الإعدادات العام للعمود لأن باقي الشيتات قد تستخدمه. */
+    if (removesConfig) {
+      await db.collection<AssetColumnConfigDoc>(ASSET_COLUMN_CONFIGS_COLLECTION).deleteOne({
+        _id: columnConfig!._id,
+      });
+    }
 
     const updateResult = await db.collection<AssetDoc>(ASSETS_COLLECTION).updateMany(
-      spreadsheetAssetsFilter({
-        projectId,
-        assetType: query.assetType,
-        ...importFilter,
-      }),
+      columnAssetsFilter,
       {
         $unset: unsetPayload,
         $set: { updatedAt: new Date() },

@@ -18,6 +18,13 @@ import {
 } from "./docx-to-pdf";
 import { getPendingPdfExport, storePendingPdfExport } from "./pending-pdf-export";
 import { formatReportTemplateTeam } from "./report-template-team";
+import {
+  applyReportTemplateIdentityFallbacks,
+  customFieldTemplateValues,
+  EMPTY_REPORT_TEMPLATE_IDENTITY,
+  loadReportTemplateIdentity,
+  type ReportTemplateIdentity,
+} from "./report-template-values";
 
 type PptxMergeRequest = {
   /** Selects one of the owning company's saved PowerPoint templates. */
@@ -346,10 +353,11 @@ function dynamicPptxTemplateValues(
 }
 
 /** Same project-to-template field mapping used by the Word merge path. */
-function buildPptxTextValues(
+export function buildPptxTextValues(
   reportData: Record<string, unknown>,
   projectName: string,
   displayNumber?: unknown,
+  identity: ReportTemplateIdentity = EMPTY_REPORT_TEMPLATE_IDENTITY,
 ): Record<string, string> {
   const raw: Record<PptxTemplateVariableKey, string> = {
     reportTitle: String(reportData.reportTitle || projectName || "").trim(),
@@ -379,7 +387,6 @@ function buildPptxTextValues(
 
   const values: Record<string, string> = {};
   for (const key of PPTX_TEMPLATE_VARIABLE_KEYS) values[key] = sanitizeForXml(raw[key]);
-  Object.assign(values, sanitizeVariableOverrides(reportData.reportTextOverrides));
   const numericDisplayNumber =
     typeof displayNumber === "number" && Number.isFinite(displayNumber)
       ? String(displayNumber)
@@ -420,21 +427,18 @@ function buildPptxTextValues(
     generalAssumptions: sanitizeForXml(String(reportData.generalAssumptions || "")),
     specialAssumptions: sanitizeForXml(String(reportData.specialAssumptions || "")),
   });
+  // Same fallbacks as the system report (company name, company manager).
+  applyReportTemplateIdentityFallbacks(values, identity, sanitizeForXml);
   // Match the Word merge catalogue: model-defined custom report fields are
   // resolved through their stable `field:<id>` source key.
-  if (Array.isArray(reportData.customFields)) {
-    for (const rawField of reportData.customFields.slice(0, 120)) {
-      if (!rawField || typeof rawField !== "object") continue;
-      const field = rawField as Record<string, unknown>;
-      const key = normalizeTemplateVariableName(field.id);
-      if (!key || Object.prototype.hasOwnProperty.call(values, key)) continue;
-      const value = field.value;
-      values[key] =
-        typeof value === "string" || typeof value === "number"
-          ? sanitizeForXml(String(value)).slice(0, 50_000)
-          : "";
-    }
+  for (const [key, value] of Object.entries(
+    customFieldTemplateValues(reportData, normalizeTemplateVariableName, formatDateAr, sanitizeForXml),
+  )) {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) values[key] = value;
   }
+  // Edits made on the final report itself win (they used to be overwritten
+  // by the second block of values above).
+  Object.assign(values, sanitizeVariableOverrides(reportData.reportTextOverrides));
   for (const [alias, key] of Object.entries(PPTX_TEMPLATE_VARIABLE_ALIASES)) {
     values[alias] = values[key] ?? "";
   }
@@ -787,11 +791,16 @@ export class PptxTemplateMergeService {
       await fs.promises.mkdir(clientDir, { recursive: true });
       await fs.promises.mkdir(certificateDir, { recursive: true });
       const [imageMaterialization, valuationMaterialization, clientMaterialization, certificateMaterialization] = await Promise.all([
-        this.materializeReportAssetImages(projectId, ctx, assetDir),
+        // Same switches as the system report: a group the report excludes is not merged.
+        reportData.includeAssetImages === false
+          ? Promise.resolve({ requested: 0, paths: [] as string[], warnings: [] as string[] })
+          : this.materializeReportAssetImages(projectId, ctx, assetDir),
         this.materializeWorkspaceImages(
           projectId,
           ctx,
-          (project as { valuationAccountingWorkspace?: unknown }).valuationAccountingWorkspace,
+          reportData.includeValuationAccountImages === false
+            ? null
+            : (project as { valuationAccountingWorkspace?: unknown }).valuationAccountingWorkspace,
           valuationDir,
           "valuation",
         ),
@@ -815,11 +824,13 @@ export class PptxTemplateMergeService {
         clientImagesPerRow: reportData.pptxClientImagesPerRow,
         ...(body.imageLayout ?? {}),
       });
+      const reportIdentity = await loadReportTemplateIdentity(project.companyId ?? ctx.companyId);
       const configuredValues = dynamicPptxTemplateValues(
         buildPptxTextValues(
           reportData,
           String(project.name || ""),
           project.displayNumber,
+          reportIdentity,
         ),
         companyTemplateConfig.mappings,
       );

@@ -31,6 +31,10 @@ export function permissionRequirementForRequest(request: Request): Requirement |
 
   if (path.includes("/company/permissions")) return null;
 
+  // سلة المحذوفات متاحة لكل الأدوار: الخدمة تقصر كل مستخدم على ما حذفه بنفسه
+  // (ومدير الشركة على شركته) وتحصر الحذف النهائي في المدير.
+  if (/\/mv\/trash(\/|$)/.test(path)) return null;
+
   if (/\/locations\//.test(path)) {
     return method === "GET" ? null : { superAdminOnly: true };
   }

@@ -165,6 +165,11 @@ export class DigitalOceanSpacesService {
     return [this.recordingPrefix, sanitizeSpacesKeySegment(recordingId, "recording"), sanitizeSpacesKeySegment(variant, "raw"), sanitizeSpacesKeySegment(fileName, "recording.bin")].join("/");
   }
 
+  /** Every object that belongs to one recording lives under this prefix (ends with "/"). */
+  recordingBasePrefix(recordingId: string) {
+    return `${this.recordingPrefix}/${sanitizeSpacesKeySegment(recordingId, "recording")}/`;
+  }
+
   async createMultipartUpload(key: string, contentType: string) {
     const response = await this.requireClient().send(new CreateMultipartUploadCommand({
       Bucket: this.bucket, Key: key, ContentType: contentType, ACL: "private",
@@ -319,12 +324,14 @@ export class DigitalOceanSpacesService {
     await client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: normalizedKey }));
   }
 
-  async deletePrefix(prefix: string): Promise<void> {
+  /** Deletes every object under `prefix`, keeping anything under `keepPrefix` when given. */
+  async deletePrefix(prefix: string, keepPrefix?: string): Promise<void> {
     const client = this.requireClient();
     let continuationToken: string | undefined;
     do {
       const page = await client.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: continuationToken }));
-      const objects = (page.Contents ?? []).flatMap((object) => object.Key ? [{ Key: object.Key }] : []);
+      const objects = (page.Contents ?? []).flatMap((object) =>
+        object.Key && !(keepPrefix && object.Key.startsWith(keepPrefix)) ? [{ Key: object.Key }] : []);
       if (objects.length) await client.send(new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects: objects, Quiet: true } }));
       continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (continuationToken);

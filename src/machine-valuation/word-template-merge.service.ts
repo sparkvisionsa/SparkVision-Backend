@@ -19,6 +19,13 @@ import {
 } from "./docx-to-pdf";
 import { getPendingPdfExport, storePendingPdfExport } from "./pending-pdf-export";
 import { formatReportTemplateTeam } from "./report-template-team";
+import {
+  applyReportTemplateIdentityFallbacks,
+  customFieldTemplateValues,
+  EMPTY_REPORT_TEMPLATE_IDENTITY,
+  loadReportTemplateIdentity,
+  type ReportTemplateIdentity,
+} from "./report-template-values";
 
 type MergeImageLayout = {
   imagesPerRow: number;
@@ -826,10 +833,11 @@ function dynamicTemplateValues(
   };
 }
 
-function buildTextValues(
+export function buildTextValues(
   reportData: Record<string, unknown>,
   projectName: string,
   displayNumber?: unknown,
+  identity: ReportTemplateIdentity = EMPTY_REPORT_TEMPLATE_IDENTITY,
 ): Record<string, string> {
   const raw: Record<WordTemplateVariableKey, string> = {
     reportTitle: String(reportData.reportTitle || projectName || "").trim(),
@@ -904,26 +912,21 @@ function buildTextValues(
     generalAssumptions: sanitizeForXml(String(reportData.generalAssumptions || "")),
     specialAssumptions: sanitizeForXml(String(reportData.specialAssumptions || "")),
   });
+  // Same fallbacks as the system report (company name, company manager).
+  applyReportTemplateIdentityFallbacks(out, identity, sanitizeForXml);
   // Company report-data models store their extra values with stable field IDs.
   // Expose those IDs in the flat catalog so a mapping `field:<id>` works for
-  // both old manually-added fields and model-defined fields.
-  const customFieldValues: Record<string, string> = {};
-  if (Array.isArray(reportData.customFields)) {
-    for (const rawField of reportData.customFields.slice(0, 120)) {
-      if (!rawField || typeof rawField !== "object") continue;
-      const field = rawField as Record<string, unknown>;
-      const key = normalizeTemplateVariableName(field.id);
-      if (!key || Object.prototype.hasOwnProperty.call(out, key)) continue;
-      const value = field.value;
-      customFieldValues[key] =
-        typeof value === "string" || typeof value === "number"
-          ? sanitizeForXml(String(value)).slice(0, 50_000)
-          : "";
-    }
-  }
+  // both old manually-added fields and model-defined fields (dates/numbers
+  // formatted like the rest of the report).
+  const customFieldValues = Object.fromEntries(
+    Object.entries(
+      customFieldTemplateValues(reportData, normalizeTemplateVariableName, formatDateAr, sanitizeForXml),
+    ).filter(([key]) => !Object.prototype.hasOwnProperty.call(out, key)),
+  );
   return {
     ...out,
     ...customFieldValues,
+    // Edits made on the final report itself win, as in the system report.
     ...sanitizeVariableOverrides(reportData.reportTextOverrides),
   };
 }
@@ -1328,6 +1331,7 @@ export class WordTemplateMergeService {
       urls: useStoredProjectState ? undefined : body.assetImageUrls,
       base64List: useStoredProjectState ? undefined : body.assetImagesBase64,
       fallback: "assets",
+      excluded: reportData.includeAssetImages === false,
     });
     const valuationSources = await this.resolveImageSources({
       projectId,
@@ -1335,6 +1339,7 @@ export class WordTemplateMergeService {
       urls: useStoredProjectState ? undefined : body.valuationImageUrls,
       base64List: useStoredProjectState ? undefined : body.valuationImagesBase64,
       fallback: "valuation",
+      excluded: reportData.includeValuationAccountImages === false,
       project,
     });
     const clientSources = await this.resolveImageSources({
@@ -1412,6 +1417,7 @@ export class WordTemplateMergeService {
         ),
         this.resolveReportPreparers(reportData, project.companyId, ctx),
       ]);
+      const reportIdentity = await loadReportTemplateIdentity(project.companyId ?? ctx.companyId);
       this.logger.log(
         `Prepared Word images for ${projectId} in ${Date.now() - prepareStartedAt}ms (asset=${assetImagePaths.length}, valuation=${valuationImagePaths.length}, client=${clientImagePaths.length})`,
       );
@@ -1420,6 +1426,7 @@ export class WordTemplateMergeService {
         reportData,
         project.name || "",
         project.displayNumber,
+        reportIdentity,
       );
       // وجود المفتاح في الطلب — حتى لو كانت قيمته فارغة — يتغلب على القيمة المخزنة.
       const requestTextValues = useStoredProjectState
@@ -1624,6 +1631,8 @@ export class WordTemplateMergeService {
     urls?: string[];
     base64List?: string[];
     fallback: "assets" | "valuation" | "client" | "certificate";
+    /** The report excludes this whole image group (same switch as the system report). */
+    excluded?: boolean;
     project?: {
       _id?: unknown;
       valuationAccountingWorkspace?: unknown;
@@ -1647,6 +1656,7 @@ export class WordTemplateMergeService {
       return trimmedUrls.map((url) => ({ kind: "url" as const, url }));
     }
 
+    if (opts.excluded) return [];
     // قائمة URLs فارغة (أو غير مُرسلة) → احتياطي الخادم.
     // الواجهة كانت ترسل [] عند فراغ المخزن المحلي فتُمنع صور مرفق 3 بالكامل.
 

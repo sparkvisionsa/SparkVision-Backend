@@ -7,6 +7,7 @@ import { PDFParse } from "pdf-parse";
 import { getMongoDb } from "../server/mongodb";
 import type { MvAccessContext } from "./types";
 import type { DataExtractionDocument, DataExtractionField } from "./data-extraction.service";
+import { createMvTrashEntry, diffRemovedEmbeddedItems, registerMvTrashKind, trashEmbeddedRemovals } from "./mv-trash";
 
 const COLLECTION = "mv_data_extractions";
 const BUCKET = "mv_extraction_sources";
@@ -150,6 +151,11 @@ export class DataExtractionHistoryService {
     });
     const result = { ...record.result, fields, needsReview: fields.some(f => !f.reviewed && f.confidence !== "high"), status: fields.length ? "completed" as const : "empty" as const };
     const updatedAt = new Date();
+    // الحقول التي حُذفت من السجل تنتقل إلى سلة المحذوفات وتُستعاد إلى موضعها.
+    await trashEmbeddedRemovals(db, context,
+      { collection: COLLECTION, docId: record._id, location: record.result.fileName },
+      diffRemovedEmbeddedItems(record, { result }, [{ field: "result.fields", kind: "extractionField", labelKeys: ["label"] }]),
+    );
     await db.collection<SavedExtraction>(COLLECTION).updateOne(filter, { $set: { result, updatedAt } });
     return this.dto({ ...record, result, updatedAt });
   }
@@ -167,9 +173,26 @@ export class DataExtractionHistoryService {
 
   async remove(id: string, context: MvAccessContext) {
     const { db, record, filter } = await this.find(id, context);
-    const bucket = new GridFSBucket(db, { bucketName: BUCKET });
-    for (const fileId of [record.originalId, record.coverId, record.previewId]) if (fileId) await bucket.delete(fileId);
+    // نقل إلى سلة المحذوفات: السجل وملفاته (الأصل، المصغّرة، المعاينة) تبقى حتى الحذف النهائي.
+    await createMvTrashEntry(db, context, {
+      kind: "extraction",
+      label: record.result.fileName,
+      docs: [{ collection: COLLECTION, doc: record }],
+    });
     await db.collection<SavedExtraction>(COLLECTION).deleteOne(filter);
     return { deleted: true };
   }
 }
+
+registerMvTrashKind("extraction", {
+  purge: async (db, _entry, payload) => {
+    const bucket = new GridFSBucket(db, { bucketName: BUCKET });
+    for (const row of payload) {
+      if (row.role !== "doc") continue;
+      const record = row.doc as Partial<SavedExtraction>;
+      for (const fileId of [record.originalId, record.coverId, record.previewId]) {
+        if (fileId) await bucket.delete(fileId).catch(() => undefined);
+      }
+    }
+  },
+});

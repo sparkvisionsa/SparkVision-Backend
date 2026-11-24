@@ -21,21 +21,173 @@ test("removed custom report branding falls back to the built-in system template"
   assert.deepEqual(resolved.letterhead, {
     templateId: "default-report-template",
     outputFormat: "pdf",
+    customTemplates: [],
   });
 });
 
-test("system report template selection remains available", () => {
+test("only the Value Tech official built-in template remains available", () => {
   const resolved = resolveCompanyReportDefaults({
     letterhead: {
       templateId: "powerpoint-deck",
       outputFormat: "pdf",
+      companyName: "شركة فاليو تك للتقييم",
+      headerLine: "مقيم معتمد",
+      footerText: "الرياض، المملكة العربية السعودية",
+      logoPosition: "center",
+      showOnAllPages: false,
+      dataModelId: "individual",
     },
   });
 
   assert.deepEqual(resolved.letterhead, {
-    templateId: "powerpoint-deck",
-    outputFormat: "pptx",
+    templateId: "default-report-template",
+    outputFormat: "pdf",
+    customTemplates: [],
+    companyName: "شركة فاليو تك للتقييم",
+    headerLine: "مقيم معتمد",
+    footerText: "الرياض، المملكة العربية السعودية",
+    logoPosition: "center",
+    showOnAllPages: false,
+    dataModelId: "individual",
   });
+});
+
+test("custom system templates retain their design and can become the company default", () => {
+  const resolved = resolveCompanyReportDefaults({
+    letterhead: {
+      templateId: "system-template-premium",
+      outputFormat: "pptx",
+      customTemplates: [{
+        id: "system-template-premium",
+        name: "قالب الشركة التنفيذي",
+        description: "هوية خاصة للشركة",
+        summaryTable: {
+          enabled: true,
+          title: "ملخص التقييم",
+          labelColumnPct: 95,
+          fields: [
+            { id: "row-client", sourceKey: "clientName", label: "اسم العميل" },
+            { id: "row-date", sourceKey: "valuationDate", label: "تاريخ التقييم", type: "date" },
+            { id: "row-custom", sourceKey: "field:deed", label: "رقم الصك", type: "unknown" },
+            { id: "row-client", sourceKey: "duplicate", label: "مكرر" },
+            { id: "row-empty", sourceKey: "", label: "بلا مصدر" },
+            { id: "row-own", sourceKey: "custom", label: "الجهة", valueTemplate: "{{clientName}} - فرع الرياض" },
+          ],
+        },
+        colors: {
+          primary: "#123456",
+          secondary: "#07111F",
+          accent: "#D4AF37",
+          coverText: "#FFFFFF",
+          text: "#111827",
+          mutedText: "#64748B",
+          pageBackground: "#FAFAFA",
+          headerBackground: "#FFFFFF",
+          footerBackground: "#F1F5F9",
+          closingPrimary: "#5B2133",
+          closingSecondary: "#240A12",
+          closingText: "#FFF7ED",
+        },
+        typography: {
+          fontFamily: "Arial, sans-serif",
+          headingFontFamily: "Tahoma, sans-serif",
+          baseFontSize: 13,
+          headingScale: 1.15,
+          lineHeight: 1.8,
+          fontWeight: 500,
+          googleFontUrl: "https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap",
+        },
+        assets: {
+          coverBackgroundImage: "data:image/png;base64,YWJj",
+          closingBackgroundImage: "data:image/webp;base64,YWJj",
+        },
+        layout: {
+          backgroundFit: "cover",
+          contentAlign: "center",
+          logoPosition: "left",
+          pageMarginMm: 14,
+          headerHeightMm: 24,
+          footerHeightMm: 18,
+          coverOverlayOpacity: 0.25,
+          borderRadiusPx: 8,
+          showHeader: true,
+          showFooter: true,
+          showLogo: true,
+          showWatermark: true,
+          coverColorMode: "gradient",
+          coverGradientAngle: 120,
+          closingColorMode: "solid",
+          closingGradientAngle: 210,
+          closingOverlayOpacity: 0.35,
+        },
+        canvasElements: [{
+          id: "cover-title",
+          name: "Cover title",
+          page: "cover",
+          kind: "binding",
+          binding: "companyName",
+          x: 12.5,
+          y: 23,
+          width: 75,
+          height: 9,
+          rotation: -2,
+          zIndex: 30,
+          opacity: 0.9,
+          color: "#FFFFFF",
+          fontSize: 22,
+          fontWeight: 800,
+          textAlign: "center",
+        }, {
+          id: "cover-shape",
+          name: "Cover star",
+          page: "cover",
+          kind: "shape",
+          shapeType: "star",
+          x: 5,
+          y: 5,
+          width: 12,
+          height: 12,
+          rotation: 0,
+          zIndex: 5,
+          opacity: 1,
+          backgroundColor: "#D4AF37",
+        }],
+      }],
+    },
+  });
+
+  assert.equal(resolved.letterhead?.templateId, "system-template-premium");
+  assert.equal(resolved.letterhead?.outputFormat, "pdf");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.name, "قالب الشركة التنفيذي");
+  assert.deepEqual(resolved.letterhead?.customTemplates?.[0]?.summaryTable, {
+    enabled: true,
+    title: "ملخص التقييم",
+    labelColumnPct: 70,
+    fields: [
+      { id: "row-client", sourceKey: "clientName", label: "اسم العميل", type: "text" },
+      { id: "row-date", sourceKey: "valuationDate", label: "تاريخ التقييم", type: "date" },
+      { id: "row-custom", sourceKey: "field:deed", label: "رقم الصك", type: "text" },
+      { id: "row-own", sourceKey: "custom", label: "الجهة", type: "text", valueTemplate: "{{clientName}} - فرع الرياض" },
+    ],
+  });
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.colors.primary, "#123456");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.typography.headingScale, 1.15);
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.layout.showWatermark, true);
+  assert.match(resolved.letterhead?.customTemplates?.[0]?.assets.coverBackgroundImage ?? "", /^data:image\/png/);
+  const canvasElement = resolved.letterhead?.customTemplates?.[0]?.canvasElements?.[0];
+  assert.equal(canvasElement?.id, "cover-title");
+  assert.equal(canvasElement?.binding, "companyName");
+  assert.equal(canvasElement?.x, 12.5);
+  assert.equal(canvasElement?.rotation, -2);
+  assert.equal(canvasElement?.fontSize, 22);
+  assert.equal(canvasElement?.color, "#FFFFFF");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.canvasElements?.[1]?.shapeType, "star");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.typography.googleFontUrl, "https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.layout.coverGradientAngle, 120);
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.colors.closingPrimary, "#5B2133");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.colors.closingText, "#FFF7ED");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.layout.closingColorMode, "solid");
+  assert.equal(resolved.letterhead?.customTemplates?.[0]?.layout.closingOverlayOpacity, 0.35);
 });
 
 test("legacy singleton templates are exposed as named catalogue entries", () => {
@@ -159,6 +311,59 @@ test("Word and PowerPoint templates retain their selected report-data model inde
   });
   assert.equal(resolved.wordTemplates?.[0]?.reportDataModelId, "individual");
   assert.equal(resolved.pptxTemplates?.[0]?.reportDataModelId, "equipment");
+});
+
+test("report-section models preserve sidebar order, visibility, and edited item content", () => {
+  const resolved = resolveCompanyReportDefaults({
+    reportSectionModels: [
+      {
+        id: "custom-report-sections",
+        name: "نموذج تقرير مخصص",
+        isDefault: true,
+        visibleInReport: true,
+        sections: [
+          {
+            id: "section-two",
+            title: "القسم الثاني",
+            sectionNumber: "2",
+            visibleInReport: false,
+            items: [
+              {
+                id: "item-two",
+                title: "البند الثاني",
+                body: "محتوى البند المعدل",
+                visibleInReport: true,
+                overrideSystemContent: true,
+              },
+            ],
+          },
+          {
+            id: "section-one",
+            title: "القسم الأول",
+            sectionNumber: "1",
+            visibleInReport: true,
+            items: [
+              {
+                id: "item-one",
+                title: "البند الأول",
+                body: "محتوى مخفي",
+                visibleInReport: false,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const model = resolved.reportSectionModels?.[0];
+  assert.equal(model?.id, "custom-report-sections");
+  assert.equal(model?.isDefault, true);
+  assert.deepEqual(model?.sections.map((section) => section.id), ["section-two", "section-one"]);
+  assert.equal(model?.sections[0]?.visibleInReport, false);
+  assert.equal(model?.sections[0]?.items[0]?.body, "محتوى البند المعدل");
+  assert.equal(model?.sections[0]?.items[0]?.overrideSystemContent, true);
+  assert.equal(model?.sections[1]?.items[0]?.visibleInReport, false);
 });
 
 test("the report-team source resolves structured members to readable template text", () => {

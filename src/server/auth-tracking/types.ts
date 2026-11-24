@@ -135,6 +135,118 @@ export interface CompanyReportCustomGroup {
 export interface CompanyReportSystemTemplate {
   templateId?: string | null;
   outputFormat?: "pdf" | "pptx" | null;
+  customTemplates?: CompanyReportSystemTemplateDefinition[];
+  companyName?: string;
+  headerLine?: string;
+  footerText?: string;
+  logoPosition?: "right" | "center" | "left";
+  showOnAllPages?: boolean;
+  dataModelId?: string;
+}
+
+export interface CompanyReportSummaryTableField {
+  id: string;
+  sourceKey: string;
+  label: string;
+  type?: "text" | "textarea" | "number" | "date";
+  /** Own value text for the row; may contain `{{variables}}`. Overrides the field value. */
+  valueTemplate?: string;
+}
+
+export interface CompanyReportSummaryTable {
+  enabled: boolean;
+  title?: string;
+  labelColumnPct?: number;
+  fields: CompanyReportSummaryTableField[];
+}
+
+export interface CompanyReportSystemTemplateDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  canvasElements?: CompanyReportTemplateCanvasElement[];
+  summaryTable?: CompanyReportSummaryTable;
+  colors: {
+    primary: string;
+    secondary: string;
+    accent: string;
+    coverText: string;
+    text: string;
+    mutedText: string;
+    pageBackground: string;
+    headerBackground: string;
+    footerBackground: string;
+    closingPrimary?: string;
+    closingSecondary?: string;
+    closingText?: string;
+  };
+  typography: {
+    fontFamily: string;
+    headingFontFamily: string;
+    baseFontSize: number;
+    headingScale: number;
+    lineHeight: number;
+    fontWeight: number;
+    googleFontUrl?: string;
+  };
+  assets: {
+    coverBackgroundImage?: string | null;
+    closingBackgroundImage?: string | null;
+    portraitPageBackgroundImage?: string | null;
+    landscapePageBackgroundImage?: string | null;
+    headerImage?: string | null;
+    footerImage?: string | null;
+  };
+  layout: {
+    backgroundFit: "cover" | "fill";
+    contentAlign: "right" | "center" | "left";
+    logoPosition: "right" | "center" | "left";
+    pageMarginMm: number;
+    headerHeightMm: number;
+    footerHeightMm: number;
+    coverOverlayOpacity: number;
+    borderRadiusPx: number;
+    showHeader: boolean;
+    showFooter: boolean;
+    showLogo: boolean;
+    showWatermark: boolean;
+    coverColorMode?: "solid" | "gradient";
+    coverGradientAngle?: number;
+    closingColorMode?: "solid" | "gradient";
+    closingGradientAngle?: number;
+    closingOverlayOpacity?: number;
+  };
+}
+
+export interface CompanyReportTemplateCanvasElement {
+  id: string;
+  name: string;
+  page: "cover" | "interior" | "closing";
+  kind: "text" | "logo" | "shape" | "image" | "binding";
+  binding?: "companyName" | "reportContent" | "footerContent" | "reportTitle" | "clientName" | "commercialRegistration" | "companyManagerName" | "companyManagerMembership" | "reportReference" | "reportDate";
+  shapeType?: "rectangle" | "rounded" | "circle" | "pill" | "line" | "triangle" | "diamond" | "hexagon" | "star" | "arrow" | "chevron" | "speech";
+  text?: string;
+  imageDataUrl?: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  zIndex: number;
+  opacity: number;
+  color?: string;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  borderRadius?: number;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  textAlign?: "right" | "center" | "left";
+  locked?: boolean;
+  hidden?: boolean;
 }
 
 export interface CompanyAiReportTemplateVariable {

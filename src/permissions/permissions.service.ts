@@ -17,6 +17,7 @@ import type {
   ValueTechProductId,
 } from "@/server/auth-tracking/types";
 import { catalogGrantKeys, PERMISSION_CATALOG } from "./permission-catalog";
+import { createMvTrashEntry, mvTrashActorFromContext, registerMvTrashKind } from "@/machine-valuation/mv-trash";
 
 const COLLECTION = "company_permission_profiles";
 const PRODUCT_IDS = ["machine-valuation", "real-estate-valuation"] as const;
@@ -42,6 +43,17 @@ export interface CompanyPermissionProfileDoc {
 }
 
 type PermissionProfile = WithId<CompanyPermissionProfileDoc>;
+
+registerMvTrashKind("permissionProfile", {
+  restore: async (db, entry) => {
+    const membershipIds = Array.isArray(entry.data.membershipIds) ? entry.data.membershipIds as ObjectId[] : [];
+    if (membershipIds.length === 0) return;
+    await getAuthCollections(db).userCompanyMemberships.updateMany(
+      { _id: { $in: membershipIds } },
+      { $addToSet: { [`permissionProfileIds.${String(entry.data.productId)}`]: String(entry.data.profileId) } } as never,
+    );
+  },
+});
 
 function profiles(db: Db) {
   return db.collection<CompanyPermissionProfileDoc>(COLLECTION);
@@ -288,8 +300,19 @@ export async function deletePermissionProfile(request: Request, id: string) {
   const row = await profiles(db).findOne({ _id: new ObjectId(id), companyId: context.company!._id, productId });
   if (!row) throw new NotFoundException("الصلاحية غير موجودة.");
   if (row.isDefault) throw new BadRequestException("لا يمكن حذف الصلاحية الافتراضية.");
-  await profiles(db).deleteOne({ _id: row._id });
   const field = `permissionProfileIds.${productId}`;
+  if (productId === "machine-valuation") {
+    // نقل إلى سلة المحذوفات مع قائمة من كانت مسندة إليهم لتعود إليهم عند الاستعادة.
+    const assigned = await getAuthCollections(db).userCompanyMemberships
+      .find({ companyId: context.company!._id, [field]: id }, { projection: { _id: 1 } }).toArray();
+    await createMvTrashEntry(db, mvTrashActorFromContext(context), {
+      kind: "permissionProfile",
+      label: row.name,
+      data: { productId, profileId: id, membershipIds: assigned.map((membership) => membership._id) },
+      docs: [{ collection: COLLECTION, doc: row }],
+    });
+  }
+  await profiles(db).deleteOne({ _id: row._id });
   await getAuthCollections(db).userCompanyMemberships.updateMany(
     { companyId: context.company!._id, [field]: id },
     { $pull: { [field]: id } } as never,

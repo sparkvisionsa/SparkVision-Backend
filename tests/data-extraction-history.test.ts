@@ -3,6 +3,8 @@ import test from "node:test";
 import mongoose from "mongoose";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import sharp from "sharp";
+import { ObjectId, type Db } from "mongodb";
+import { MV_TRASH_COLLECTION, purgeMvTrashEntry, restoreMvTrashEntry } from "../src/machine-valuation/mv-trash";
 import { DataExtractionHistoryService } from "../src/machine-valuation/data-extraction-history.service";
 import type { MvAccessContext } from "../src/machine-valuation/types";
 import type { DataExtractionDocument } from "../src/machine-valuation/data-extraction.service";
@@ -48,9 +50,30 @@ test("history persists source, cover, Arabic fields and edits and isolates owner
     assert.deepEqual(updated.fields[0]?.source, reopened.fields[0]?.source);
     await service.remove(saved.id, owner);
     assert.equal((await service.list(owner)).items.length, 0);
-    const db = mongoose.connection.db!;
+    const db = mongoose.connection.db! as unknown as Db;
+    // الحذف ينقل السجل إلى سلة المحذوفات: ملفاته تبقى حتى الحذف النهائي ويعود كما كان عند الاستعادة.
+    assert.equal(await db.collection("mv_extraction_sources.files").countDocuments(), 3);
+    const superAdmin = { userId: new ObjectId().toString(), companyId: null, isSuperAdmin: true, userRole: "super_admin" };
+    const trashed = await db.collection(MV_TRASH_COLLECTION).findOne({ kind: "extraction" });
+    assert.equal(trashed?.label, "صك.png");
+    await restoreMvTrashEntry(db, trashed!._id, superAdmin);
+    const restored = await service.get(saved.id, owner);
+    assert.equal(restored.fields[0]?.value, "654321");
+    (await service.file(saved.id, "original", owner)).stream.destroy();
+
+    // حذف حقل من السجل ثم استعادته إلى موضعه.
+    await service.update(saved.id, { fields: [] }, owner);
+    const trashedField = await db.collection(MV_TRASH_COLLECTION).findOne({ kind: "extractionField" });
+    assert.equal(trashedField?.label, "رقم الوثيقة");
+    await restoreMvTrashEntry(db, trashedField!._id, superAdmin);
+    assert.equal((await service.get(saved.id, owner)).fields[0]?.value, "654321");
+
+    await service.remove(saved.id, owner);
+    const again = await db.collection(MV_TRASH_COLLECTION).findOne({ kind: "extraction" });
+    await purgeMvTrashEntry(db, again!._id, superAdmin);
     assert.equal(await db.collection("mv_extraction_sources.files").countDocuments(), 0);
     assert.equal(await db.collection("mv_extraction_sources.chunks").countDocuments(), 0);
+    assert.equal(await db.collection(MV_TRASH_COLLECTION).countDocuments(), 0);
   } finally {
     await mongoose.disconnect();
     await mongo.stop();

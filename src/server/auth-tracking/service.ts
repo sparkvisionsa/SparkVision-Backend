@@ -29,6 +29,15 @@ import {
 } from "./context";
 import { tryParseObjectId } from "@/common/object-id.util";
 import { zodRequestMessage } from "@/common/zod-request-message";
+import {
+  createMvTrashEntry,
+  diffRemovedEmbeddedItems,
+  isMvProductRequest,
+  mvTrashActorFromContext,
+  registerMvTrashKind,
+  trashEmbeddedRemovals,
+  type MvEmbeddedSpec,
+} from "@/machine-valuation/mv-trash";
 import { hashPassword, randomId, verifyPassword } from "./crypto";
 import { consumeRateLimit } from "./rate-limit";
 import { deleteCachedSession, writeCachedSession } from "./session-store";
@@ -49,6 +58,10 @@ import type {
   CompanyMembershipRole,
   CompanyReportDefaults,
   CompanyReportSystemTemplate,
+  CompanyReportSystemTemplateDefinition,
+  CompanyReportTemplateCanvasElement,
+  CompanyReportSummaryTable,
+  CompanyReportSummaryTableField,
   CompanyReportOnlySignatory,
   CompanyReportPptxTemplate,
   CompanyReportSignatoryRow,
@@ -2618,6 +2631,8 @@ async function finalizeCompanyReportTemplateStorage(
   companyId: string,
   previousReportDefaults: unknown,
   storageContext: CompanyReportTemplateStorageContext,
+  /** قوالب نُقلت إلى سلة المحذوفات بهذا الحفظ: ملفاتها تبقى حتى الحذف النهائي. */
+  trashedReportDefaults?: unknown,
 ): Promise<void> {
   const db = await getMongoDb();
   const { companies } = getAuthCollections(db);
@@ -2673,7 +2688,7 @@ async function finalizeCompanyReportTemplateStorage(
 
   for (const kind of ["word", "pptx"] as const) {
     const previous = companyReportTemplateReferences(previousReportDefaults, kind);
-    const current = currentByKind[kind];
+    const current = [...currentByKind[kind], ...companyReportTemplateReferences(trashedReportDefaults, kind)];
     const currentGridFsIds = new Set(current.map((reference) => reference.gridFsFileId).filter(Boolean));
     const currentFileUrls = new Set(current.map((reference) => reference.fileUrl).filter(Boolean));
     for (const reference of previous) {
@@ -2755,30 +2770,238 @@ function sanitizeCompanyReportCustomSections(value: unknown): CompanyReportCusto
     .filter((item): item is CompanyReportCustomSection => item != null);
 }
 
-const COMPANY_REPORT_SYSTEM_TEMPLATE_IDS = new Set([
-  "default-report-template",
-  "classic-letterhead",
-  "modern-letterhead",
-  "executive-navy",
-  "industrial-amber",
-  "minimal-graphite",
-  "field-teal",
-  "premium-burgundy",
-  "creative-blocks",
-  "powerpoint-deck",
-]);
+const COMPANY_REPORT_OFFICIAL_TEMPLATE_ID = "default-report-template";
+const COMPANY_REPORT_TEMPLATE_IMAGE_MAX_CHARS = 4_200_000;
+const COMPANY_REPORT_TEMPLATE_IMAGES_TOTAL_MAX_CHARS = 12_000_000;
+
+function sanitizeCompanyReportSystemTemplateDefinitions(
+  value: unknown,
+): CompanyReportSystemTemplateDefinition[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  let remainingImageChars = COMPANY_REPORT_TEMPLATE_IMAGES_TOTAL_MAX_CHARS;
+  const color = (candidate: unknown, fallback: string) => {
+    const normalized = typeof candidate === "string" ? candidate.trim().toUpperCase() : "";
+    return /^#[0-9A-F]{6}$/.test(normalized) ? normalized : fallback;
+  };
+  const optionalColor = (candidate: unknown) => {
+    const normalized = typeof candidate === "string" ? candidate.trim().toUpperCase() : "";
+    return /^#[0-9A-F]{6}$/.test(normalized) ? normalized : undefined;
+  };
+  const number = (candidate: unknown, fallback: number, min: number, max: number) =>
+    typeof candidate === "number" && Number.isFinite(candidate)
+      ? Math.max(min, Math.min(max, candidate))
+      : fallback;
+  const image = (candidate: unknown) => {
+    if (
+      typeof candidate !== "string" ||
+      candidate.length > COMPANY_REPORT_TEMPLATE_IMAGE_MAX_CHARS ||
+      candidate.length > remainingImageChars ||
+      !/^data:image\/(?:png|jpe?g|webp);base64,/i.test(candidate)
+    ) return null;
+    remainingImageChars -= candidate.length;
+    return candidate;
+  };
+
+  return value.slice(0, 20).flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const data = item as Record<string, unknown>;
+    const id = sanitizeReportDefaultsText(data.id, 120) || `system-template-${index + 1}`;
+    if (id === COMPANY_REPORT_OFFICIAL_TEMPLATE_ID || seen.has(id)) return [];
+    seen.add(id);
+    const colors = data.colors && typeof data.colors === "object" && !Array.isArray(data.colors)
+      ? data.colors as Record<string, unknown>
+      : {};
+    const typography = data.typography && typeof data.typography === "object" && !Array.isArray(data.typography)
+      ? data.typography as Record<string, unknown>
+      : {};
+    const assets = data.assets && typeof data.assets === "object" && !Array.isArray(data.assets)
+      ? data.assets as Record<string, unknown>
+      : {};
+    const layout = data.layout && typeof data.layout === "object" && !Array.isArray(data.layout)
+      ? data.layout as Record<string, unknown>
+      : {};
+    const asset = (key: string) => image(assets[key]);
+    const sanitizedAssets = {
+      coverBackgroundImage: asset("coverBackgroundImage"),
+      closingBackgroundImage: asset("closingBackgroundImage"),
+      portraitPageBackgroundImage: asset("portraitPageBackgroundImage"),
+      landscapePageBackgroundImage: asset("landscapePageBackgroundImage"),
+      headerImage: asset("headerImage"),
+      footerImage: asset("footerImage"),
+    };
+    const canvasElements: CompanyReportTemplateCanvasElement[] = Array.isArray(data.canvasElements)
+      ? data.canvasElements.slice(0, 120).flatMap((rawElement, elementIndex) => {
+          if (!rawElement || typeof rawElement !== "object" || Array.isArray(rawElement)) return [];
+          const element = rawElement as Record<string, unknown>;
+          const page = element.page === "interior" || element.page === "closing" ? element.page : "cover";
+          const kind = element.kind === "logo" || element.kind === "shape" || element.kind === "image" || element.kind === "binding"
+            ? element.kind
+            : "text";
+          const binding = element.binding === "companyName" || element.binding === "reportContent" || element.binding === "footerContent" || element.binding === "reportTitle" || element.binding === "clientName" || element.binding === "commercialRegistration" || element.binding === "companyManagerName" || element.binding === "companyManagerMembership" || element.binding === "reportReference" || element.binding === "reportDate"
+            ? element.binding
+            : undefined;
+          const shapeType = element.shapeType === "rounded" || element.shapeType === "circle" || element.shapeType === "pill" || element.shapeType === "line" || element.shapeType === "triangle" || element.shapeType === "diamond" || element.shapeType === "hexagon" || element.shapeType === "star" || element.shapeType === "arrow" || element.shapeType === "chevron" || element.shapeType === "speech"
+            ? element.shapeType
+            : "rectangle";
+          const width = number(element.width, 30, 2, 100);
+          const height = number(element.height, 10, 0.3, 100);
+          const imageDataUrl = kind === "image" ? image(element.imageDataUrl) : null;
+          return [{
+            id: sanitizeReportDefaultsText(element.id, 120) || `canvas-element-${elementIndex + 1}`,
+            name: sanitizeReportDefaultsText(element.name, 120) || `عنصر ${elementIndex + 1}`,
+            page,
+            kind,
+            ...(binding ? { binding } : {}),
+            ...(kind === "shape" ? { shapeType } : {}),
+            ...(sanitizeReportDefaultsText(element.text, 2000) ? { text: sanitizeReportDefaultsText(element.text, 2000) } : {}),
+            ...(imageDataUrl ? { imageDataUrl } : {}),
+            x: number(element.x, 10, 0, 100 - width),
+            y: number(element.y, 10, 0, 100 - height),
+            width,
+            height,
+            rotation: number(element.rotation, 0, -180, 180),
+            zIndex: number(element.zIndex, elementIndex + 1, -100, 500),
+            opacity: number(element.opacity, 1, 0, 1),
+            ...(optionalColor(element.color) ? { color: optionalColor(element.color) } : {}),
+            ...(optionalColor(element.backgroundColor) ? { backgroundColor: optionalColor(element.backgroundColor) } : {}),
+            ...(optionalColor(element.borderColor) ? { borderColor: optionalColor(element.borderColor) } : {}),
+            borderWidth: number(element.borderWidth, 0, 0, 20),
+            borderRadius: number(element.borderRadius, 0, 0, 100),
+            ...(sanitizeReportDefaultsText(element.fontFamily, 160) ? { fontFamily: sanitizeReportDefaultsText(element.fontFamily, 160) } : {}),
+            fontSize: number(element.fontSize, 16, 6, 96),
+            fontWeight: number(element.fontWeight, 500, 100, 900),
+            textAlign: element.textAlign === "center" || element.textAlign === "left" ? element.textAlign : "right",
+            locked: element.locked === true,
+            hidden: element.hidden === true,
+          } satisfies CompanyReportTemplateCanvasElement];
+        })
+      : [];
+    const rawSummary = data.summaryTable && typeof data.summaryTable === "object" && !Array.isArray(data.summaryTable)
+      ? data.summaryTable as Record<string, unknown>
+      : null;
+    const summaryTable: CompanyReportSummaryTable | undefined = rawSummary
+      ? (() => {
+          const seenFields = new Set<string>();
+          const fields = (Array.isArray(rawSummary.fields) ? rawSummary.fields : []).slice(0, 60).flatMap((rawField, fieldIndex) => {
+            if (!rawField || typeof rawField !== "object" || Array.isArray(rawField)) return [];
+            const field = rawField as Record<string, unknown>;
+            const sourceKey = sanitizeReportDefaultsText(field.sourceKey, 160);
+            if (!sourceKey) return [];
+            const fieldId = sanitizeReportDefaultsText(field.id, 120) || `summary-field-${fieldIndex + 1}`;
+            if (seenFields.has(fieldId)) return [];
+            seenFields.add(fieldId);
+            const type = field.type === "textarea" || field.type === "number" || field.type === "date" ? field.type : "text";
+            const valueTemplate = typeof field.valueTemplate === "string" ? field.valueTemplate.replace(/\u0000/g, "").slice(0, 1000) : "";
+            return [{
+              id: fieldId,
+              sourceKey,
+              label: sanitizeReportDefaultsText(field.label, 180),
+              type,
+              ...(valueTemplate.trim() ? { valueTemplate } : {}),
+            } satisfies CompanyReportSummaryTableField];
+          });
+          const title = sanitizeReportDefaultsText(rawSummary.title, 180);
+          return {
+            enabled: rawSummary.enabled === true,
+            ...(title ? { title } : {}),
+            labelColumnPct: number(rawSummary.labelColumnPct, 38, 20, 70),
+            fields,
+          };
+        })()
+      : undefined;
+    return [{
+      id,
+      name: sanitizeReportDefaultsText(data.name, 120) || `قالب نظام ${index + 1}`,
+      ...(sanitizeReportDefaultsText(data.description, 600)
+        ? { description: sanitizeReportDefaultsText(data.description, 600) }
+        : {}),
+      ...(sanitizeReportDefaultsText(data.createdAt, 40) ? { createdAt: sanitizeReportDefaultsText(data.createdAt, 40) } : {}),
+      ...(sanitizeReportDefaultsText(data.updatedAt, 40) ? { updatedAt: sanitizeReportDefaultsText(data.updatedAt, 40) } : {}),
+      canvasElements,
+      ...(summaryTable ? { summaryTable } : {}),
+      colors: {
+        primary: color(colors.primary, "#0C447C"),
+        secondary: color(colors.secondary, "#061B2D"),
+        accent: color(colors.accent, "#C9A227"),
+        coverText: color(colors.coverText, "#FFFFFF"),
+        text: color(colors.text, "#0F172A"),
+        mutedText: color(colors.mutedText, "#475569"),
+        pageBackground: color(colors.pageBackground, "#FFFFFF"),
+        headerBackground: color(colors.headerBackground, "#FFFFFF"),
+        footerBackground: color(colors.footerBackground, "#F4F7FA"),
+        closingPrimary: color(colors.closingPrimary, color(colors.primary, "#0C447C")),
+        closingSecondary: color(colors.closingSecondary, color(colors.secondary, "#061B2D")),
+        closingText: color(colors.closingText, color(colors.coverText, "#FFFFFF")),
+      },
+      typography: {
+        fontFamily: sanitizeReportDefaultsText(typography.fontFamily, 160) || "Arial, sans-serif",
+        headingFontFamily: sanitizeReportDefaultsText(typography.headingFontFamily, 160) || "Arial, sans-serif",
+        baseFontSize: number(typography.baseFontSize, 12.5, 8, 24),
+        headingScale: number(typography.headingScale, 1, 0.7, 2),
+        lineHeight: number(typography.lineHeight, 1.75, 1, 3),
+        fontWeight: number(typography.fontWeight, 500, 300, 900),
+        ...(/^https:\/\/fonts\.googleapis\.com\//i.test(sanitizeReportDefaultsText(typography.googleFontUrl, 600))
+          ? { googleFontUrl: sanitizeReportDefaultsText(typography.googleFontUrl, 600) }
+          : {}),
+      },
+      assets: {
+        ...(sanitizedAssets.coverBackgroundImage ? { coverBackgroundImage: sanitizedAssets.coverBackgroundImage } : {}),
+        ...(sanitizedAssets.closingBackgroundImage ? { closingBackgroundImage: sanitizedAssets.closingBackgroundImage } : {}),
+        ...(sanitizedAssets.portraitPageBackgroundImage ? { portraitPageBackgroundImage: sanitizedAssets.portraitPageBackgroundImage } : {}),
+        ...(sanitizedAssets.landscapePageBackgroundImage ? { landscapePageBackgroundImage: sanitizedAssets.landscapePageBackgroundImage } : {}),
+        ...(sanitizedAssets.headerImage ? { headerImage: sanitizedAssets.headerImage } : {}),
+        ...(sanitizedAssets.footerImage ? { footerImage: sanitizedAssets.footerImage } : {}),
+      },
+      layout: {
+        backgroundFit: layout.backgroundFit === "fill" ? "fill" : "cover",
+        contentAlign: layout.contentAlign === "center" || layout.contentAlign === "left" ? layout.contentAlign : "right",
+        logoPosition: layout.logoPosition === "center" || layout.logoPosition === "left" ? layout.logoPosition : "right",
+        pageMarginMm: number(layout.pageMarginMm, 12, 4, 30),
+        headerHeightMm: number(layout.headerHeightMm, 25, 0, 50),
+        footerHeightMm: number(layout.footerHeightMm, 22, 0, 50),
+        coverOverlayOpacity: number(layout.coverOverlayOpacity, 0.18, 0, 0.9),
+        borderRadiusPx: number(layout.borderRadiusPx, 6, 0, 32),
+        showHeader: layout.showHeader !== false,
+        showFooter: layout.showFooter !== false,
+        showLogo: layout.showLogo !== false,
+        showWatermark: layout.showWatermark === true,
+        coverColorMode: layout.coverColorMode === "solid" ? "solid" : "gradient",
+        coverGradientAngle: number(layout.coverGradientAngle, 145, 0, 360),
+        closingColorMode: layout.closingColorMode === "solid" ? "solid" : "gradient",
+        closingGradientAngle: number(layout.closingGradientAngle, 145, 0, 360),
+        closingOverlayOpacity: number(layout.closingOverlayOpacity, 0.18, 0, 0.9),
+      },
+    } satisfies CompanyReportSystemTemplateDefinition];
+  });
+}
 
 function sanitizeCompanyReportSystemTemplate(value: unknown): CompanyReportSystemTemplate {
   const data = value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
   const requestedTemplateId = sanitizeReportDefaultsText(data.templateId, 80);
-  const templateId = COMPANY_REPORT_SYSTEM_TEMPLATE_IDS.has(requestedTemplateId)
+  const customTemplates = sanitizeCompanyReportSystemTemplateDefinitions(data.customTemplates);
+  const templateId = requestedTemplateId === COMPANY_REPORT_OFFICIAL_TEMPLATE_ID ||
+    customTemplates.some((template) => template.id === requestedTemplateId)
     ? requestedTemplateId
-    : "default-report-template";
+    : COMPANY_REPORT_OFFICIAL_TEMPLATE_ID;
+  const companyName = sanitizeReportDefaultsText(data.companyName, 180);
+  const headerLine = sanitizeReportDefaultsText(data.headerLine, 300);
+  const footerText = sanitizeReportDefaultsText(data.footerText, 300);
+  const dataModelId = sanitizeReportDefaultsText(data.dataModelId, 120);
   return {
     templateId,
-    outputFormat: templateId === "powerpoint-deck" ? "pptx" : "pdf",
+    outputFormat: "pdf",
+    customTemplates,
+    ...(companyName ? { companyName } : {}),
+    ...(headerLine ? { headerLine } : {}),
+    ...(footerText ? { footerText } : {}),
+    ...(data.logoPosition === "right" || data.logoPosition === "center" || data.logoPosition === "left"
+      ? { logoPosition: data.logoPosition }
+      : {}),
+    ...(typeof data.showOnAllPages === "boolean" ? { showOnAllPages: data.showOnAllPages } : {}),
+    ...(dataModelId ? { dataModelId } : {}),
   };
 }
 
@@ -3561,6 +3784,115 @@ const pptxTemplateItemSchema = z
 
 const pptxTemplateSchema = pptxTemplateItemSchema.optional().nullable();
 
+const systemTemplateImageSchema = z
+  .string()
+  .max(COMPANY_REPORT_TEMPLATE_IMAGE_MAX_CHARS)
+  .refine((value) => /^data:image\/(?:png|jpe?g|webp);base64,/i.test(value), {
+    message: "صورة قالب النظام غير صالحة",
+  })
+  .optional()
+  .nullable();
+
+const systemTemplateCanvasElementSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  page: z.enum(["cover", "interior", "closing"]),
+  kind: z.enum(["text", "logo", "shape", "image", "binding"]),
+  binding: z.enum(["companyName", "reportContent", "footerContent", "reportTitle", "clientName", "commercialRegistration", "companyManagerName", "companyManagerMembership", "reportReference", "reportDate"]).optional(),
+  shapeType: z.enum(["rectangle", "rounded", "circle", "pill", "line", "triangle", "diamond", "hexagon", "star", "arrow", "chevron", "speech"]).optional(),
+  text: z.string().max(2000).optional(),
+  imageDataUrl: systemTemplateImageSchema,
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  width: z.number().min(2).max(100),
+  height: z.number().min(0.3).max(100),
+  rotation: z.number().min(-180).max(180),
+  zIndex: z.number().min(-100).max(500),
+  opacity: z.number().min(0).max(1),
+  color: z.string().max(16).optional(),
+  backgroundColor: z.string().max(16).optional(),
+  borderColor: z.string().max(16).optional(),
+  borderWidth: z.number().min(0).max(20).optional(),
+  borderRadius: z.number().min(0).max(100).optional(),
+  fontFamily: z.string().max(160).optional(),
+  fontSize: z.number().min(6).max(96).optional(),
+  fontWeight: z.number().min(100).max(900).optional(),
+  textAlign: z.enum(["right", "center", "left"]).optional(),
+  locked: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+});
+
+const systemTemplateDefinitionSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  description: z.string().max(600).optional(),
+  createdAt: z.string().max(40).optional(),
+  updatedAt: z.string().max(40).optional(),
+  canvasElements: z.array(systemTemplateCanvasElementSchema).max(120).optional(),
+  summaryTable: z.object({
+    enabled: z.boolean(),
+    title: z.string().max(180).optional(),
+    labelColumnPct: z.number().min(20).max(70).optional(),
+    fields: z.array(z.object({
+      id: z.string().min(1).max(120),
+      sourceKey: z.string().min(1).max(160),
+      label: z.string().max(180),
+      type: z.enum(["text", "textarea", "number", "date"]).optional(),
+      valueTemplate: z.string().max(1000).optional(),
+    })).max(60),
+  }).optional(),
+  colors: z.object({
+    primary: z.string().max(16),
+    secondary: z.string().max(16),
+    accent: z.string().max(16),
+    coverText: z.string().max(16),
+    text: z.string().max(16),
+    mutedText: z.string().max(16),
+    pageBackground: z.string().max(16),
+    headerBackground: z.string().max(16),
+    footerBackground: z.string().max(16),
+    closingPrimary: z.string().max(16).optional(),
+    closingSecondary: z.string().max(16).optional(),
+    closingText: z.string().max(16).optional(),
+  }),
+  typography: z.object({
+    fontFamily: z.string().max(160),
+    headingFontFamily: z.string().max(160),
+    baseFontSize: z.number().min(8).max(24),
+    headingScale: z.number().min(0.7).max(2),
+    lineHeight: z.number().min(1).max(3),
+    fontWeight: z.number().min(300).max(900),
+    googleFontUrl: z.string().url().max(600).optional(),
+  }),
+  assets: z.object({
+    coverBackgroundImage: systemTemplateImageSchema,
+    closingBackgroundImage: systemTemplateImageSchema,
+    portraitPageBackgroundImage: systemTemplateImageSchema,
+    landscapePageBackgroundImage: systemTemplateImageSchema,
+    headerImage: systemTemplateImageSchema,
+    footerImage: systemTemplateImageSchema,
+  }).partial(),
+  layout: z.object({
+    backgroundFit: z.enum(["cover", "fill"]),
+    contentAlign: z.enum(["right", "center", "left"]),
+    logoPosition: z.enum(["right", "center", "left"]),
+    pageMarginMm: z.number().min(4).max(30),
+    headerHeightMm: z.number().min(0).max(50),
+    footerHeightMm: z.number().min(0).max(50),
+    coverOverlayOpacity: z.number().min(0).max(0.9),
+    borderRadiusPx: z.number().min(0).max(32),
+    showHeader: z.boolean(),
+    showFooter: z.boolean(),
+    showLogo: z.boolean(),
+    showWatermark: z.boolean(),
+    coverColorMode: z.enum(["solid", "gradient"]).optional(),
+    coverGradientAngle: z.number().min(0).max(360).optional(),
+    closingColorMode: z.enum(["solid", "gradient"]).optional(),
+    closingGradientAngle: z.number().min(0).max(360).optional(),
+    closingOverlayOpacity: z.number().min(0).max(0.9).optional(),
+  }),
+});
+
 const updateCompanyReportDefaultsSchema = z.object({
   scope: z
     .object({
@@ -3686,6 +4018,25 @@ const updateCompanyReportDefaultsSchema = z.object({
     .object({
       templateId: z.string().max(80).optional().nullable(),
       outputFormat: z.enum(["pdf", "pptx"]).optional().nullable(),
+      customTemplates: z.array(systemTemplateDefinitionSchema).max(20).refine(
+        (templates) => templates.reduce((total, template) =>
+          total +
+          Object.values(template.assets).reduce(
+            (assetTotal, asset) => assetTotal + (typeof asset === "string" ? asset.length : 0),
+            0,
+          ) +
+          (template.canvasElements ?? []).reduce(
+            (elementTotal, element) => elementTotal + (typeof element.imageDataUrl === "string" ? element.imageDataUrl.length : 0),
+            0,
+          ), 0) <= COMPANY_REPORT_TEMPLATE_IMAGES_TOTAL_MAX_CHARS,
+        { message: "إجمالي صور قوالب النظام كبير جداً" },
+      ).optional(),
+      companyName: z.string().max(180).optional(),
+      headerLine: z.string().max(300).optional(),
+      footerText: z.string().max(300).optional(),
+      logoPosition: z.enum(["right", "center", "left"]).optional(),
+      showOnAllPages: z.boolean().optional(),
+      dataModelId: z.string().max(120).optional(),
     })
     .partial()
     .optional(),
@@ -4552,11 +4903,46 @@ export async function updateCompanyReportDefaultsByCompanyAdmin(request: Request
     throw error;
   }
 
+  // ما حُذف بهذا الحفظ (نموذج، قسم، حقل، قالب…) ينتقل إلى سلة المحذوفات. إعدادات
+  // التقرير تخص نظام تقييم الآلات والمعدات ما لم يُصرَّح بغيره.
+  const trashedTemplates: Record<string, unknown[]> = { wordTemplates: [], pptxTemplates: [] };
+  if (readProductIdFromRequest(request) !== "real-estate-valuation" && existingCompany?.reportDefaults) {
+    try {
+      const previous = existingCompany.reportDefaults as unknown as Record<string, unknown>;
+      // مفتاح لم يرسله العميل لا يُعد حذفاً لمحتواه.
+      const sent = (key: string) => Object.prototype.hasOwnProperty.call(incomingDefaults, key);
+      const next: Record<string, unknown> = { ...(sanitized as unknown as Record<string, unknown>) };
+      for (const key of ["reportDataModels", "reportSectionModels", "wordTemplates", "pptxTemplates"]) {
+        if (!sent(key)) next[key] = previous[key];
+      }
+      const sentLetterhead = incomingDefaults.letterhead as { customTemplates?: unknown } | undefined;
+      if (!Array.isArray(sentLetterhead?.customTemplates)) next.letterhead = previous.letterhead;
+      const removals = diffRemovedEmbeddedItems(
+        { reportDefaults: previous },
+        { reportDefaults: next },
+        COMPANY_REPORT_DEFAULTS_TRASH_SPECS,
+      );
+      for (const removal of removals) {
+        if (removal.kind === "wordTemplate") trashedTemplates.wordTemplates!.push(removal.item);
+        if (removal.kind === "pptxTemplate") trashedTemplates.pptxTemplates!.push(removal.item);
+      }
+      await trashEmbeddedRemovals(
+        db,
+        mvTrashActorFromContext(context),
+        { collection: companies.collectionName, docId: companyId },
+        removals,
+      );
+    } catch (error) {
+      console.warn(`Could not move removed report settings to trash: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   try {
     await finalizeCompanyReportTemplateStorage(
       companyId.toString(),
       existingCompany?.reportDefaults,
       storageContext,
+      trashedTemplates,
     );
   } catch (error) {
     // The database now references an intact GridFS object. Cleanup and local
@@ -4606,6 +4992,20 @@ export async function updateCompanyBrandingByCompanyAdmin(request: Request, body
     $set.commercialRegistration = value || null;
   }
 
+  if ($set.logoDataUrl === null && isMvProductRequest(request)) {
+    const previousLogo = (await companies.findOne({ _id: companyId }, { projection: { logoDataUrl: 1, name: 1 } }));
+    if (previousLogo?.logoDataUrl) {
+      await trashClearedValue(db, context, {
+        kind: "companyLogo",
+        label: previousLogo.name ?? "",
+        collection: companies.collectionName,
+        docId: companyId,
+        field: "logoDataUrl",
+        previous: previousLogo.logoDataUrl,
+      });
+    }
+  }
+
   await companies.updateOne({ _id: companyId }, { $set });
 
   return {
@@ -4648,6 +5048,23 @@ export async function updateCompanyMemberReportSignatureByCompanyAdmin(request: 
   const raw = parsed.data.valuationReportSignatureDataUrl;
   const url = raw === "" || raw === null ? null : raw;
   const now = new Date();
+
+  if (url === null && isMvProductRequest(request)) {
+    const target = await users.findOne(
+      { _id: targetOid },
+      { projection: { username: 1, valuationReportDisplayName: 1, valuationReportSignatureDataUrl: 1 } },
+    );
+    if (target?.valuationReportSignatureDataUrl) {
+      await trashClearedValue(db, context, {
+        kind: "userSignature",
+        label: target.valuationReportDisplayName?.trim() || target.username,
+        collection: users.collectionName,
+        docId: targetOid,
+        field: "valuationReportSignatureDataUrl",
+        previous: target.valuationReportSignatureDataUrl,
+      });
+    }
+  }
 
   const result = await users.updateOne(
     { _id: targetOid },
@@ -4863,6 +5280,18 @@ export async function updateCompanyReportOnlySignatorySignature(
   const raw = parsed.data.signatureImageDataUrl;
   const url = raw === "" || raw === null ? null : raw;
   const nowIso = new Date().toISOString();
+  if (url === null && existing[index]!.signatureImageDataUrl && isMvProductRequest(request)) {
+    await trashClearedValue(db, context, {
+      kind: "signatorySignature",
+      label: existing[index]!.name ?? "",
+      collection: companies.collectionName,
+      docId: companyId,
+      arrayField: "reportOnlySignatories",
+      itemId: id,
+      field: "signatureImageDataUrl",
+      previous: existing[index]!.signatureImageDataUrl,
+    });
+  }
   const nextRows = [...existing];
   nextRows[index] = {
     ...existing[index]!,
@@ -4905,6 +5334,20 @@ export async function deleteCompanyReportOnlySignatory(request: Request, signato
   const nextRows = existing.filter((row) => row.id !== id);
   if (nextRows.length === existing.length) {
     throw new HttpError(404, "not_found", "Report preparer not found.");
+  }
+
+  if (isMvProductRequest(request)) {
+    // نقل معدّ التقرير (مع توقيعه) إلى سلة المحذوفات ليعود إلى ترتيبه نفسه.
+    await trashEmbeddedRemovals(
+      db,
+      mvTrashActorFromContext(context),
+      { collection: companies.collectionName, docId: companyId },
+      diffRemovedEmbeddedItems(
+        { reportOnlySignatories: existing },
+        { reportOnlySignatories: nextRows },
+        [{ field: "reportOnlySignatories", kind: "reportSignatory", labelKeys: ["name", "displayName", "jobTitle"] }],
+      ),
+    );
   }
 
   await companies.updateOne(
@@ -5325,11 +5768,28 @@ export async function deleteCompanyUserByCompanyAdmin(request: Request, userId: 
   }
 
   const productId = readProductIdFromRequest(request);
+  // الحذف من داخل نظام تقييم الآلات والمعدات ينقل المستخدم إلى سلة المحذوفات.
+  const trashTarget = productId === "machine-valuation" ? await users.findOne({ _id: memberOid }) : null;
+  const trashLabel = trashTarget
+    ? trashTarget.valuationReportDisplayName?.trim() || trashTarget.username
+    : "";
   if (productId) {
     const company = await companies.findOne({ _id: companyOid });
     const currentProductIds = membershipProductIds(link, company);
     const remainingProductIds = currentProductIds.filter((id) => id !== productId);
     if (remainingProductIds.length > 0) {
+      if (trashTarget) {
+        await createMvTrashEntry(db, mvTrashActorFromContext(context), {
+          kind: "companyUser",
+          label: trashLabel,
+          data: {
+            mode: "unlinkProduct",
+            collection: userCompanyMemberships.collectionName,
+            membershipId: link._id,
+            productId,
+          },
+        });
+      }
       await userCompanyMemberships.updateOne(
         { _id: link._id },
         { $set: { productIds: remainingProductIds, updatedAt: new Date() } },
@@ -5361,6 +5821,22 @@ export async function deleteCompanyUserByCompanyAdmin(request: Request, userId: 
     }
   }
 
+  if (trashTarget) {
+    // العضوية — ومعها الحساب وملفه إن كانت عضويته الوحيدة — تُحفظ لتعود كما كانت.
+    const otherMemberships = await userCompanyMemberships.countDocuments({ userId: memberOid, _id: { $ne: link._id } });
+    const removesAccount = otherMemberships === 0 && trashTarget.role !== "super_admin";
+    const profile = removesAccount ? await userProfiles.findOne({ userId: memberOid }) : null;
+    await createMvTrashEntry(db, mvTrashActorFromContext(context), {
+      kind: "companyUser",
+      label: trashLabel,
+      data: { mode: "delete", userId: memberOid },
+      docs: [
+        { collection: userCompanyMemberships.collectionName, doc: link },
+        ...(removesAccount ? [{ collection: users.collectionName, doc: trashTarget }] : []),
+        ...(profile ? [{ collection: userProfiles.collectionName, doc: profile }] : []),
+      ],
+    });
+  }
   await userCompanyMemberships.deleteOne({ _id: link._id });
   const remaining = await userCompanyMemberships.countDocuments({ userId: memberOid });
   if (remaining === 0) {
@@ -7209,4 +7685,138 @@ export async function submitTrackingActions(request: Request, body: unknown) {
       guestAccess,
     },
   };
+}
+
+/* ───────── سلة محذوفات نظام تقييم الآلات والمعدات: إعدادات الشركة ───────── */
+
+/**
+ * مصفوفات إعدادات التقرير التي يُعد اختفاء عنصر منها عند الحفظ «حذفاً» ينتقل
+ * إلى سلة المحذوفات ويُستعاد إلى موضعه (النموذج ← القسم ← الحقل…).
+ */
+const COMPANY_REPORT_DEFAULTS_TRASH_SPECS: MvEmbeddedSpec[] = [
+  {
+    field: "reportDefaults.reportDataModels", kind: "reportDataModel", labelKeys: ["name"],
+    children: [{
+      field: "sections", kind: "reportDataModelSection", labelKeys: ["title"],
+      children: [{ field: "fields", kind: "reportDataModelField", labelKeys: ["label"] }],
+    }],
+  },
+  {
+    field: "reportDefaults.reportSectionModels", kind: "reportSectionModel", labelKeys: ["name"],
+    children: [{
+      field: "sections", kind: "reportSectionModelSection", labelKeys: ["title"],
+      children: [{ field: "items", kind: "reportSectionModelItem", labelKeys: ["title"] }],
+    }],
+  },
+  { field: "reportDefaults.wordTemplates", kind: "wordTemplate", labelKeys: ["name", "fileName"] },
+  { field: "reportDefaults.pptxTemplates", kind: "pptxTemplate", labelKeys: ["name", "fileName"] },
+  {
+    field: "reportDefaults.letterhead.customTemplates", kind: "systemTemplate", labelKeys: ["name"],
+    children: [
+      { field: "canvasElements", kind: "systemTemplateElement", labelKeys: ["name"] },
+      { field: "summaryTable.fields", kind: "systemTemplateSummaryField", labelKeys: ["label"] },
+    ],
+  },
+];
+
+/** عند الحذف النهائي لقالب Word/PowerPoint يُتلف ملفه ما لم يعد قالب حي يشير إليه. */
+function registerCompanyTemplateTrashKind(trashKind: string, kind: CompanyReportTemplateStorageKind) {
+  registerMvTrashKind(trashKind, {
+    purge: async (db, entry, payload) => {
+      if (!entry.companyId) return;
+      const listKey = kind === "word" ? "wordTemplates" : "pptxTemplates";
+      const item = payload.find((row) => row.role === "item")?.doc;
+      const company = await getAuthCollections(db).companies
+        .findOne({ _id: entry.companyId }, { projection: { reportDefaults: 1 } });
+      const live = companyReportTemplateReferences(company?.reportDefaults, kind);
+      for (const reference of companyReportTemplateReferences({ [listKey]: [item] }, kind)) {
+        if (reference.gridFsFileId && !live.some((row) => row.gridFsFileId === reference.gridFsFileId)) {
+          await deleteOwnedCompanyReportTemplateBlob(kind, entry.companyId.toString(), reference.gridFsFileId)
+            .catch(() => undefined);
+        }
+        if (!reference.fileUrl || live.some((row) => row.fileUrl === reference.fileUrl)) continue;
+        const local = ownCompanyReportTemplateLocalPath(
+          entry.companyId.toString(),
+          reference.fileUrl,
+          COMPANY_REPORT_TEMPLATE_STORAGE[kind].extension,
+        );
+        if (local) await rm(local.filePath, { force: true }).catch(() => undefined);
+      }
+    },
+  });
+}
+registerCompanyTemplateTrashKind("wordTemplate", "word");
+registerCompanyTemplateTrashKind("pptxTemplate", "pptx");
+
+/* مستخدم فُصل عن نظام الآلات والمعدات فقط (بقي في أنظمة أخرى) يعود إليه بإضافة النظام لعضويته. */
+registerMvTrashKind("companyUser", {
+  beforeRestore: async (db, entry) => {
+    if (entry.data.mode !== "unlinkProduct") return;
+    const exists = await db.collection(String(entry.data.collection))
+      .countDocuments({ _id: entry.data.membershipId as ObjectId }, { limit: 1 });
+    if (!exists) throw new HttpError(400, "not_found", "عضوية هذا المستخدم في الشركة لم تعد موجودة.");
+  },
+  restore: async (db, entry) => {
+    if (entry.data.mode !== "unlinkProduct") return;
+    await db.collection(String(entry.data.collection)).updateOne(
+      { _id: entry.data.membershipId as ObjectId },
+      { $addToSet: { productIds: String(entry.data.productId) }, $set: { updatedAt: new Date() } },
+    );
+  },
+});
+
+/* قيمة مفردة أُفرغت بزر حذف (شعار، توقيع): تُحفظ في السلة وتعود إن كان موضعها ما زال فارغاً. */
+async function trashClearedValue(
+  db: Db,
+  context: Parameters<typeof mvTrashActorFromContext>[0],
+  input: {
+    kind: string;
+    label: string;
+    collection: string;
+    docId: ObjectId;
+    field: string;
+    /** القيمة داخل عنصر مصفوفة: اسم المصفوفة ومعرّف العنصر. */
+    arrayField?: string;
+    itemId?: string;
+    previous: unknown;
+  },
+) {
+  await createMvTrashEntry(db, mvTrashActorFromContext(context), {
+    kind: input.kind,
+    label: input.label,
+    data: {
+      collection: input.collection,
+      docId: input.docId,
+      field: input.field,
+      arrayField: input.arrayField ?? null,
+      itemId: input.itemId ?? null,
+    },
+    payload: [{ role: "value", doc: input.previous }],
+  });
+}
+
+for (const kind of ["companyLogo", "userSignature", "signatorySignature"]) {
+  registerMvTrashKind(kind, {
+    restore: async (db, entry, payload) => {
+      const previous = payload.find((row) => row.role === "value")?.doc;
+      const collection = db.collection(String(entry.data.collection));
+      const field = String(entry.data.field);
+      const docId = entry.data.docId as ObjectId;
+      const doc = await collection.findOne({ _id: docId });
+      if (!doc) throw new HttpError(400, "parent_missing", "الموضع الأصلي لهذا العنصر لم يعد موجوداً.");
+      const occupied = new HttpError(400, "occupied", "يوجد عنصر حالي في الموضع نفسه. احذفه أولاً ثم أعد المحاولة.");
+      if (entry.data.arrayField) {
+        const arrayField = String(entry.data.arrayField);
+        const list = Array.isArray(doc[arrayField]) ? [...(doc[arrayField] as Array<Record<string, unknown>>)] : [];
+        const index = list.findIndex((row) => row?.id === entry.data.itemId);
+        if (index < 0) throw new HttpError(400, "parent_missing", "العنصر الأب لهذا العنصر محذوف. استعد الأب أولاً ثم أعد المحاولة.");
+        if (list[index]![field]) throw occupied;
+        list[index] = { ...list[index]!, [field]: previous };
+        await collection.updateOne({ _id: docId }, { $set: { [arrayField]: list, updatedAt: new Date() } });
+        return;
+      }
+      if (doc[field]) throw occupied;
+      await collection.updateOne({ _id: docId }, { $set: { [field]: previous, updatedAt: new Date() } });
+    },
+  });
 }

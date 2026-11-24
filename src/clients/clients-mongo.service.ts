@@ -10,6 +10,9 @@ import type { Request } from "express";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, Types, type FilterQuery } from "mongoose";
 import { resolveRequestContext } from "@/server/auth-tracking/context";
+import { ObjectId } from "mongodb";
+import { getMongoDb } from "@/server/mongodb";
+import { createMvTrashEntry, registerMvTrashKind, type MvTrashActor } from "@/machine-valuation/mv-trash";
 import {
   type ClientUpsertFields,
   type FormFieldDoc,
@@ -49,7 +52,33 @@ const DEFAULT_CLIENT_PRODUCT_ID: ClientProductId = "real-estate-valuation";
 type ClientScope = {
   companyId: Types.ObjectId | null;
   productId: ClientProductId;
+  /** من نفّذ الطلب — يُسجَّل مع ما يحذفه في سلة المحذوفات. */
+  actor?: MvTrashActor;
 };
+
+/* عميل فُصل عن نظام الآلات والمعدات (وما زال مرتبطاً بنظام آخر) يعود إليه ببياناته. */
+registerMvTrashKind("client", {
+  beforeRestore: async (db, entry) => {
+    if (entry.data.mode !== "unlink") return;
+    const exists = await db.collection(String(entry.data.collection))
+      .countDocuments({ _id: entry.data.clientId as ObjectId }, { limit: 1 });
+    if (!exists) throw new BadRequestException({ message: "العميل لم يعد موجوداً في النظام." });
+  },
+  restore: async (db, entry) => {
+    if (entry.data.mode !== "unlink") return;
+    const productId = String(entry.data.productId);
+    await db.collection(String(entry.data.collection)).updateOne(
+      { _id: entry.data.clientId as ObjectId },
+      {
+        $addToSet: { productIds: productId },
+        $set: {
+          updatedAt: new Date(),
+          ...(entry.data.systemData ? { [`systemData.${productId}`]: entry.data.systemData } : {}),
+        },
+      },
+    );
+  },
+});
 
 type ClientSystemData = {
   clientTypeId: string;
@@ -380,7 +409,16 @@ export class ClientsMongoService {
         throw new ForbiddenException({ message: "لا تملك صلاحية الوصول إلى هذا المنتج" });
       }
     }
-    return { companyId, productId };
+    return {
+      companyId,
+      productId,
+      actor: {
+        userId: context.user._id.toString(),
+        companyId: companyId ? companyId.toString() : null,
+        isSuperAdmin,
+        userRole: context.user.role,
+      },
+    };
   }
 
   private scopedCompanyFilter(scope: ClientScope) {
@@ -1021,7 +1059,31 @@ export class ClientsMongoService {
     const nextProductIds = productIds.filter(
       (item) => item !== scope.productId,
     );
-    if (productIds.length > 1 && nextProductIds.length > 0) {
+    const unlinkOnly = productIds.length > 1 && nextProductIds.length > 0;
+    // داخل نظام تقييم الآلات والمعدات الحذف ينقل العميل إلى سلة المحذوفات.
+    if (scope.productId === "machine-valuation" && scope.actor) {
+      const db = await getMongoDb();
+      const collection = this.clientModel.collection.name;
+      const stored = await db.collection(collection).findOne({ _id: new ObjectId(id) });
+      if (stored) {
+        await createMvTrashEntry(db, scope.actor, {
+          kind: "client",
+          label: String(stored.name ?? raw.name ?? ""),
+          companyId: scope.companyId ? scope.companyId.toString() : null,
+          data: unlinkOnly
+            ? {
+                mode: "unlink",
+                collection,
+                clientId: stored._id,
+                productId: scope.productId,
+                systemData: (stored.systemData as Record<string, unknown> | undefined)?.[scope.productId] ?? null,
+              }
+            : { mode: "delete" },
+          docs: unlinkOnly ? [] : [{ collection, doc: stored }],
+        });
+      }
+    }
+    if (unlinkOnly) {
       await this.clientModel
         .updateOne(
           { _id: existing._id },

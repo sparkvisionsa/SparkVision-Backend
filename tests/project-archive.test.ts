@@ -82,7 +82,9 @@ test("company admins restore for 30 days, super admins for one year, then projec
     await assert.rejects(service.getProject(projectId.toString(), admin), /Project not found/);
     await assert.rejects(new AssetProjectAccessService().assertProjectAccess(projectId,
       { _id: new ObjectId(), role: "super_admin" } as never));
-    await assert.rejects(service.restoreProject(projectId.toString(), member));
+    // من حذف المشروع يستطيع استعادته من سلة المحذوفات؛ زميله العادي لا يستطيع.
+    const colleague = { ...member, userId: new ObjectId().toString() };
+    await assert.rejects(service.restoreProject(projectId.toString(), colleague), /حذفتها أنت/);
     await assert.rejects(service.restoreProject(projectId.toString(), stranger), /Project not found/);
 
     const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);

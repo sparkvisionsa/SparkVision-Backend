@@ -15,6 +15,14 @@ import {
 } from "@/server/auth-tracking/context";
 import { randomId } from "@/server/auth-tracking/crypto";
 import {
+  createMvTrashEntry,
+  diffRemovedEmbeddedItems,
+  mvTrashActorFromContext,
+  registerMvTrashKind,
+  trashEmbeddedRemovals,
+  type MvEmbeddedSpec,
+} from "@/machine-valuation/mv-trash";
+import {
   ASSET_DESCRIPTIONS_COLLECTION,
   ASSET_DESCRIPTIONS_SINGLETON_ID,
   LEGACY_ASSET_DESCRIPTIONS_COLLECTION,
@@ -404,9 +412,101 @@ async function removeAssetDescriptionMainImage(imageUrl: unknown): Promise<void>
   );
 }
 
-async function removeDescriptionImages(items: AssetDescriptionItem[]): Promise<void> {
-  await Promise.all(items.map((item) => removeAssetDescriptionMainImage(item.mainImageUrl)));
+/* ───────── سلة المحذوفات ───────── */
+
+const CATALOG_TRASH_SPECS: MvEmbeddedSpec[] = [
+  { field: "categories", kind: "assetCategory", labelKeys: ["label"] },
+  { field: "types", kind: "assetType", labelKeys: ["label"] },
+  { field: "names", kind: "assetName", labelKeys: ["label"] },
+  { field: "descriptions", kind: "assetDescription", labelKeys: ["name", "type", "category"] },
+];
+
+/**
+ * ينقل إلى السلة ما حذفه الطلب من القائمة: العنصر المقصود سجلاً أساسياً، وما
+ * يتبعه (أنواع، أسماء، أوصاف) توابع تعود معه. صور الأوصاف تبقى حتى الحذف النهائي.
+ */
+async function trashCatalogRemovals(
+  db: Db,
+  context: RequestContext,
+  next: CatalogDoc,
+  primaryKind: string,
+) {
+  const stored = await collection(db).findOne({ _id: next._id });
+  if (!stored) return;
+  const removals = diffRemovedEmbeddedItems(stored, next, CATALOG_TRASH_SPECS);
+  const primary = removals.find((removal) => removal.kind === primaryKind);
+  if (!primary) return;
+  primary.extras = removals.filter((removal) => removal !== primary);
+  const item = primary.item as Partial<AssetDescriptionItem & AssetDescriptionTypeItem & AssetDescriptionNameItem>;
+  if (primaryKind === "assetDescription") {
+    primary.label = [item.category, item.type, item.name].filter(Boolean).join(" › ") || primary.label;
+  }
+  // آباء العنصر يجب أن يكونوا موجودين عند الاستعادة حتى لا يعود يتيماً.
+  primary.data = {
+    requires: {
+      categories: primaryKind === "assetType" || primaryKind === "assetDescription" ? [item.categoryId] : [],
+      types: primaryKind === "assetName" || primaryKind === "assetDescription" ? [item.typeId] : [],
+      names: primaryKind === "assetDescription" ? [item.nameId] : [],
+    },
+  };
+  const parentLabel = primaryKind === "assetType"
+    ? stored.categories?.find((row) => row.id === item.categoryId)?.label
+    : primaryKind === "assetName"
+      ? stored.types?.find((row) => row.id === item.typeId)?.label
+      : null;
+  await trashEmbeddedRemovals(
+    db,
+    mvTrashActorFromContext(context),
+    { collection: ASSET_DESCRIPTIONS_COLLECTION, docId: next._id, location: parentLabel ?? null },
+    [primary],
+  );
 }
+
+async function assertCatalogParentsExist(db: Db, requires: unknown) {
+  const wanted = (requires ?? {}) as Partial<Record<"categories" | "types" | "names", unknown[]>>;
+  const catalog = await collection(db).findOne({ _id: CATALOG_OBJECT_ID });
+  for (const key of ["categories", "types", "names"] as const) {
+    const present = new Set((catalog?.[key] ?? []).map((row) => row.id));
+    for (const id of wanted[key] ?? []) {
+      if (typeof id === "string" && id && !present.has(id)) {
+        throw new HttpError(400, "parent_missing", "العنصر الأب لهذا العنصر محذوف. استعد الأب أولاً ثم أعد المحاولة.");
+      }
+    }
+  }
+}
+
+function trashedDescriptionImages(payload: Array<{ role: string; doc: unknown }>): unknown[] {
+  return payload.flatMap((row) => {
+    const item = row.role === "item"
+      ? row.doc
+      : row.role === "embeddedExtra" ? (row.doc as { item?: unknown } | null)?.item : null;
+    return item && typeof item === "object" ? [(item as { mainImageUrl?: unknown }).mainImageUrl] : [];
+  });
+}
+
+for (const kind of ["assetCategory", "assetType", "assetName", "assetDescription"]) {
+  registerMvTrashKind(kind, {
+    beforeRestore: (db, entry) => assertCatalogParentsExist(db, entry.data.requires),
+    purge: async (_db, _entry, payload) => {
+      await Promise.all(trashedDescriptionImages(payload).map(removeAssetDescriptionMainImage));
+    },
+  });
+}
+
+registerMvTrashKind("assetDescriptionImage", {
+  restore: async (db, entry) => {
+    const catalog = await collection(db).findOne({ _id: CATALOG_OBJECT_ID });
+    const target = catalog?.descriptions?.find((row) => row.id === entry.data.descriptionId);
+    if (!catalog || !target) throw new HttpError(400, "parent_missing", "وصف الأصل الذي تنتمي إليه الصورة محذوف. استعده أولاً.");
+    if (target.mainImageUrl) throw new HttpError(400, "occupied", "لهذا الوصف صورة حالية. احذفها أولاً لاستعادة الصورة السابقة.");
+    target.mainImageUrl = String(entry.data.imageUrl ?? "") || null;
+    await collection(db).updateOne(
+      { _id: catalog._id },
+      { $set: { descriptions: catalog.descriptions, updatedAt: new Date() } },
+    );
+  },
+  purge: async (_db, entry) => removeAssetDescriptionMainImage(entry.data.imageUrl),
+});
 
 export async function getCompanyAssetDescriptions(request: Request) {
   const context = await resolveRequestContext(request);
@@ -468,13 +568,12 @@ export async function deleteAssetDescriptionCategory(request: Request, categoryI
   const doc = await loadOrCreateCatalog(db, context.company._id);
   if (!findCategory(doc, id)) throw new HttpError(404, "not_found", "الفئة غير موجودة.");
   const typeIds = new Set(doc.types.filter((item) => item.categoryId === id).map((item) => item.id));
-  const removedDescriptions = doc.descriptions.filter((item) => item.categoryId === id);
   doc.categories = doc.categories.filter((item) => item.id !== id);
   doc.types = doc.types.filter((item) => item.categoryId !== id);
   doc.names = doc.names.filter((item) => !typeIds.has(item.typeId));
   doc.descriptions = doc.descriptions.filter((item) => item.categoryId !== id);
+  await trashCatalogRemovals(db, context, doc, "assetCategory");
   const saved = await saveCatalog(db, doc);
-  await removeDescriptionImages(removedDescriptions);
   return { context, payload: toPayload(saved) };
 }
 
@@ -536,12 +635,11 @@ export async function deleteAssetDescriptionType(request: Request, typeId: strin
   const db = await getMongoDb();
   const doc = await loadOrCreateCatalog(db, context.company._id);
   if (!findType(doc, id)) throw new HttpError(404, "not_found", "النوع غير موجود.");
-  const removedDescriptions = doc.descriptions.filter((item) => item.typeId === id);
   doc.types = doc.types.filter((item) => item.id !== id);
   doc.names = doc.names.filter((item) => item.typeId !== id);
   doc.descriptions = doc.descriptions.filter((item) => item.typeId !== id);
+  await trashCatalogRemovals(db, context, doc, "assetType");
   const saved = await saveCatalog(db, doc);
-  await removeDescriptionImages(removedDescriptions);
   return { context, payload: toPayload(saved) };
 }
 
@@ -603,11 +701,10 @@ export async function deleteAssetDescriptionName(request: Request, nameId: strin
   const db = await getMongoDb();
   const doc = await loadOrCreateCatalog(db, context.company._id);
   if (!findName(doc, id)) throw new HttpError(404, "not_found", "اسم الأصل غير موجود.");
-  const removedDescriptions = doc.descriptions.filter((item) => item.nameId === id);
   doc.names = doc.names.filter((item) => item.id !== id);
   doc.descriptions = doc.descriptions.filter((item) => item.nameId !== id);
+  await trashCatalogRemovals(db, context, doc, "assetName");
   const saved = await saveCatalog(db, doc);
-  await removeDescriptionImages(removedDescriptions);
   return { context, payload: toPayload(saved) };
 }
 
@@ -766,8 +863,16 @@ export async function updateAssetDescriptionMainImage(
   current.mainImageUrl = nextUrl;
 
   try {
+    if (previousUrl && !nextUrl) {
+      // حذف الصورة ينقلها إلى سلة المحذوفات؛ ملفها يبقى حتى الحذف النهائي.
+      await createMvTrashEntry(db, mvTrashActorFromContext(context), {
+        kind: "assetDescriptionImage",
+        label: [current.category, current.type, current.name].filter(Boolean).join(" › "),
+        data: { descriptionId: id, imageUrl: previousUrl },
+      });
+    }
     const saved = await saveCatalog(db, doc);
-    if (previousUrl && previousUrl !== nextUrl) {
+    if (previousUrl && nextUrl && previousUrl !== nextUrl) {
       await removeAssetDescriptionMainImage(previousUrl);
     }
     return { context, payload: toPayload(saved) };
@@ -790,7 +895,7 @@ export async function deleteAssetDescription(request: Request, descriptionId: st
     throw new HttpError(404, "not_found", "وصف الأصل غير موجود.");
   }
   doc.descriptions = doc.descriptions.filter((item) => item.id !== id);
+  await trashCatalogRemovals(db, context, doc, "assetDescription");
   const saved = await saveCatalog(db, doc);
-  await removeAssetDescriptionMainImage(removed.mainImageUrl);
   return { context, payload: toPayload(saved) };
 }

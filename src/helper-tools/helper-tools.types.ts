@@ -34,6 +34,9 @@ export type HelperRecordingDoc = {
   hlsKey?: string;
   thumbnailKey?: string;
   processedSize?: number;
+  /** Id of the processing run that currently owns this recording; only that run may publish or fail it. */
+  processingLease?: string;
+  processingLeaseExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -81,6 +84,11 @@ export const HELPER_RECORDINGS_COLLECTION = "helper_screen_recordings";
 export const HELPER_UPLOADS_COLLECTION = "helper_recording_uploads";
 export const HELPER_MULTIPART_UPLOADS_COLLECTION = "helper_recording_multipart_uploads";
 export const HELPER_RECORDINGS_BUCKET = "helper_recordings";
+/**
+ * Bump the suffix whenever the processing protocol changes. A worker process that is still
+ * running older code keeps listening on the old name, so it can never pick up new jobs.
+ */
+export const HELPER_RECORDING_QUEUE = "helper-recording-processing-v2";
 
 export function helperActorKey(actor: HelperActor) {
   return actor.kind === "user"

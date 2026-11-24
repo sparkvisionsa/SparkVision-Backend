@@ -100,9 +100,31 @@ export interface MvReportCustomSection {
   title: string;
 }
 
+/**
+ * The project's own copy of the report-data model it was set up with.
+ * A project keeps working (fields, sections, labels) even after the company
+ * edits or deletes the original model.
+ */
+export interface MvReportDataModelSnapshotField {
+  id: string;
+  label: string;
+  sourceKey: string;
+  type: MvReportCustomFieldType;
+  required: boolean;
+  system?: boolean;
+}
+
+export interface MvReportDataModelSnapshot {
+  id: string;
+  name: string;
+  sections: Array<{ id: string; title: string; fields: MvReportDataModelSnapshotField[] }>;
+}
+
 export interface MvProjectReportData {
   /** Company report-data model selected for this simplified project. */
   reportDataModelId?: string;
+  /** Project-owned copy of the selected report-data model. */
+  reportDataModelSnapshot?: MvReportDataModelSnapshot;
   /** Company report-section model selected for this project's final report. */
   reportSectionModelId?: string;
   reportReference?: string;
