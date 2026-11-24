@@ -23,6 +23,7 @@ import {
   type FormTemplateDoc,
 } from "@/server/models/clientsModule";
 
+import { DefaultValuesService } from "../default-values/default-values.service"; // adjust path
 // ─── serialiser ───────────────────────────────────────────────────────────────
 
 // ─── serialiser ───────────────────────────────────────────────────────────────
@@ -378,6 +379,7 @@ async function buildEnrichedFieldValues(
 
 @Injectable()
 export class TransactionsMongoService {
+  constructor(private readonly defaults: DefaultValuesService) {}
   async listTransactions(
     companyId?: string | null,
     inspectorId?: string | null,
@@ -496,13 +498,24 @@ export class TransactionsMongoService {
       mergedFieldValues,
     );
 
+    const finalAssignmentNumber = await this.defaults.resolveAssignmentNumber(
+      meta.companyId,
+      normalized.assignmentNumber,
+    )
+
+    const resolved = meta.companyId
+      ? await this.defaults.getResolved(meta.companyId)
+      : { transaction: {}, evalData: {} };
+
     const now = new Date();
     const doc: Omit<TransactionDoc, "_id"> = {
       ...normalized,
+      assignmentNumber: finalAssignmentNumber,
       templateId,
       templateFieldValues,
       evalData: {
         ...emptyEvalData(),
+        ...(resolved.evalData as Partial<EvalData>),
         opponentStatements: body.opponentStatements?.trim() ?? "",
       },
       createdByUserId: meta.createdByUserId ?? null,
@@ -565,7 +578,12 @@ export class TransactionsMongoService {
 
     const now = new Date();
     const { status: _ignored, ...evalFields } = evalData;
-    const evalSet = Object.fromEntries(Object.entries(evalFields).map(([k, v]) => [`evalData.${k}`, v]));
+    const sent = new Set(Object.keys((body.evalData as Record<string, unknown>) ?? {}));
+    const evalSet = Object.fromEntries(
+      Object.entries(evalFields)
+        .filter(([k]) => sent.has(k))
+        .map(([k, v]) => [`evalData.${k}`, v]),
+    );
     const row = await db
       .collection<TransactionDoc>(TRANSACTIONS_COLLECTION)
       .findOneAndUpdate(
